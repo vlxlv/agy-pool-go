@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -222,5 +223,129 @@ func TestFindAccountAndNextID(t *testing.T) {
 	next = NextAccountID(pool.Accounts)
 	if next != "acc_4" {
 		t.Fatalf("expected next ID to be acc_4, got %s", next)
+	}
+}
+
+func TestMigrateLegacyPool(t *testing.T) {
+	srcDir := t.TempDir()
+	targetDir := t.TempDir()
+
+	legacyFile := filepath.Join(srcDir, "agy-pool-accounts.json")
+	legacyContent := `{
+  "version": 1,
+  "strategy": "least_used",
+  "active_account_id": "acc_1",
+  "accounts": [
+    {
+      "id": "acc_1",
+      "email": "user1@example.com",
+      "access_token": "token1",
+      "refresh_token": "refresh1",
+      "request_count": 5
+    },
+    {
+      "id": "acc_2",
+      "email": "user2@example.com",
+      "access_token": "token2",
+      "refresh_token": "refresh2",
+      "request_count": 10
+    }
+  ]
+}`
+	if err := os.WriteFile(legacyFile, []byte(legacyContent), 0600); err != nil {
+		t.Fatalf("failed to write legacy file: %v", err)
+	}
+
+	srcHashBefore, err := config.ComputeConfigFileHash(legacyFile)
+	if err != nil {
+		t.Fatalf("failed to compute hash: %v", err)
+	}
+
+	res, err := MigrateLegacyPool(legacyFile, targetDir)
+	if err != nil {
+		t.Fatalf("MigrateLegacyPool failed: %v", err)
+	}
+
+	if res.AccountsCount != 2 {
+		t.Fatalf("expected 2 accounts migrated, got %d", res.AccountsCount)
+	}
+	if res.ActiveAccountID != "acc_1" {
+		t.Fatalf("expected active account acc_1, got %s", res.ActiveAccountID)
+	}
+	if res.Strategy != "least_used" {
+		t.Fatalf("expected strategy least_used, got %s", res.Strategy)
+	}
+
+	// Verify source was completely untouched
+	srcHashAfter, err := config.ComputeConfigFileHash(legacyFile)
+	if err != nil {
+		t.Fatalf("failed to compute source hash after migration: %v", err)
+	}
+	if srcHashBefore != srcHashAfter {
+		t.Fatalf("legacy source file was mutated during migration! before: %s, after: %s", srcHashBefore, srcHashAfter)
+	}
+
+	// Verify target accounts.json exists and loads
+	targetAccounts := filepath.Join(targetDir, "accounts.json")
+	loaded, err := readPoolUnlocked(targetAccounts)
+	if err != nil {
+		t.Fatalf("failed to load migrated target accounts.json: %v", err)
+	}
+	if len(loaded.Accounts) != 2 || loaded.Accounts[0].ID != "acc_1" || loaded.Accounts[1].ID != "acc_2" {
+		t.Fatalf("unexpected migrated accounts in target pool: %+v", loaded.Accounts)
+	}
+
+	// Verify fail-closed guard refuses protected production destination
+	prodDir := config.GetRealProductionGeminiDir()
+	if prodDir != "" {
+		_, err = MigrateLegacyPool(legacyFile, prodDir)
+		if err == nil {
+			t.Fatalf("expected fail-closed error migrating to production dir %s, got nil", prodDir)
+		}
+	}
+}
+
+func TestTargetSchemas(t *testing.T) {
+	acc := &TargetAccountAuthRecord{
+		ID:          "acc_1",
+		Email:       "test@example.com",
+		AccessToken: "ya29.test",
+	}
+	accs := &TargetAccountsFile{
+		Version:  1,
+		Accounts: []*TargetAccountAuthRecord{acc},
+	}
+	data, err := json.Marshal(accs)
+	if err != nil {
+		t.Fatalf("failed to marshal target accounts: %v", err)
+	}
+
+	var parsed TargetAccountsFile
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal target accounts: %v", err)
+	}
+	if len(parsed.Accounts) != 1 || parsed.Accounts[0].Email != "test@example.com" {
+		t.Fatalf("unexpected target accounts data")
+	}
+
+	rt := &TargetRuntimeFile{
+		Version: 1,
+		AccountsRuntime: map[string]*TargetAccountRuntimeRecord{
+			"acc_1": {
+				RequestCount: 42,
+				Status:       "active",
+			},
+		},
+	}
+	rtData, err := json.Marshal(rt)
+	if err != nil {
+		t.Fatalf("failed to marshal target runtime: %v", err)
+	}
+	var parsedRT TargetRuntimeFile
+	if err := json.Unmarshal(rtData, &parsedRT); err != nil {
+		t.Fatalf("failed to unmarshal target runtime: %v", err)
+	}
+	if parsedRT.AccountsRuntime["acc_1"].RequestCount != 42 {
+		t.Fatalf("unexpected runtime request count")
 	}
 }

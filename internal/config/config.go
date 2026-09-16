@@ -1,8 +1,12 @@
 package config
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -198,45 +202,94 @@ func LoadConfigFile(path string) (*StaticConfig, error) {
 		return nil, fmt.Errorf("failed to read config file %q: %w", absPath, err)
 	}
 
-	// Verify no mutable state or directories are in static config
+	// 1. Check for forbidden mutable/state keys with descriptive errors
 	var raw map[string]interface{}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("malformed JSON in config file %q: %w", absPath, err)
 	}
-	for _, forbiddenKey := range []string{"directory", "data_dir", "state_dir", "accounts", "runtime", "quota"} {
-		if _, exists := raw[forbiddenKey]; exists {
-			return nil, fmt.Errorf("config error: %q must not be in static config file (mutable state belongs in -D DIR)", forbiddenKey)
+	forbiddenKeys := []string{
+		"directory", "data_dir", "state_dir", "accounts", "tokens", "quota",
+		"active_account_id", "round_robin cursor", "round_robin_last_account_id",
+		"PID", "pid", "runtime counters", "runtime", "cooldown", "working directory",
+		"working_directory", "cwd",
+	}
+	for _, key := range forbiddenKeys {
+		if _, exists := raw[key]; exists {
+			return nil, fmt.Errorf("config error: forbidden key %q must not be in static config file (mutable state belongs in -D DIR)", key)
 		}
 	}
 
-	cfg := DefaultStaticConfig()
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config %q: %w", absPath, err)
+	// 2. Strict decoding rejecting unknown fields
+	cfg := &StaticConfig{
+		Server: ServerConfig{
+			Listen: "127.0.0.1",
+			Port:   DefaultPort,
+		},
+		Scheduler: SchedulerConfig{
+			Strategy: StrategyMaxQuota,
+		},
+		Logging: LoggingConfig{
+			MaxSizeBytes: DefaultMaxLogBytes,
+			BackupCount:  DefaultBackupLogCount,
+		},
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("config error in %q: %w", absPath, err)
 	}
 
+	// 3. Schema & value validation
 	if cfg.Version != 1 {
 		return nil, fmt.Errorf("unsupported config version %d (expected version 1)", cfg.Version)
 	}
 	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
-		return nil, fmt.Errorf("invalid server port %d", cfg.Server.Port)
+		return nil, fmt.Errorf("invalid server port %d (must be between 1 and 65535)", cfg.Server.Port)
 	}
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = "127.0.0.1"
+	} else if cfg.Server.Listen != "localhost" && net.ParseIP(cfg.Server.Listen) == nil {
+		return nil, fmt.Errorf("invalid server listen address %q", cfg.Server.Listen)
 	}
+
 	switch cfg.Scheduler.Strategy {
 	case StrategyMaxQuota, StrategyLeastUsed, StrategyRoundRobin:
 		// Valid
 	default:
 		return nil, fmt.Errorf("invalid scheduler strategy %q", cfg.Scheduler.Strategy)
 	}
+
 	if cfg.Logging.MaxSizeBytes <= 0 {
-		cfg.Logging.MaxSizeBytes = DefaultMaxLogBytes
+		return nil, fmt.Errorf("invalid logging max_size_bytes %d (must be > 0)", cfg.Logging.MaxSizeBytes)
 	}
-	if cfg.Logging.BackupCount <= 0 {
-		cfg.Logging.BackupCount = DefaultBackupLogCount
+	if cfg.Logging.BackupCount < 0 {
+		return nil, fmt.Errorf("invalid logging backup_count %d (must be >= 0)", cfg.Logging.BackupCount)
+	}
+
+	// 4. Resolve relative native_agy.binary relative to config file directory
+	if cfg.NativeAgy.Binary != nil && *cfg.NativeAgy.Binary != "" {
+		binPath := *cfg.NativeAgy.Binary
+		if !filepath.IsAbs(binPath) {
+			resolved := filepath.Clean(filepath.Join(filepath.Dir(absPath), binPath))
+			cfg.NativeAgy.Binary = &resolved
+		}
 	}
 
 	return cfg, nil
+}
+
+// ComputeConfigFileHash returns the SHA-256 hex digest of the raw config file bytes.
+func ComputeConfigFileHash(path string) (string, error) {
+	absPath, err := filepath.Abs(expandUser(path))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve config path: %w", err)
+	}
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read config file for hashing: %w", err)
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:]), nil
 }
 
 // ResolveDefaultConfigFile checks standard locations for an existing static config file.

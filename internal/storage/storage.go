@@ -258,3 +258,71 @@ func NextAccountID(accounts []*Account) string {
 		number++
 	}
 }
+
+// MigrationResult describes the result of migrating legacy Python state to Go-native state.
+type MigrationResult struct {
+	SourcePath      string `json:"source_path"`
+	TargetFile      string `json:"target_file"`
+	AccountsCount   int    `json:"accounts_count"`
+	ActiveAccountID string `json:"active_account_id,omitempty"`
+	Strategy        string `json:"strategy,omitempty"`
+}
+
+// MigrateLegacyPool reads legacy Python state (e.g. ~/.gemini/agy-pool-accounts.json)
+// as read-only input and converts it into Go-native accounts.json under targetDataDir.
+// The source file is strictly preserved untouched (no deletion, no truncation, no mutation).
+func MigrateLegacyPool(sourcePath, targetDataDir string) (*MigrationResult, error) {
+	if sourcePath == "" {
+		return nil, errors.New("source path is required")
+	}
+	if targetDataDir == "" {
+		return nil, errors.New("target data directory is required")
+	}
+
+	absSource, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid source path %q: %w", sourcePath, err)
+	}
+
+	// 1. Read source state (strictly read-only)
+	sourceData, err := os.ReadFile(absSource)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read legacy pool source %q: %w", absSource, err)
+	}
+
+	var pool Pool
+	if err := json.Unmarshal(sourceData, &pool); err != nil {
+		return nil, fmt.Errorf("corrupt or invalid legacy pool source %q: %w", absSource, err)
+	}
+
+	// 2. Prepare target directory under -D
+	if err := config.AssertSafeWritePath(targetDataDir); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(targetDataDir, "locks"), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create target data directory: %w", err)
+	}
+
+	targetFile := filepath.Join(targetDataDir, "accounts.json")
+	if err := config.AssertSafeWritePath(targetFile); err != nil {
+		return nil, err
+	}
+
+	// 3. Atomically write converted state under targetDataDir
+	if err := AtomicJSONWrite(targetFile, &pool); err != nil {
+		return nil, fmt.Errorf("failed to write target pool file: %w", err)
+	}
+
+	activeID := ""
+	if pool.ActiveAccountID != nil {
+		activeID = *pool.ActiveAccountID
+	}
+
+	return &MigrationResult{
+		SourcePath:      absSource,
+		TargetFile:      targetFile,
+		AccountsCount:   len(pool.Accounts),
+		ActiveAccountID: activeID,
+		Strategy:        pool.Strategy,
+	}, nil
+}

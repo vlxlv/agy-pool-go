@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -162,5 +163,136 @@ func TestDataDirectoryLayout(t *testing.T) {
 	}
 	if GetAccountsFile() != legacyFile {
 		t.Fatalf("expected fallback to legacy accounts file %s, got %s", legacyFile, GetAccountsFile())
+	}
+}
+
+func TestStrictConfigParsingErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cases := []struct {
+		name    string
+		json    string
+		wantErr string
+	}{
+		{
+			name:    "unknown_top_level_field",
+			json:    `{"version": 1, "sever": {"port": 9000}}`,
+			wantErr: "unknown field",
+		},
+		{
+			name:    "unknown_nested_server_field",
+			json:    `{"version": 1, "server": {"listen": "127.0.0.1", "port": 8899, "extra": 1}}`,
+			wantErr: "unknown field",
+		},
+		{
+			name:    "future_version_2",
+			json:    `{"version": 2}`,
+			wantErr: "unsupported config version 2",
+		},
+		{
+			name:    "omitted_version",
+			json:    `{"server": {"port": 8899}}`,
+			wantErr: "unsupported config version 0",
+		},
+		{
+			name:    "invalid_port_high",
+			json:    `{"version": 1, "server": {"port": 70000}}`,
+			wantErr: "invalid server port 70000",
+		},
+		{
+			name:    "invalid_port_zero",
+			json:    `{"version": 1, "server": {"port": 0}}`,
+			wantErr: "invalid server port 0",
+		},
+		{
+			name:    "invalid_listen_ip",
+			json:    `{"version": 1, "server": {"listen": "999.999.999.999", "port": 8899}}`,
+			wantErr: "invalid server listen address",
+		},
+		{
+			name:    "invalid_scheduler_strategy",
+			json:    `{"version": 1, "scheduler": {"strategy": "fastest"}}`,
+			wantErr: "invalid scheduler strategy",
+		},
+		{
+			name:    "invalid_logging_size",
+			json:    `{"version": 1, "logging": {"max_size_bytes": 0}}`,
+			wantErr: "invalid logging max_size_bytes",
+		},
+		{
+			name:    "invalid_logging_backup_negative",
+			json:    `{"version": 1, "logging": {"backup_count": -1}}`,
+			wantErr: "invalid logging backup_count",
+		},
+		{
+			name:    "malformed_json",
+			json:    `{"version": 1, server: bad`,
+			wantErr: "malformed JSON",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(tmpDir, tc.name+".json")
+			if err := os.WriteFile(p, []byte(tc.json), 0644); err != nil {
+				t.Fatalf("failed to write test file: %v", err)
+			}
+			_, err := LoadConfigFile(p)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestRelativeNativeAgyBinaryResolution(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgDir := filepath.Join(tmpDir, "sub", "config")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+
+	cfgPath := filepath.Join(cfgDir, "config.json")
+	content := `{
+  "version": 1,
+  "native_agy": {
+    "binary": "../bin/native-agy"
+  }
+}`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := LoadConfigFile(cfgPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.NativeAgy.Binary == nil {
+		t.Fatalf("expected resolved binary, got nil")
+	}
+
+	expectedPath := filepath.Clean(filepath.Join(tmpDir, "sub", "bin", "native-agy"))
+	if *cfg.NativeAgy.Binary != expectedPath {
+		t.Fatalf("expected binary resolved to %s, got %s", expectedPath, *cfg.NativeAgy.Binary)
+	}
+}
+
+func TestComputeConfigFileHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := filepath.Join(tmpDir, "config.json")
+	data := []byte(`{"version": 1}`)
+	if err := os.WriteFile(p, data, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	hash, err := ComputeConfigFileHash(p)
+	if err != nil {
+		t.Fatalf("ComputeConfigFileHash failed: %v", err)
+	}
+	if len(hash) != 64 {
+		t.Fatalf("expected 64-char hex hash, got %s", hash)
 	}
 }

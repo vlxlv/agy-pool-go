@@ -304,3 +304,60 @@ func (p Pool) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(combined)
 }
+
+// ============================================================================
+// Target Go-Native Architecture State Split Models
+//
+// In the Go-native state layout under -D DIR:
+//   1. accounts.json owns durable identity and authentication credentials.
+//   2. runtime.json owns ephemeral/mutable runtime counters and failover status.
+//   3. quota.json owns rebuildable quota telemetry and reset schedules.
+//
+// During the transitional compatibility phase, Pool remains fully backwards-
+// compatible with Python reference JSON while supporting migration to this split.
+// ============================================================================
+
+// TargetAccountAuthRecord defines durable identity/auth material in accounts.json.
+type TargetAccountAuthRecord struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name,omitempty"`
+	Email        string   `json:"email,omitempty"`
+	AccessToken  string   `json:"access_token,omitempty"`
+	RefreshToken string   `json:"refresh_token,omitempty"`
+	IDToken      string   `json:"id_token,omitempty"`
+	TokenExpiry  *float64 `json:"token_expiry,omitempty"`
+	CreatedAt    *int64   `json:"created_at,omitempty"`
+	UpdatedAt    *int64   `json:"updated_at,omitempty"`
+}
+
+// TargetAccountsFile represents the target accounts.json structure.
+type TargetAccountsFile struct {
+	Version  int                        `json:"version"`
+	Accounts []*TargetAccountAuthRecord `json:"accounts"`
+}
+
+// TargetAccountRuntimeRecord defines mutable non-cache runtime state in runtime.json.
+type TargetAccountRuntimeRecord struct {
+	Status           string   `json:"status,omitempty"`
+	ValidationURL    *string  `json:"validation_url,omitempty"`
+	RateLimitedUntil *float64 `json:"rate_limited_until,omitempty"`
+	RequestCount     int64    `json:"request_count"`
+	GenCount         *int64   `json:"gen_count,omitempty"`
+	ErrorCount       int64    `json:"error_count"`
+	LastUsedAt       *int64   `json:"last_used_at,omitempty"`
+}
+
+// TargetRuntimeFile represents the target runtime.json structure.
+type TargetRuntimeFile struct {
+	Version                 int                                    `json:"version"`
+	ActiveAccountID         *string                                `json:"active_account_id"`
+	RoundRobinLastAccountID *string                                `json:"round_robin_last_account_id,omitempty"`
+	AccountsRuntime         map[string]*TargetAccountRuntimeRecord `json:"accounts"`
+}
+
+// TargetQuotaFile represents the target quota.json structure.
+type TargetQuotaFile struct {
+	Version       int                    `json:"version"`
+	AccountsQuota map[string]*QuotaState `json:"accounts"`
+	UpdatedAt     *int64                 `json:"updated_at,omitempty"`
+}
