@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/vlxlv/agy-pool-go/internal/accounts"
+	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
@@ -35,6 +38,17 @@ type evalCapacityOutput struct {
 	RefreshNeeded bool                `json:"refresh_needed"`
 }
 
+func readStdinJSON(v any) error {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to read stdin: %w", err)
+	}
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("failed to parse input JSON: %w", err)
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -43,14 +57,9 @@ func main() {
 			return
 
 		case "eval-scheduler":
-			data, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to read stdin: %v\n", err)
-				os.Exit(1)
-			}
 			var input evalSchedulerInput
-			if err := json.Unmarshal(data, &input); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to parse input JSON: %v\n", err)
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
 			ordered := scheduler.OrderCandidates(input.Candidates, input.Strategy, input.Pool, input.Now)
@@ -63,14 +72,9 @@ func main() {
 			return
 
 		case "eval-capacity":
-			data, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to read stdin: %v\n", err)
-				os.Exit(1)
-			}
 			var input evalCapacityInput
-			if err := json.Unmarshal(data, &input); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to parse input JSON: %v\n", err)
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
 			capState := quota.ComputeCapacityState(input.Account, input.Now)
@@ -85,10 +89,116 @@ func main() {
 			})
 			fmt.Println(string(out))
 			return
+
+		case "eval-account-target":
+			var input struct {
+				Accounts []*storage.Account `json:"accounts"`
+				Target   string             `json:"target"`
+			}
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			found := accounts.FindAccountByTarget(input.Accounts, input.Target)
+			var foundID *string
+			if found != nil {
+				foundID = &found.ID
+			}
+			out, _ := json.Marshal(map[string]any{"found_id": foundID})
+			fmt.Println(string(out))
+			return
+
+		case "eval-display-name":
+			var input struct {
+				Account *storage.Account `json:"account"`
+			}
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			name := accounts.DisplayAccountName(input.Account)
+			out, _ := json.Marshal(map[string]any{"display_name": name})
+			fmt.Println(string(out))
+			return
+
+		case "eval-jwt":
+			var input struct {
+				JWT string `json:"jwt"`
+			}
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			claims := auth.DecodeJWTPayload(input.JWT)
+			out, _ := json.Marshal(map[string]any{"claims": claims})
+			fmt.Println(string(out))
+			return
+
+		case "eval-error-classifier":
+			var input struct {
+				Status int    `json:"status"`
+				Body   string `json:"body"`
+			}
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			bodyBytes := []byte(input.Body)
+			isVal := auth.IsValidationError(input.Status, bodyBytes)
+			valURL := auth.ExtractValidationURL(bodyBytes)
+			isAuth := auth.IsAuthError(input.Status, bodyBytes)
+			out, _ := json.Marshal(map[string]any{
+				"is_validation":  isVal,
+				"validation_url": valURL,
+				"is_auth_error":  isAuth,
+			})
+			fmt.Println(string(out))
+			return
+
+		case "eval-crypto":
+			var input struct {
+				Action   string                    `json:"action"` // "encrypt" or "decrypt"
+				Data     string                    `json:"data"`
+				Password string                    `json:"password"`
+				Salt     string                    `json:"salt"`
+				Nonce    string                    `json:"nonce"`
+				Bundle   *accounts.EncryptedBundle `json:"bundle"`
+			}
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			if input.Action == "encrypt" {
+				var salt, nonce []byte
+				if input.Salt != "" {
+					salt, _ = base64.StdEncoding.DecodeString(input.Salt)
+				}
+				if input.Nonce != "" {
+					nonce, _ = base64.StdEncoding.DecodeString(input.Nonce)
+				}
+				b, err := accounts.EncryptBundle([]byte(input.Data), input.Password, salt, nonce)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "encrypt error: %v\n", err)
+					os.Exit(1)
+				}
+				out, _ := json.Marshal(map[string]any{"bundle": b})
+				fmt.Println(string(out))
+				return
+			} else if input.Action == "decrypt" {
+				pt, err := accounts.DecryptBundle(input.Bundle, input.Password)
+				if err != nil {
+					out, _ := json.Marshal(map[string]any{"error": err.Error()})
+					fmt.Println(string(out))
+					return
+				}
+				out, _ := json.Marshal(map[string]any{"plaintext": string(pt)})
+				fmt.Println(string(out))
+				return
+			}
 		}
 	}
 
-	fmt.Println("agy-pool-go: Go candidate implementation (Phase G1 Development)")
+	fmt.Println("agy-pool-go: Go candidate implementation (Phase G2 Development)")
 	fmt.Println("Usage: agy-pool <command> [args...]")
-	fmt.Println("Available commands: version, eval-scheduler, eval-capacity")
+	fmt.Println("Available commands: version, eval-scheduler, eval-capacity, eval-account-target, eval-display-name, eval-jwt, eval-error-classifier, eval-crypto")
 }

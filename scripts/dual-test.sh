@@ -50,5 +50,5 @@ python3 "$SCRIPT_DIR/differential_test.py"
 echo -e "\033[32m[✓] Differential test suite passed with 100% parity.\033[0m"
 
 echo -e "\n\033[1;32m======================================================"
-echo -e "         ALL G1 DIFFERENTIAL CHECKS PASSED!           "
+echo -e "      ALL G1 & G2A DIFFERENTIAL CHECKS PASSED!        "
 echo -e "======================================================\033[0m"
