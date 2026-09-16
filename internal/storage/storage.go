@@ -39,8 +39,8 @@ func EnsureDirs() error {
 	return os.MkdirAll(dir, 0o700)
 }
 
-// withFileLock acquires both an in-memory RWMutex and a POSIX flock on the stable sidecar lock file.
-func withFileLock(path string, exclusive bool, fn func() error) error {
+// WithFileLock acquires both an in-memory RWMutex and a POSIX flock on the stable sidecar lock file.
+func WithFileLock(path string, exclusive bool, fn func() error) error {
 	if err := config.AssertSafeWritePath(path); err != nil {
 		return err
 	}
@@ -107,7 +107,8 @@ func readPoolUnlocked(path string) (*Pool, error) {
 	return &pool, nil
 }
 
-func atomicJSONWrite(path string, data any) error {
+// AtomicJSONWrite writes data to a file atomically via temp file with mode 0600 and fsync.
+func AtomicJSONWrite(path string, data any) error {
 	if err := config.AssertSafeWritePath(path); err != nil {
 		return err
 	}
@@ -177,7 +178,7 @@ func LoadPool() (*Pool, error) {
 	lockPath := config.GetLockFile()
 
 	var pool *Pool
-	err := withFileLock(lockPath, false, func() error {
+	err := WithFileLock(lockPath, false, func() error {
 		p, err := readPoolUnlocked(filePath)
 		if err != nil {
 			return err
@@ -205,7 +206,7 @@ func PoolTransaction(mutator func(pool *Pool) error) error {
 	poolMu.Lock()
 	defer poolMu.Unlock()
 
-	return withFileLock(lockPath, true, func() error {
+	return WithFileLock(lockPath, true, func() error {
 		pool, err := readPoolUnlocked(filePath)
 		if err != nil {
 			return err
@@ -215,7 +216,7 @@ func PoolTransaction(mutator func(pool *Pool) error) error {
 			return err
 		}
 
-		return atomicJSONWrite(filePath, pool)
+		return AtomicJSONWrite(filePath, pool)
 	})
 }
 

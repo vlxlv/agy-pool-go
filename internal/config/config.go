@@ -173,6 +173,16 @@ func GetLogFile() string {
 	return filepath.Join(configuredStateDir, "agy-pool.log")
 }
 
+// GetAgyCliDir returns the path to the antigravity-cli directory.
+func GetAgyCliDir() string {
+	return filepath.Join(configuredStateDir, "antigravity-cli")
+}
+
+// GetAgyTokenFile returns the path to the native agy token file.
+func GetAgyTokenFile() string {
+	return filepath.Join(configuredStateDir, "antigravity-cli", "antigravity-oauth-token")
+}
+
 // ConfigureStateDir configures the storage directory with fail-closed safety checks.
 func ConfigureStateDir(dir string) error {
 	abs, err := filepath.Abs(expandUser(dir))
