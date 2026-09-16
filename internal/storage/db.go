@@ -236,6 +236,17 @@ func GetStateDB() (*StateDB, error) {
 		activeStateDBPath = ""
 	}
 
+	if _, err := os.Stat(currentPath); errors.Is(err, os.ErrNotExist) {
+		dataDir := config.GetDataDir()
+		splitAccounts := filepath.Join(dataDir, "accounts.json")
+		legacyAccounts := filepath.Join(dataDir, "agy-pool-accounts.json")
+		if _, err := os.Stat(splitAccounts); err == nil {
+			_, _ = MigrateSplitJSONToDB(dataDir, dataDir)
+		} else if _, err := os.Stat(legacyAccounts); err == nil {
+			_, _ = MigrateLegacyPool(legacyAccounts, dataDir)
+		}
+	}
+
 	sdb, err := OpenStateDB(currentPath)
 	if err != nil {
 		return nil, err

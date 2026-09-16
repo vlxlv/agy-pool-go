@@ -409,8 +409,8 @@ func TestRefreshToken_ConcurrentActiveSwitch(t *testing.T) {
 		<-allowRefreshResponse
 
 		resp := map[string]any{
-			"access_token":  "new-at-acc1",
-			"expires_in":    3600,
+			"access_token": "new-at-acc1",
+			"expires_in":   3600,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
