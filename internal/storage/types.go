@@ -129,6 +129,7 @@ type Account struct {
 	RefreshToken     string      `json:"refresh_token,omitempty"`
 	IDToken          string      `json:"id_token,omitempty"`
 	TokenExpiry      *float64    `json:"token_expiry,omitempty"`
+	CreatedAt        *int64      `json:"created_at,omitempty"`
 	UpdatedAt        *int64      `json:"updated_at,omitempty"`
 	Status           string      `json:"status,omitempty"`
 	ValidationURL    *string     `json:"validation_url,omitempty"`
@@ -183,6 +184,7 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 	delete(raw, "refresh_token")
 	delete(raw, "id_token")
 	delete(raw, "token_expiry")
+	delete(raw, "created_at")
 	delete(raw, "updated_at")
 	delete(raw, "status")
 	delete(raw, "validation_url")
