@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 	_ "modernc.org/sqlite"
@@ -36,8 +37,11 @@ func setupCLITestEnv(t *testing.T) (string, func()) {
 	}
 
 	origExec := ExecHandler
+	origEntrypoint := daemon.EntrypointProvider
+	daemon.EntrypointProvider = func() string { return "/bin/true" }
 
 	cleanup := func() {
+		daemon.EntrypointProvider = origEntrypoint
 		ExecHandler = origExec
 		config.SetNativeAgyDir("")
 		_ = config.ConfigureStateDir(origState)
