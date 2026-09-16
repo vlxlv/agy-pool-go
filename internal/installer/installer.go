@@ -2,6 +2,7 @@ package installer
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 )
 
 const (
@@ -18,49 +20,43 @@ const (
 	AliasBlock = "\n# >>> agy-pool integration >>>\nalias agy='agy-pool run --'\nalias agy-orig='agy-raw'\n# <<< agy-pool integration <<<\n"
 )
 
-// RawScriptContent is the exact standalone shell script for agy-raw matching Python reference.
-const RawScriptContent = `#!/usr/bin/env bash
-# agy-raw: Directly execute original native Antigravity CLI without proxy gateway
-PORT="${AGY_PORT:-8899}"
-case "${CLOUD_CODE_URL:-}" in
-    "http://127.0.0.1:${PORT}"|"http://127.0.0.1:${PORT}/"|"http://localhost:${PORT}"|"http://localhost:${PORT}/")
-        unset CLOUD_CODE_URL
-        ;;
-esac
-
-SELF="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")"
-
-REAL_AGY="${AGY_BIN:-}"
-if [ -n "$REAL_AGY" ] && [ -x "$REAL_AGY" ]; then
-    exec "$REAL_AGY" "$@"
-fi
-
-# Dynamically locate the original agy binary without hardcoding internal paths
-for cand in \
-    "${PREFIX:+${PREFIX}/bin/agy}" \
-    "/data/data/com.termux/files/usr/bin/agy" \
-    "/usr/local/bin/agy" \
-    "/usr/bin/agy" \
-    "$HOME/.local/bin/agy" \
-    "$(type -P agy 2>/dev/null || true)"; do
-    if [ -n "$cand" ] && [ -x "$cand" ]; then
-        cand_real="$(realpath "$cand" 2>/dev/null || readlink -f "$cand" 2>/dev/null || echo "$cand")"
-        if [ "$cand_real" != "$SELF" ]; then
-            exec "$cand" "$@"
-        fi
-    fi
-done
-
-echo "[Error] Could not locate native 'agy' executable in PATH." >&2
-exit 1
+// UserAgyShimContent is the thin POSIX shell shim for user-mode agy integration.
+const UserAgyShimContent = `#!/bin/sh
+# agy: agy-pool integration shim
+CONFIG_FILE="${AGY_CONFIG_FILE:-$HOME/.config/agy-pool/config.json}"
+DATA_DIR="${AGY_DATA_DIR:-$HOME/.local/share/agy-pool}"
+exec agy-pool run -c "$CONFIG_FILE" -D "$DATA_DIR" -- "$@"
 `
 
+// SystemAgyShimContent is the thin POSIX shell shim for system-mode agy integration.
+const SystemAgyShimContent = `#!/bin/sh
+# agy: agy-pool integration shim
+CONFIG_FILE="${AGY_CONFIG_FILE:-/etc/agy-pool/config.json}"
+DATA_DIR="${AGY_DATA_DIR:-/var/lib/agy-pool}"
+exec agy-pool run -c "$CONFIG_FILE" -D "$DATA_DIR" -- "$@"
+`
+
+// AgyRawShimContent is the thin POSIX shell shim invoking agy-pool's raw/direct execution.
+const AgyRawShimContent = `#!/bin/sh
+# agy-raw: agy-pool raw mode shim
+exec agy-pool raw -- "$@"
+`
+
+// Legacy RawScriptContent retained for backwards-compatibility reference.
+const RawScriptContent = AgyRawShimContent
+
 type Options struct {
-	SourceBinary string
-	TargetDir    string
-	Prefix       string
-	HomeDir      string
-	SkipShellRC  bool
+	SourceBinary  string
+	TargetDir     string
+	Prefix        string
+	HomeDir       string
+	IsSystem      bool
+	ConfigDir     string
+	DataDir       string
+	NativeAgyPath string
+	SkipShellRC   bool
+	Stdout        io.Writer
+	Stderr        io.Writer
 }
 
 // DetermineTargetDir resolves the destination bin directory following Python precedence.
@@ -132,6 +128,22 @@ func CopyFile(src, dst string) error {
 
 // Install copies binaries, creates symlinks, and sets up shell aliases.
 func Install(opts Options) error {
+	out := opts.Stdout
+	if out == nil {
+		out = io.Discard
+	}
+
+	// 1. Precondition: discover real native agy
+	nativeAgy := opts.NativeAgyPath
+	if nativeAgy == "" {
+		nativeAgy = diagnostics.FindRealAgyBinary()
+	}
+	fi, err := os.Stat(nativeAgy)
+	if err != nil || fi.IsDir() || (fi.Mode()&0111) == 0 || diagnostics.IsShimOrSelf(nativeAgy) {
+		return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+	}
+	fmt.Fprintf(out, "Found native agy: %s\n", nativeAgy)
+
 	prefix := opts.Prefix
 	if prefix == "" {
 		prefix = os.Getenv("PREFIX")
@@ -143,16 +155,20 @@ func Install(opts Options) error {
 
 	targetDir := opts.TargetDir
 	if targetDir == "" {
-		targetDir = DetermineTargetDir(prefix, home, func() bool {
-			// Probe /usr/local/bin writability
-			testFile := "/usr/local/bin/.agy_write_probe"
-			if f, err := os.OpenFile(testFile, os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-				f.Close()
-				_ = os.Remove(testFile)
-				return true
-			}
-			return false
-		})
+		if opts.IsSystem {
+			targetDir = "/usr/local/bin"
+		} else {
+			targetDir = DetermineTargetDir(prefix, home, func() bool {
+				// Probe /usr/local/bin writability
+				testFile := "/usr/local/bin/.agy_write_probe"
+				if f, err := os.OpenFile(testFile, os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+					f.Close()
+					_ = os.Remove(testFile)
+					return true
+				}
+				return false
+			})
+		}
 	}
 
 	if err := AssertSafeInstallTarget(targetDir); err != nil {
@@ -163,7 +179,7 @@ func Install(opts Options) error {
 		return fmt.Errorf("failed to create target directory %s: %w", targetDir, err)
 	}
 
-	// 1. Install agy-pool binary
+	// 2. Install agy-pool binary
 	dstPool := filepath.Join(targetDir, "agy-pool")
 	if opts.SourceBinary != "" {
 		if err := CopyFile(opts.SourceBinary, dstPool); err != nil {
@@ -171,38 +187,52 @@ func Install(opts Options) error {
 		}
 	}
 
-	// 2. Install agy-raw script
+	// 3. Install thin agy shim
+	dstAgy := filepath.Join(targetDir, "agy")
+	agyContent := UserAgyShimContent
+	if opts.IsSystem {
+		agyContent = SystemAgyShimContent
+	}
+	if err := os.WriteFile(dstAgy, []byte(agyContent), 0755); err != nil {
+		return fmt.Errorf("failed to write agy shim: %w", err)
+	}
+
+	// 4. Install thin agy-raw shim
 	dstRaw := filepath.Join(targetDir, "agy-raw")
-	if err := os.WriteFile(dstRaw, []byte(RawScriptContent), 0755); err != nil {
+	if err := os.WriteFile(dstRaw, []byte(AgyRawShimContent), 0755); err != nil {
 		return fmt.Errorf("failed to write agy-raw script: %w", err)
 	}
 
-	// 3. Install agy-orig symlink
+	// 5. Install agy-orig symlink
 	dstOrig := filepath.Join(targetDir, "agy-orig")
 	_ = os.Remove(dstOrig)
-	if err := os.Symlink(dstRaw, dstOrig); err != nil {
-		return fmt.Errorf("failed to symlink agy-orig to agy-raw: %w", err)
+	if err := os.Symlink("agy-raw", dstOrig); err != nil {
+		_ = os.WriteFile(dstOrig, []byte(AgyRawShimContent), 0755)
 	}
 
-	// 4. Configure Shell RC
-	if !opts.SkipShellRC && home != "" {
-		shellFiles := []string{
-			filepath.Join(home, ".bashrc"),
-			filepath.Join(home, ".zshrc"),
+	// 6. Initialize default config and data directory layout
+	configDir := opts.ConfigDir
+	dataDir := opts.DataDir
+	if opts.IsSystem {
+		if configDir == "" {
+			configDir = "/etc/agy-pool"
 		}
-		for _, rc := range shellFiles {
-			if _, err := os.Stat(rc); err == nil {
-				_ = AppendAliasIfMissing(rc)
-			}
+		if dataDir == "" {
+			dataDir = "/var/lib/agy-pool"
+		}
+	} else if home != "" {
+		if configDir == "" {
+			configDir = filepath.Join(home, ".config", "agy-pool")
+		}
+		if dataDir == "" {
+			dataDir = filepath.Join(home, ".local", "share", "agy-pool")
 		}
 	}
 
-	// 5. Initialize user-local config and data directory layout
-	if home != "" {
-		userConfigDir := filepath.Join(home, ".config", "agy-pool")
-		userConfigFile := filepath.Join(userConfigDir, "config.json")
-		if _, err := os.Stat(userConfigFile); os.IsNotExist(err) {
-			_ = os.MkdirAll(userConfigDir, 0755)
+	if configDir != "" {
+		_ = os.MkdirAll(configDir, 0755)
+		cfgFile := filepath.Join(configDir, "config.json")
+		if _, err := os.Stat(cfgFile); os.IsNotExist(err) {
 			defaultCfg := `{
   "version": 1,
   "server": {
@@ -221,11 +251,37 @@ func Install(opts Options) error {
   }
 }
 `
-			_ = os.WriteFile(userConfigFile, []byte(defaultCfg), 0644)
+			_ = os.WriteFile(cfgFile, []byte(defaultCfg), 0644)
 		}
+	}
 
-		userDataDir := filepath.Join(home, ".local", "share", "agy-pool")
-		_ = os.MkdirAll(filepath.Join(userDataDir, "locks"), 0700)
+	if dataDir != "" {
+		_ = os.MkdirAll(filepath.Join(dataDir, "locks"), 0700)
+	}
+
+	// 7. Check if targetDir is in PATH
+	isOnPath := false
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if filepath.Clean(p) == filepath.Clean(targetDir) {
+			isOnPath = true
+			break
+		}
+	}
+	if !isOnPath {
+		fmt.Fprintf(out, "Note: %s is not in your PATH. Add it to your PATH to run 'agy' directly.\n", targetDir)
+	}
+
+	// 8. Configure Shell RC only if explicitly not skipped
+	if !opts.SkipShellRC && home != "" {
+		shellFiles := []string{
+			filepath.Join(home, ".bashrc"),
+			filepath.Join(home, ".zshrc"),
+		}
+		for _, rc := range shellFiles {
+			if _, err := os.Stat(rc); err == nil {
+				_ = AppendAliasIfMissing(rc)
+			}
+		}
 	}
 
 	return nil
@@ -319,6 +375,18 @@ func Uninstall(opts Options) error {
 		_ = os.Remove(filepath.Join(targetDir, name))
 		if home != "" {
 			_ = os.Remove(filepath.Join(home, ".local", "bin", name))
+		}
+	}
+
+	// 2. Remove agy shim ONLY if it is an agy-pool shim (never delete native agy!)
+	agyPath := filepath.Join(targetDir, "agy")
+	if diagnostics.IsShimOrSelf(agyPath) {
+		_ = os.Remove(agyPath)
+	}
+	if home != "" {
+		userAgy := filepath.Join(home, ".local", "bin", "agy")
+		if diagnostics.IsShimOrSelf(userAgy) {
+			_ = os.Remove(userAgy)
 		}
 	}
 

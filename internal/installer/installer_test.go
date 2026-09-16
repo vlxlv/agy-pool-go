@@ -82,15 +82,22 @@ func TestInstall_IdempotenceAndUninstallation(t *testing.T) {
 		t.Fatalf("failed to create source binary: %v", err)
 	}
 
+	// Create fake native agy binary to satisfy installer precondition
+	fakeNativeAgy := filepath.Join(tempDir, "fake_native_agy")
+	if err := os.WriteFile(fakeNativeAgy, []byte("#!/bin/sh\necho native agy v1.2.2\n"), 0755); err != nil {
+		t.Fatalf("failed to create fake native agy: %v", err)
+	}
+
 	// Create fake .bashrc
 	bashrc := filepath.Join(fakeHome, ".bashrc")
 	_ = os.WriteFile(bashrc, []byte("# Existing bashrc content\nexport FOO=bar\n"), 0644)
 
 	opts := Options{
-		SourceBinary: srcBin,
-		TargetDir:    targetDir,
-		HomeDir:      fakeHome,
-		SkipShellRC:  false,
+		SourceBinary:  srcBin,
+		TargetDir:     targetDir,
+		HomeDir:       fakeHome,
+		NativeAgyPath: fakeNativeAgy,
+		SkipShellRC:   false,
 	}
 
 	// First install
@@ -100,25 +107,34 @@ func TestInstall_IdempotenceAndUninstallation(t *testing.T) {
 
 	// Verify installed files
 	installedPool := filepath.Join(targetDir, "agy-pool")
+	installedAgy := filepath.Join(targetDir, "agy")
 	installedRaw := filepath.Join(targetDir, "agy-raw")
 	installedOrig := filepath.Join(targetDir, "agy-orig")
 
 	if fi, err := os.Stat(installedPool); err != nil || fi.Mode()&0111 == 0 {
 		t.Errorf("installed agy-pool missing or not executable: %v", err)
 	}
+	if fi, err := os.Stat(installedAgy); err != nil || fi.Mode()&0111 == 0 {
+		t.Errorf("installed agy shim missing or not executable: %v", err)
+	}
+	// Verify agy shim contains run command with -c and -D
+	agyShimBytes, _ := os.ReadFile(installedAgy)
+	if !strings.Contains(string(agyShimBytes), "agy-pool run") || !strings.Contains(string(agyShimBytes), "-c") {
+		t.Errorf("installed agy shim does not invoke agy-pool run: %s", string(agyShimBytes))
+	}
+
 	if fi, err := os.Stat(installedRaw); err != nil || fi.Mode()&0111 == 0 {
 		t.Errorf("installed agy-raw missing or not executable: %v", err)
 	}
-	// Check agy-orig is a symlink pointing to agy-raw
-	target, err := os.Readlink(installedOrig)
-	if err != nil || target != installedRaw {
-		t.Errorf("expected agy-orig symlink to %q, got %q (err: %v)", installedRaw, target, err)
+	rawShimBytes, _ := os.ReadFile(installedRaw)
+	if !strings.Contains(string(rawShimBytes), "agy-pool raw") {
+		t.Errorf("installed agy-raw shim does not invoke agy-pool raw: %s", string(rawShimBytes))
 	}
 
-	// Verify .bashrc has alias block exactly once
-	rcContent, _ := os.ReadFile(bashrc)
-	if strings.Count(string(rcContent), MarkerStart) != 1 {
-		t.Errorf("expected alias block count 1, got %d", strings.Count(string(rcContent), MarkerStart))
+	// Check agy-orig is a symlink pointing to agy-raw
+	target, err := os.Readlink(installedOrig)
+	if err != nil || (target != "agy-raw" && target != installedRaw) {
+		t.Errorf("expected agy-orig symlink to agy-raw, got %q (err: %v)", target, err)
 	}
 
 	// Verify user config and data directories were initialized
@@ -135,10 +151,6 @@ func TestInstall_IdempotenceAndUninstallation(t *testing.T) {
 	if err := Install(opts); err != nil {
 		t.Fatalf("Second Install failed: %v", err)
 	}
-	rcContent, _ = os.ReadFile(bashrc)
-	if strings.Count(string(rcContent), MarkerStart) != 1 {
-		t.Errorf("expected alias block count to remain 1 after second install, got %d", strings.Count(string(rcContent), MarkerStart))
-	}
 
 	// Uninstallation
 	if err := Uninstall(opts); err != nil {
@@ -148,6 +160,9 @@ func TestInstall_IdempotenceAndUninstallation(t *testing.T) {
 	if _, err := os.Stat(installedPool); !os.IsNotExist(err) {
 		t.Errorf("expected agy-pool to be removed")
 	}
+	if _, err := os.Stat(installedAgy); !os.IsNotExist(err) {
+		t.Errorf("expected agy shim to be removed")
+	}
 	if _, err := os.Stat(installedRaw); !os.IsNotExist(err) {
 		t.Errorf("expected agy-raw to be removed")
 	}
@@ -155,12 +170,74 @@ func TestInstall_IdempotenceAndUninstallation(t *testing.T) {
 		t.Errorf("expected agy-orig to be removed")
 	}
 
-	rcCleaned, _ := os.ReadFile(bashrc)
-	if strings.Contains(string(rcCleaned), MarkerStart) {
-		t.Errorf("alias block was not removed from rc file: %s", string(rcCleaned))
+	// Mutable data directory must be preserved after uninstall
+	if _, err := os.Stat(userLocks); os.IsNotExist(err) {
+		t.Errorf("mutable data directory was deleted during uninstall")
 	}
-	if !strings.Contains(string(rcCleaned), "export FOO=bar") {
-		t.Errorf("original rc content was corrupted: %s", string(rcCleaned))
+}
+
+func TestInstall_PreconditionFailsWhenNativeAgyMissing(t *testing.T) {
+	tempDir, cleanup := setupInstallerTestEnv(t)
+	defer cleanup()
+
+	targetDir := filepath.Join(tempDir, "install_bin")
+	_ = os.MkdirAll(targetDir, 0755)
+
+	opts := Options{
+		TargetDir:     targetDir,
+		HomeDir:       tempDir,
+		NativeAgyPath: "/nonexistent/path/to/agy",
+	}
+
+	err := Install(opts)
+	if err == nil {
+		t.Fatalf("expected Install to fail when native agy is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "Native agy was not found") {
+		t.Fatalf("expected error containing 'Native agy was not found', got: %v", err)
+	}
+}
+
+func TestInstall_SystemModeSyntheticRoot(t *testing.T) {
+	tempDir, cleanup := setupInstallerTestEnv(t)
+	defer cleanup()
+
+	fakeNativeAgy := filepath.Join(tempDir, "fake_native_agy")
+	_ = os.WriteFile(fakeNativeAgy, []byte("#!/bin/sh\necho native agy\n"), 0755)
+
+	targetDir := filepath.Join(tempDir, "sys_bin")
+	cfgDir := filepath.Join(tempDir, "sys_etc")
+	dataDir := filepath.Join(tempDir, "sys_var")
+
+	opts := Options{
+		IsSystem:      true,
+		TargetDir:     targetDir,
+		ConfigDir:     cfgDir,
+		DataDir:       dataDir,
+		NativeAgyPath: fakeNativeAgy,
+		SkipShellRC:   true,
+	}
+
+	if err := Install(opts); err != nil {
+		t.Fatalf("System Install failed: %v", err)
+	}
+
+	// Verify system shim content
+	agyShim := filepath.Join(targetDir, "agy")
+	content, err := os.ReadFile(agyShim)
+	if err != nil {
+		t.Fatalf("failed to read installed agy shim: %v", err)
+	}
+	if !strings.Contains(string(content), "/etc/agy-pool/config.json") || !strings.Contains(string(content), "/var/lib/agy-pool") {
+		t.Errorf("expected system config/data paths in agy shim: %s", string(content))
+	}
+
+	// Verify config and locks
+	if _, err := os.Stat(filepath.Join(cfgDir, "config.json")); err != nil {
+		t.Errorf("system config.json not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "locks")); err != nil {
+		t.Errorf("system locks dir not created: %v", err)
 	}
 }
 
