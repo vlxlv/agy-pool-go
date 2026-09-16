@@ -467,7 +467,7 @@ func RunDoctor(out io.Writer) bool {
 	}
 
 	// 6. Session Database
-	dbPath := filepath.Join(config.GetAgyCliDir(), "conversation_summaries.db")
+	dbPath := config.GetConversationDBFile()
 	if _, err := os.Stat(dbPath); err == nil {
 		count := 0
 		db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro", dbPath))

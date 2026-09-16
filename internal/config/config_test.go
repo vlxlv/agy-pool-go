@@ -296,3 +296,54 @@ func TestComputeConfigFileHash(t *testing.T) {
 		t.Fatalf("expected 64-char hex hash, got %s", hash)
 	}
 }
+
+func TestNativeAgyResolverAndReadPathGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	syntheticRoot := filepath.Join(tmpDir, "synthetic_gemini")
+	SetNativeAgyDir(syntheticRoot)
+	defer ResetNativeAgyDir()
+
+	if GetNativeAgyDir() != syntheticRoot {
+		t.Fatalf("expected native agy dir %s, got %s", syntheticRoot, GetNativeAgyDir())
+	}
+	expectedCliDir := filepath.Join(syntheticRoot, "antigravity-cli")
+	if GetAgyCliDir() != expectedCliDir {
+		t.Fatalf("expected cli dir %s, got %s", expectedCliDir, GetAgyCliDir())
+	}
+	expectedToken := filepath.Join(expectedCliDir, "antigravity-oauth-token")
+	if GetAgyTokenFile() != expectedToken {
+		t.Fatalf("expected token file %s, got %s", expectedToken, GetAgyTokenFile())
+	}
+	expectedDB := filepath.Join(expectedCliDir, "conversation_summaries.db")
+	if GetConversationDBFile() != expectedDB {
+		t.Fatalf("expected db file %s, got %s", expectedDB, GetConversationDBFile())
+	}
+	expectedPresence := filepath.Join(expectedCliDir, "presence")
+	if GetPresenceDir() != expectedPresence {
+		t.Fatalf("expected presence dir %s, got %s", expectedPresence, GetPresenceDir())
+	}
+	expectedLock := filepath.Join(expectedPresence, "test_cid.lock")
+	if GetPresenceLockFile("test_cid") != expectedLock {
+		t.Fatalf("expected lock file %s, got %s", expectedLock, GetPresenceLockFile("test_cid"))
+	}
+
+	// Test AssertSafeReadPath in test mode
+	SetTestMode(true)
+	defer SetTestMode(false)
+
+	// Reading synthetic token is permitted
+	if err := AssertSafeReadPath(expectedToken); err != nil {
+		t.Fatalf("expected read of synthetic token to be safe, got: %v", err)
+	}
+
+	// Reading production token in test mode is REJECTED fail-closed
+	prodDir := GetRealProductionGeminiDir()
+	if prodDir != "" {
+		prodToken := filepath.Join(prodDir, "antigravity-cli", "antigravity-oauth-token")
+		if err := AssertSafeReadPath(prodToken); err == nil {
+			t.Fatalf("expected AssertSafeReadPath to reject production token %s in test mode", prodToken)
+		} else if !strings.Contains(err.Error(), "refusing read from protected production path in test mode") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	}
+}

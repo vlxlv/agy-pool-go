@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,11 +17,25 @@ import (
 
 func setupIsolatedTestDir(t *testing.T) string {
 	t.Helper()
+	config.SetTestMode(true)
 	tmp := t.TempDir()
-	if err := config.ConfigureStateDir(tmp); err != nil {
+	dataDir := filepath.Join(tmp, "data")
+	nativeDir := filepath.Join(tmp, "native_gemini")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("failed to create data dir: %v", err)
+	}
+	if err := os.MkdirAll(nativeDir, 0o700); err != nil {
+		t.Fatalf("failed to create native gemini dir: %v", err)
+	}
+
+	if err := config.ConfigureStateDir(dataDir); err != nil {
 		t.Fatalf("failed to configure state dir: %v", err)
 	}
-	return tmp
+	config.SetNativeAgyDir(nativeDir)
+	t.Cleanup(func() {
+		config.SetNativeAgyDir("")
+	})
+	return dataDir
 }
 
 func TestDisplayAccountName(t *testing.T) {
@@ -123,11 +139,32 @@ func TestWriteAndSyncAgyTokenFile(t *testing.T) {
 		IDToken:      "id-tok-789",
 	}
 
+	realProdToken := filepath.Join(config.GetRealProductionGeminiDir(), "antigravity-cli", "antigravity-oauth-token")
+	var realProdMtime time.Time
+	if fi, err := os.Stat(realProdToken); err == nil {
+		realProdMtime = fi.ModTime()
+	}
+
+	// 1. WriteAgyTokenFile writes only to synthetic token path
 	if err := WriteAgyTokenFile(acc); err != nil {
 		t.Fatalf("WriteAgyTokenFile failed: %v", err)
 	}
 
 	tokenFile := config.GetAgyTokenFile()
+	if tokenFile == realProdToken {
+		t.Fatalf("CRITICAL: tokenFile resolved to real production token path: %s", tokenFile)
+	}
+
+	// 2. File mode is user-private (0600)
+	fi, err := os.Stat(tokenFile)
+	if err != nil {
+		t.Fatalf("failed to stat written token file: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode = %o, want 0600", fi.Mode().Perm())
+	}
+
+	// 3. Content matches expected native-agy compatibility schema
 	data, err := os.ReadFile(tokenFile)
 	if err != nil {
 		t.Fatalf("failed to read written token file: %v", err)
@@ -153,7 +190,8 @@ func TestWriteAndSyncAgyTokenFile(t *testing.T) {
 		t.Fatalf("auth_method = %q, want 'consumer'", parsed.AuthMethod)
 	}
 
-	// Test SyncActiveAgyTokenFile
+	// 4. SyncActiveAgyTokenFile updates the synthetic path
+	acc.AccessToken = "synced-at-new"
 	pool := storage.NewEmptyPool()
 	pool.Accounts = append(pool.Accounts, acc)
 	pool.ActiveAccountID = &acc.ID
@@ -164,6 +202,26 @@ func TestWriteAndSyncAgyTokenFile(t *testing.T) {
 	synced, err := SyncActiveAgyTokenFile()
 	if err != nil || !synced {
 		t.Fatalf("SyncActiveAgyTokenFile failed: synced=%v, err=%v", synced, err)
+	}
+
+	updatedData, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("failed to read updated token file: %v", err)
+	}
+	if err := json.Unmarshal(updatedData, &parsed); err != nil {
+		t.Fatalf("failed to parse updated token file: %v", err)
+	}
+	if parsed.Token.AccessToken != "synced-at-new" {
+		t.Fatalf("expected updated access token 'synced-at-new', got %q", parsed.Token.AccessToken)
+	}
+
+	// 5. Real production token path is unchanged
+	if !realProdMtime.IsZero() {
+		if postFi, err := os.Stat(realProdToken); err == nil {
+			if postFi.ModTime() != realProdMtime {
+				t.Fatalf("CRITICAL: real production token file mtime changed during test!")
+			}
+		}
 	}
 }
 
@@ -274,44 +332,61 @@ func TestRenameAccount(t *testing.T) {
 func TestImportCurrent(t *testing.T) {
 	setupIsolatedTestDir(t)
 
-	// No file initially
-	if _, err := ImportCurrent(); err == nil {
-		t.Fatal("expected error when token file missing")
+	// Case A: synthetic token file absent => ImportCurrent returns expected missing-token result
+	if _, err := ImportCurrent(); err == nil || !strings.Contains(err.Error(), "no existing token file found") {
+		t.Fatalf("Case A: expected missing token file error, got: %v", err)
 	}
 
-	// Write mock agy token file
 	tokenDir := config.GetAgyCliDir()
-	_ = os.MkdirAll(tokenDir, 0o700)
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatalf("failed to create token dir: %v", err)
+	}
 	tokenPath := config.GetAgyTokenFile()
 
-	// JWT with email="primary@domain.com"
-	// header: eyJhbGciOiJub25lIn0
-	// payload: eyJlbWFpbCI6ICJwcmltYXJ5QGRvbWFpbi5jb20ifQ
-	mockJWT := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJwcmltYXJ5QGRvbWFpbi5jb20ifQ."
-	tokenPayload := map[string]any{
+	// Case C: synthetic token exists but lacks refresh_token => expected failure
+	invalidPayload := map[string]any{
 		"token": map[string]any{
-			"access_token":  "mock-at-123",
-			"refresh_token": "mock-rf-456",
+			"access_token": "synthetic-at-no-refresh",
 		},
-		"id_token": mockJWT,
+		"auth_method": "consumer",
 	}
-	data, _ := json.Marshal(tokenPayload)
-	_ = os.WriteFile(tokenPath, data, 0o600)
+	invalidData, _ := json.Marshal(invalidPayload)
+	if err := os.WriteFile(tokenPath, invalidData, 0o600); err != nil {
+		t.Fatalf("failed to write invalid token file: %v", err)
+	}
+	if _, err := ImportCurrent(); err == nil || !strings.Contains(err.Error(), "no refresh_token found") {
+		t.Fatalf("Case C: expected no refresh_token error, got: %v", err)
+	}
+
+	// Case B: synthetic token exists with valid synthetic data => import succeeds using only that fixture
+	mockJWT := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJzeW50aGV0aWNfcHJpbWFyeUBleGFtcGxlLmNvbSJ9."
+	validPayload := map[string]any{
+		"token": map[string]any{
+			"access_token":  "synthetic-at-123",
+			"refresh_token": "synthetic-rf-456",
+		},
+		"auth_method": "consumer",
+		"id_token":    mockJWT,
+	}
+	validData, _ := json.Marshal(validPayload)
+	if err := os.WriteFile(tokenPath, validData, 0o600); err != nil {
+		t.Fatalf("failed to write valid token file: %v", err)
+	}
 
 	imported, err := ImportCurrent()
 	if err != nil {
-		t.Fatalf("ImportCurrent failed: %v", err)
+		t.Fatalf("Case B: ImportCurrent failed: %v", err)
 	}
-	if imported.Email != "primary@domain.com" {
-		t.Fatalf("imported email = %q, want 'primary@domain.com'", imported.Email)
+	if imported.Email != "synthetic_primary@example.com" {
+		t.Fatalf("Case B: imported email = %q, want 'synthetic_primary@example.com'", imported.Email)
 	}
-	if imported.RefreshToken != "mock-rf-456" {
-		t.Fatalf("imported refresh_token = %q, want 'mock-rf-456'", imported.RefreshToken)
+	if imported.RefreshToken != "synthetic-rf-456" {
+		t.Fatalf("Case B: imported refresh_token = %q, want 'synthetic-rf-456'", imported.RefreshToken)
 	}
 
-	loaded, _ := storage.LoadPool()
-	if len(loaded.Accounts) != 1 || loaded.Accounts[0].Email != "primary@domain.com" {
-		t.Fatalf("pool not updated with imported account: %+v", loaded.Accounts)
+	loaded, err := storage.LoadPool()
+	if err != nil || len(loaded.Accounts) != 1 || loaded.Accounts[0].Email != "synthetic_primary@example.com" {
+		t.Fatalf("pool not updated with imported account: %+v", loaded)
 	}
 }
 
@@ -399,5 +474,172 @@ func TestVerifyAccount(t *testing.T) {
 	}
 	if accGood.ID != "acc_2" {
 		t.Fatalf("got acc %q, want 'acc_2'", accGood.ID)
+	}
+}
+
+func TestNativeAgyEnvironmentIndependence(t *testing.T) {
+	// Condition 1: with ambient default resolver
+	// Condition 2: with simulated alternate resolver that points to an alternate empty path
+	// Both must behave identically when a synthetic test environment is established.
+	tmp1 := t.TempDir()
+	dataDir1 := filepath.Join(tmp1, "data")
+	nativeDir1 := filepath.Join(tmp1, "native")
+	_ = os.MkdirAll(dataDir1, 0o700)
+	_ = os.MkdirAll(nativeDir1, 0o700)
+	if err := config.ConfigureStateDir(dataDir1); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+	config.SetNativeAgyDir(nativeDir1)
+
+	// 1. Absent token file behavior
+	_, err1 := ImportCurrent()
+	if err1 == nil || !strings.Contains(err1.Error(), "no existing token file found") {
+		t.Fatalf("env1: expected missing token error, got: %v", err1)
+	}
+
+	// 2. Token write and read behavior
+	acc := &storage.Account{
+		ID:           "acc_indep",
+		Email:        "indep@example.com",
+		AccessToken:  "at-indep",
+		RefreshToken: "rf-indep",
+		IDToken:      "id-indep",
+	}
+	if err := WriteAgyTokenFile(acc); err != nil {
+		t.Fatalf("env1: WriteAgyTokenFile failed: %v", err)
+	}
+	tokBytes1, err := os.ReadFile(config.GetAgyTokenFile())
+	if err != nil {
+		t.Fatalf("env1: failed to read token file: %v", err)
+	}
+
+	// Now switch to Condition 2: alternate custom native resolver
+	tmp2 := t.TempDir()
+	dataDir2 := filepath.Join(tmp2, "data")
+	nativeDir2 := filepath.Join(tmp2, "native")
+	_ = os.MkdirAll(dataDir2, 0o700)
+	_ = os.MkdirAll(nativeDir2, 0o700)
+	if err := config.ConfigureStateDir(dataDir2); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+	config.SetNativeAgyDir(nativeDir2)
+
+	// 1. Absent token file behavior
+	_, err2 := ImportCurrent()
+	if err2 == nil || !strings.Contains(err2.Error(), "no existing token file found") {
+		t.Fatalf("env2: expected missing token error, got: %v", err2)
+	}
+
+	// Both errors must be missing-token errors
+	if !strings.Contains(err1.Error(), "no existing token file found") || !strings.Contains(err2.Error(), "no existing token file found") {
+		t.Fatalf("expected both errors to be missing token errors, got %q vs %q", err1.Error(), err2.Error())
+	}
+
+	// 2. Token write behavior
+	if err := WriteAgyTokenFile(acc); err != nil {
+		t.Fatalf("env2: WriteAgyTokenFile failed: %v", err)
+	}
+	tokBytes2, err := os.ReadFile(config.GetAgyTokenFile())
+	if err != nil {
+		t.Fatalf("env2: failed to read token file: %v", err)
+	}
+
+	// Both written files are identical
+	var m1, m2 map[string]any
+	_ = json.Unmarshal(tokBytes1, &m1)
+	_ = json.Unmarshal(tokBytes2, &m2)
+	if m1["auth_method"] != m2["auth_method"] {
+		t.Fatalf("mismatched auth_method between environments")
+	}
+
+	config.SetNativeAgyDir("")
+}
+
+func TestHomeOverrideRegression(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", origHome)
+
+	fakeHome := t.TempDir()
+	os.Setenv("HOME", fakeHome)
+
+	// 1. Real production dir remains independently known from OS user database
+	realProd := config.GetRealProductionGeminiDir()
+	if realProd == "" {
+		t.Skip("no real production dir detected")
+	}
+	if strings.HasPrefix(realProd, fakeHome) {
+		t.Fatalf("real production dir %q was redirected by HOME to fakeHome %q", realProd, fakeHome)
+	}
+
+	// 2. Production guard still protects real production path despite HOME override
+	realToken := filepath.Join(realProd, "antigravity-cli", "antigravity-oauth-token")
+	if err := config.AssertSafeWritePath(realToken); err == nil {
+		t.Fatalf("expected write to %q to be rejected by production guard despite HOME override", realToken)
+	}
+
+	// 3. Synthetic test paths resolve where intended
+	syntheticGemini := filepath.Join(fakeHome, ".gemini")
+	config.SetNativeAgyDir(syntheticGemini)
+	defer config.SetNativeAgyDir("")
+
+	if config.GetNativeAgyDir() != syntheticGemini {
+		t.Fatalf("expected native dir %q, got %q", syntheticGemini, config.GetNativeAgyDir())
+	}
+	expectedTokenFile := filepath.Join(syntheticGemini, "antigravity-cli", "antigravity-oauth-token")
+	if config.GetAgyTokenFile() != expectedTokenFile {
+		t.Fatalf("expected token file %q, got %q", expectedTokenFile, config.GetAgyTokenFile())
+	}
+}
+
+func TestSymlinkToProductionRejected(t *testing.T) {
+	realProd := config.GetRealProductionGeminiDir()
+	if realProd == "" {
+		t.Skip("no real production dir detected")
+	}
+
+	tmpDir := t.TempDir()
+
+	// 1. Direct file symlink pointing to real production token
+	realToken := filepath.Join(realProd, "antigravity-cli", "antigravity-oauth-token")
+	symlinkFile := filepath.Join(tmpDir, "symlink-token")
+	if err := os.Symlink(realToken, symlinkFile); err != nil {
+		t.Fatalf("failed to create file symlink: %v", err)
+	}
+
+	// Fail-closed write rejection
+	if err := config.AssertSafeWritePath(symlinkFile); err == nil {
+		t.Fatalf("expected write to symlink %q targeting production to be rejected", symlinkFile)
+	} else if !strings.Contains(err.Error(), "refusing write to protected production path") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// Fail-closed read rejection in test mode
+	config.SetTestMode(true)
+	if err := config.AssertSafeReadPath(symlinkFile); err == nil {
+		t.Fatalf("expected read from symlink %q targeting production to be rejected in test mode", symlinkFile)
+	} else if !strings.Contains(err.Error(), "refusing read from protected production path in test mode") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// 2. Directory symlink pointing to real production gemini dir
+	symlinkDir := filepath.Join(tmpDir, "symlink-gemini-dir")
+	if err := os.Symlink(realProd, symlinkDir); err != nil {
+		t.Fatalf("failed to create dir symlink: %v", err)
+	}
+	targetInSymlinkDir := filepath.Join(symlinkDir, "antigravity-cli", "antigravity-oauth-token")
+	if err := config.AssertSafeWritePath(targetInSymlinkDir); err == nil {
+		t.Fatalf("expected write through dir symlink %q to be rejected", targetInSymlinkDir)
+	}
+
+	// 3. Path normalization with '..'
+	dotDotPath := filepath.Join(realProd, "..", filepath.Base(realProd), "antigravity-cli", "antigravity-oauth-token")
+	if err := config.AssertSafeWritePath(dotDotPath); err == nil {
+		t.Fatalf("expected write with '..' traversing into production path to be rejected: %s", dotDotPath)
+	}
+
+	// 4. Prefix collision protection (e.g. /home/codex/.gemini_fake must NOT be falsely rejected)
+	fakePrefixPath := realProd + "_fake" + string(os.PathSeparator) + "token"
+	if err := config.AssertSafeWritePath(fakePrefixPath); err != nil {
+		t.Fatalf("expected path with distinct prefix name not to be rejected, got: %v", err)
 	}
 }

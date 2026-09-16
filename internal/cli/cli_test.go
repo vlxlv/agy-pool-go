@@ -30,6 +30,7 @@ func setupCLITestEnv(t *testing.T) (string, func()) {
 	origState := config.GetStateDir()
 	origTestMode := config.IsTestMode()
 	config.SetTestMode(true)
+	config.SetNativeAgyDir(stateDir)
 	if err := config.ConfigureStateDir(stateDir); err != nil {
 		t.Fatalf("ConfigureStateDir failed: %v", err)
 	}
@@ -38,6 +39,7 @@ func setupCLITestEnv(t *testing.T) (string, func()) {
 
 	cleanup := func() {
 		ExecHandler = origExec
+		config.SetNativeAgyDir("")
 		_ = config.ConfigureStateDir(origState)
 		config.SetTestMode(origTestMode)
 		diagnostics.SetAgyBinaryFinder(nil)

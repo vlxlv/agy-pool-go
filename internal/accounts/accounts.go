@@ -127,6 +127,13 @@ func WriteAgyTokenFile(account *storage.Account) error {
 	}
 
 	tokenFile := config.GetAgyTokenFile()
+	if err := config.AssertSafeWritePath(tokenFile); err != nil {
+		return err
+	}
+	lockFile := tokenFile + ".lock"
+	if err := config.AssertSafeWritePath(lockFile); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
 		return fmt.Errorf("failed to create agy-cli directory: %w", err)
 	}
@@ -147,7 +154,6 @@ func WriteAgyTokenFile(account *storage.Account) error {
 		"id_token":    account.IDToken,
 	}
 
-	lockFile := tokenFile + ".lock"
 	return storage.WithFileLock(lockFile, true, func() error {
 		return storage.AtomicJSONWrite(tokenFile, payload)
 	})
@@ -156,7 +162,13 @@ func WriteAgyTokenFile(account *storage.Account) error {
 // SyncActiveAgyTokenFile synchronizes native agy's compatibility token with the current active account.
 func SyncActiveAgyTokenFile() (bool, error) {
 	tokenFile := config.GetAgyTokenFile()
+	if err := config.AssertSafeWritePath(tokenFile); err != nil {
+		return false, err
+	}
 	lockFile := tokenFile + ".lock"
+	if err := config.AssertSafeWritePath(lockFile); err != nil {
+		return false, err
+	}
 
 	var synced bool
 	err := storage.WithFileLock(lockFile, true, func() error {
@@ -353,6 +365,9 @@ func RenameAccount(target, newName string) (*storage.Account, error) {
 // ImportCurrent imports credentials from ~/.gemini/antigravity-cli/antigravity-oauth-token into pool.
 func ImportCurrent() (*storage.Account, error) {
 	tokenFile := config.GetAgyTokenFile()
+	if err := config.AssertSafeReadPath(tokenFile); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(tokenFile)
 	if err != nil {
 		return nil, fmt.Errorf("no existing token file found: %w", err)

@@ -86,7 +86,9 @@ var (
 	activeStaticConfig      = DefaultStaticConfig()
 	activeConfigMu          sync.RWMutex
 	forbiddenWriteDirs      = make(map[string]bool)
+	forbiddenDirsMu         sync.RWMutex
 	testMode                = false
+	testModeMu              sync.RWMutex
 )
 
 func init() {
@@ -406,12 +408,16 @@ func ConfigureDefaultDataDir() error {
 
 // IsTestMode reports whether the runtime is in test mode.
 func IsTestMode() bool {
+	testModeMu.RLock()
+	defer testModeMu.RUnlock()
 	return testMode || os.Getenv("AGY_TEST_MODE") == "1"
 }
 
 // SetTestMode sets or unsets test mode.
 func SetTestMode(enabled bool) {
+	testModeMu.Lock()
 	testMode = enabled
+	testModeMu.Unlock()
 	if enabled {
 		os.Setenv("AGY_TEST_MODE", "1")
 	} else {
@@ -421,7 +427,31 @@ func SetTestMode(enabled bool) {
 
 // GetRealProductionGeminiDir returns the detected real production state directory.
 func GetRealProductionGeminiDir() string {
+	forbiddenDirsMu.RLock()
+	defer forbiddenDirsMu.RUnlock()
 	return realProductionGeminiDir
+}
+
+// SetRealProductionGeminiDir overrides the detected real production directory (for testing safety boundaries).
+func SetRealProductionGeminiDir(dir string) func() {
+	forbiddenDirsMu.Lock()
+	defer forbiddenDirsMu.Unlock()
+	orig := realProductionGeminiDir
+	origForbidden := make(map[string]bool)
+	for k, v := range forbiddenWriteDirs {
+		origForbidden[k] = v
+	}
+
+	realProductionGeminiDir = dir
+	forbiddenWriteDirs[dir] = true
+	forbiddenWriteDirs[filepath.Clean(dir)] = true
+
+	return func() {
+		forbiddenDirsMu.Lock()
+		defer forbiddenDirsMu.Unlock()
+		realProductionGeminiDir = orig
+		forbiddenWriteDirs = origForbidden
+	}
 }
 
 // GetStateDir returns the currently configured state directory.
@@ -488,10 +518,26 @@ func GetSpecificLockFile(name string) string {
 	return filepath.Join(GetDataDir(), "locks", name)
 }
 
-// GetAgyCliDir returns the path to native agy's antigravity-cli directory (under ~/.gemini).
-func GetAgyCliDir() string {
+// NativeAgyResolver resolves paths to native agy resources.
+type NativeAgyResolver interface {
+	Root() string
+	CliDir() string
+	TokenFile() string
+	SessionDB() string
+	PresenceDir() string
+	PresenceLock(cid string) string
+}
+
+type defaultNativeAgyResolver struct {
+	customRoot string
+}
+
+func (r *defaultNativeAgyResolver) Root() string {
+	if r.customRoot != "" {
+		return r.customRoot
+	}
 	if envDir := os.Getenv("AGY_GEMINI_DIR"); envDir != "" {
-		return filepath.Join(envDir, "antigravity-cli")
+		return envDir
 	}
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -499,12 +545,97 @@ func GetAgyCliDir() string {
 			home = u.HomeDir
 		}
 	}
-	return filepath.Join(home, ".gemini", "antigravity-cli")
+	return filepath.Join(home, ".gemini")
 }
 
-// GetAgyTokenFile returns the path to the native agy token file.
+func (r *defaultNativeAgyResolver) CliDir() string {
+	return filepath.Join(r.Root(), "antigravity-cli")
+}
+
+func (r *defaultNativeAgyResolver) TokenFile() string {
+	return filepath.Join(r.CliDir(), "antigravity-oauth-token")
+}
+
+func (r *defaultNativeAgyResolver) SessionDB() string {
+	return filepath.Join(r.CliDir(), "conversation_summaries.db")
+}
+
+func (r *defaultNativeAgyResolver) PresenceDir() string {
+	return filepath.Join(r.CliDir(), "presence")
+}
+
+func (r *defaultNativeAgyResolver) PresenceLock(cid string) string {
+	return filepath.Join(r.PresenceDir(), fmt.Sprintf("%s.lock", cid))
+}
+
+var (
+	nativeAgyMu       sync.RWMutex
+	nativeAgyResolver NativeAgyResolver = &defaultNativeAgyResolver{}
+)
+
+// SetNativeAgyResolver sets a custom resolver for native agy paths.
+func SetNativeAgyResolver(r NativeAgyResolver) {
+	nativeAgyMu.Lock()
+	defer nativeAgyMu.Unlock()
+	if r == nil {
+		nativeAgyResolver = &defaultNativeAgyResolver{}
+	} else {
+		nativeAgyResolver = r
+	}
+}
+
+// SetNativeAgyDir sets an explicit root directory for native agy state (e.g. for synthetic test environments).
+func SetNativeAgyDir(root string) {
+	nativeAgyMu.Lock()
+	defer nativeAgyMu.Unlock()
+	nativeAgyResolver = &defaultNativeAgyResolver{customRoot: root}
+}
+
+// ResetNativeAgyDir resets native agy path resolution to defaults.
+func ResetNativeAgyDir() {
+	SetNativeAgyDir("")
+}
+
+// GetNativeAgyDir returns the active root directory for native agy state.
+func GetNativeAgyDir() string {
+	nativeAgyMu.RLock()
+	defer nativeAgyMu.RUnlock()
+	return nativeAgyResolver.Root()
+}
+
+// GetAgyCliDir returns the path to native agy's antigravity-cli directory (under ~/.gemini or custom root).
+func GetAgyCliDir() string {
+	nativeAgyMu.RLock()
+	defer nativeAgyMu.RUnlock()
+	return nativeAgyResolver.CliDir()
+}
+
+// GetAgyTokenFile returns the path to the native agy compatibility token file.
 func GetAgyTokenFile() string {
-	return filepath.Join(GetAgyCliDir(), "antigravity-oauth-token")
+	nativeAgyMu.RLock()
+	defer nativeAgyMu.RUnlock()
+	return nativeAgyResolver.TokenFile()
+}
+
+// GetConversationDBFile returns the path to the native agy conversation summaries database.
+func GetConversationDBFile() string {
+	nativeAgyMu.RLock()
+	defer nativeAgyMu.RUnlock()
+	return nativeAgyResolver.SessionDB()
+}
+
+// GetPresenceDir returns the path to the native agy presence directory.
+func GetPresenceDir() string {
+	nativeAgyMu.RLock()
+	defer nativeAgyMu.RUnlock()
+	return nativeAgyResolver.PresenceDir()
+}
+
+// GetPresenceLockFile returns the path to a conversation presence lock file.
+func GetPresenceLockFile(cid string) string {
+	nativeAgyMu.RLock()
+	defer nativeAgyMu.RUnlock()
+	return nativeAgyResolver.PresenceLock(cid)
 }
 
 // ConfigureStateDir configures the storage directory with fail-closed safety checks.
@@ -514,6 +645,8 @@ func ConfigureStateDir(dir string) error {
 
 func isProtectedProductionDir(path string) bool {
 	clean := filepath.Clean(path)
+	forbiddenDirsMu.RLock()
+	defer forbiddenDirsMu.RUnlock()
 	for forbidden := range forbiddenWriteDirs {
 		if clean == forbidden || strings.HasPrefix(clean, forbidden+string(os.PathSeparator)) {
 			return true
@@ -541,6 +674,29 @@ func AssertSafeWritePath(path string) error {
 
 	if isProtectedProductionDir(realPath) {
 		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s", realPath)
+	}
+	return nil
+}
+
+// AssertSafeReadPath ensures test code does not accidentally read real production state.
+func AssertSafeReadPath(path string) error {
+	if !IsTestMode() || path == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(expandUser(path))
+	if err != nil {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] failed to resolve read path %q: %w", path, err)
+	}
+
+	realPath := abs
+	if eval, err := filepath.EvalSymlinks(abs); err == nil {
+		realPath = eval
+	} else if parentEval, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		realPath = filepath.Join(parentEval, filepath.Base(abs))
+	}
+
+	if isProtectedProductionDir(realPath) {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing read from protected production path in test mode: %s", realPath)
 	}
 	return nil
 }

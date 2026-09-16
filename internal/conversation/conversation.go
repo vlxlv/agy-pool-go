@@ -66,7 +66,7 @@ func FindLatestConversationForDir(startDir string) (string, string, string, erro
 		}
 	}
 
-	dbPath := filepath.Join(config.GetAgyCliDir(), "conversation_summaries.db")
+	dbPath := config.GetConversationDBFile()
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return "", "", "", nil
 	}
@@ -200,7 +200,7 @@ func ResolveContinueArg(extraArgs []string, errOut io.Writer) []string {
 		return extraArgs
 	}
 
-	lockFile := filepath.Join(config.GetAgyCliDir(), "presence", fmt.Sprintf("%s.lock", cid))
+	lockFile := config.GetPresenceLockFile(cid)
 	isLocked := false
 	if _, statErr := os.Stat(lockFile); statErr == nil {
 		if f, err := os.OpenFile(lockFile, os.O_RDWR, 0); err == nil {
