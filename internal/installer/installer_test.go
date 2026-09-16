@@ -121,6 +121,16 @@ func TestInstall_IdempotenceAndUninstallation(t *testing.T) {
 		t.Errorf("expected alias block count 1, got %d", strings.Count(string(rcContent), MarkerStart))
 	}
 
+	// Verify user config and data directories were initialized
+	userCfg := filepath.Join(fakeHome, ".config", "agy-pool", "config.json")
+	if _, err := os.Stat(userCfg); err != nil {
+		t.Errorf("expected default config file at %s, got %v", userCfg, err)
+	}
+	userLocks := filepath.Join(fakeHome, ".local", "share", "agy-pool", "locks")
+	if fi, err := os.Stat(userLocks); err != nil || !fi.IsDir() {
+		t.Errorf("expected user data locks dir at %s, got %v", userLocks, err)
+	}
+
 	// Upgrade / Second Install (Idempotence)
 	if err := Install(opts); err != nil {
 		t.Fatalf("Second Install failed: %v", err)

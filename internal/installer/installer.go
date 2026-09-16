@@ -15,7 +15,7 @@ const (
 	MarkerStart = "# >>> agy-pool integration >>>"
 	MarkerEnd   = "# <<< agy-pool integration <<<"
 
-	AliasBlock = "\n# >>> agy-pool integration >>>\nalias agy='agy-pool run'\nalias agy-orig='agy-raw'\n# <<< agy-pool integration <<<\n"
+	AliasBlock = "\n# >>> agy-pool integration >>>\nalias agy='agy-pool run --'\nalias agy-orig='agy-raw'\n# <<< agy-pool integration <<<\n"
 )
 
 // RawScriptContent is the exact standalone shell script for agy-raw matching Python reference.
@@ -195,6 +195,37 @@ func Install(opts Options) error {
 				_ = AppendAliasIfMissing(rc)
 			}
 		}
+	}
+
+	// 5. Initialize user-local config and data directory layout
+	if home != "" {
+		userConfigDir := filepath.Join(home, ".config", "agy-pool")
+		userConfigFile := filepath.Join(userConfigDir, "config.json")
+		if _, err := os.Stat(userConfigFile); os.IsNotExist(err) {
+			_ = os.MkdirAll(userConfigDir, 0755)
+			defaultCfg := `{
+  "version": 1,
+  "server": {
+    "listen": "127.0.0.1",
+    "port": 8899
+  },
+  "scheduler": {
+    "strategy": "max_quota"
+  },
+  "native_agy": {
+    "binary": null
+  },
+  "logging": {
+    "max_size_bytes": 5242880,
+    "backup_count": 1
+  }
+}
+`
+			_ = os.WriteFile(userConfigFile, []byte(defaultCfg), 0644)
+		}
+
+		userDataDir := filepath.Join(home, ".local", "share", "agy-pool")
+		_ = os.MkdirAll(filepath.Join(userDataDir, "locks"), 0700)
 	}
 
 	return nil

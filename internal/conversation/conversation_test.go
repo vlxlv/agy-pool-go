@@ -29,6 +29,8 @@ func setupTestEnv(t *testing.T) (string, func()) {
 
 	origState := config.GetStateDir()
 	origTestMode := config.IsTestMode()
+	origEnv := os.Getenv("AGY_GEMINI_DIR")
+	os.Setenv("AGY_GEMINI_DIR", stateDir)
 	config.SetTestMode(true)
 	if err := config.ConfigureStateDir(stateDir); err != nil {
 		t.Fatalf("ConfigureStateDir failed: %v", err)
@@ -37,6 +39,11 @@ func setupTestEnv(t *testing.T) (string, func()) {
 	cleanup := func() {
 		_ = config.ConfigureStateDir(origState)
 		config.SetTestMode(origTestMode)
+		if origEnv != "" {
+			os.Setenv("AGY_GEMINI_DIR", origEnv)
+		} else {
+			os.Unsetenv("AGY_GEMINI_DIR")
+		}
 		_ = os.RemoveAll(tempDir)
 	}
 
@@ -45,6 +52,7 @@ func setupTestEnv(t *testing.T) (string, func()) {
 
 func createTestDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
+	_ = os.Remove(dbPath)
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		t.Fatalf("failed to create db dir: %v", err)
 	}

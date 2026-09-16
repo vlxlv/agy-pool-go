@@ -346,3 +346,147 @@ func TestLogsCommand(t *testing.T) {
 		t.Errorf("expected clear log success message, got: %s", stdout.String())
 	}
 }
+
+func TestParseRunArgs(t *testing.T) {
+	// Canonical collision test from specification:
+	// agy-pool run -c cfg.json -D data -- -c foo -D bar --future-option
+	cfg, data, native, err := ParseRunArgs([]string{"-c", "cfg.json", "-D", "data", "--", "-c", "foo", "-D", "bar", "--future-option"})
+	if err != nil {
+		t.Fatalf("ParseRunArgs error: %v", err)
+	}
+	if cfg != "cfg.json" {
+		t.Errorf("expected cfg.json, got %q", cfg)
+	}
+	if data != "data" {
+		t.Errorf("expected data, got %q", data)
+	}
+	expectedNative := []string{"-c", "foo", "-D", "bar", "--future-option"}
+	if len(native) != len(expectedNative) {
+		t.Fatalf("expected native args len %d, got %d: %v", len(expectedNative), len(native), native)
+	}
+	for i, v := range expectedNative {
+		if native[i] != v {
+			t.Errorf("native arg[%d] expected %q, got %q", i, v, native[i])
+		}
+	}
+
+	// System layout example without native args:
+	// agy-pool run -c /etc/agy-pool/config.json -D /var/lib/agy-pool
+	cfg, data, native, err = ParseRunArgs([]string{"-c", "/etc/agy-pool/config.json", "-D", "/var/lib/agy-pool"})
+	if err != nil {
+		t.Fatalf("ParseRunArgs error: %v", err)
+	}
+	if cfg != "/etc/agy-pool/config.json" || data != "/var/lib/agy-pool" || len(native) != 0 {
+		t.Errorf("unexpected parse result: cfg=%q data=%q native=%v", cfg, data, native)
+	}
+
+	// User-local layout with native args:
+	// agy-pool run -c ~/.config/agy-pool/config.json -D ~/.local/share/agy-pool -- --conversation=abc123
+	cfg, data, native, err = ParseRunArgs([]string{"-c", "~/.config/agy-pool/config.json", "-D", "~/.local/share/agy-pool", "--", "--conversation=abc123"})
+	if err != nil {
+		t.Fatalf("ParseRunArgs error: %v", err)
+	}
+	if cfg != "~/.config/agy-pool/config.json" || data != "~/.local/share/agy-pool" || len(native) != 1 || native[0] != "--conversation=abc123" {
+		t.Errorf("unexpected parse result: cfg=%q data=%q native=%v", cfg, data, native)
+	}
+
+	// Missing arguments before --
+	_, _, _, err = ParseRunArgs([]string{"-c"})
+	if err == nil {
+		t.Errorf("expected error for -c without argument, got nil")
+	}
+	_, _, _, err = ParseRunArgs([]string{"-D"})
+	if err == nil {
+		t.Errorf("expected error for -D without argument, got nil")
+	}
+	_, _, _, err = ParseRunArgs([]string{"-c", "cfg.json", "--unknown-flag", "--", "native"})
+	if err == nil {
+		t.Errorf("expected error for unknown option before --, got nil")
+	}
+}
+
+func TestRunArgumentScopingAndDelimiter(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "config.json")
+	cfgContent := `{"version": 1, "server": {"listen": "127.0.0.1", "port": 8899}, "scheduler": {"strategy": "max_quota"}, "native_agy": {"binary": null}, "logging": {"max_size_bytes": 5242880, "backup_count": 1}}`
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	dataDir := filepath.Join(tmpDir, "data")
+
+	diagnostics.SetAgyBinaryFinder(func() string { return "/fake/bin/agy" })
+
+	var capturedBinary string
+	var capturedArgs []string
+
+	ExecHandler = func(binary string, argv []string, env []string) error {
+		capturedBinary = binary
+		capturedArgs = argv
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{
+		"run",
+		"-c", cfgFile,
+		"-D", dataDir,
+		"--",
+		"-c", "foo",
+		"-D", "bar",
+		"--future-option",
+	}, nil, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run expected 0, got %d. stderr: %s", code, stderr.String())
+	}
+	if capturedBinary != "/fake/bin/agy" {
+		t.Errorf("expected /fake/bin/agy, got %q", capturedBinary)
+	}
+
+	// Everything after "--" must be forwarded argument-for-argument to native agy
+	expectedArgv := []string{"/fake/bin/agy", "-c", "foo", "-D", "bar", "--future-option"}
+	if len(capturedArgs) != len(expectedArgv) {
+		t.Fatalf("expected argv len %d, got %d: %v", len(expectedArgv), len(capturedArgs), capturedArgs)
+	}
+	for i, arg := range expectedArgv {
+		if capturedArgs[i] != arg {
+			t.Errorf("argv[%d] expected %q, got %q", i, arg, capturedArgs[i])
+		}
+	}
+
+	// Verify -D configured the data directory without chdir
+	if config.GetDataDir() != dataDir {
+		t.Errorf("expected data dir %q, got %q", dataDir, config.GetDataDir())
+	}
+}
+
+func TestRunTopLevelOptionsRejected(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	var stdout, stderr bytes.Buffer
+
+	// -c FILE at top-level must be rejected (not global)
+	code := Main([]string{"-c", "/etc/config.json", "list"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit code 2 for top-level -c, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid choice: '-c'") {
+		t.Errorf("expected invalid choice error for -c, got: %s", stderr.String())
+	}
+
+	// -D DIR at top-level must be rejected (not global)
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"-D", "/var/lib/data", "status"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit code 2 for top-level -D, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid choice: '-D'") {
+		t.Errorf("expected invalid choice error for -D, got: %s", stderr.String())
+	}
+}

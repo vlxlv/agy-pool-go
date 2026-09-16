@@ -13,7 +13,6 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
-	"github.com/vlxlv/agy-pool-go/internal/conversation"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
@@ -668,26 +667,161 @@ func StatusCmd(stdout, stderr io.Writer) {
 	ListAccounts("", stdout, stderr)
 }
 
-// RunAgyWithLB resolves continue args, ensures daemon is running, sets CLOUD_CODE_URL, and execs agy.
-func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
-	extraArgs = conversation.ResolveContinueArg(extraArgs, stderr)
-	if !daemon.IsDaemonRunning("", config.DefaultPort) {
-		_, _ = daemon.StartDaemon(daemon.LaunchOptions{Foreground: false})
+// ParseRunArgs parses options scoped to `agy-pool run`.
+// Only parses options before "--".
+// After "--", native agy arguments are preserved byte-for-byte without parsing or modification.
+func ParseRunArgs(args []string) (configFile string, dataDir string, nativeArgs []string, err error) {
+	dashIdx := -1
+	for i, arg := range args {
+		if arg == "--" {
+			dashIdx = i
+			break
+		}
 	}
 
+	var agyPoolArgs []string
+	if dashIdx != -1 {
+		agyPoolArgs = args[:dashIdx]
+		nativeArgs = args[dashIdx+1:]
+	} else {
+		// When no "--" delimiter is present:
+		// Scan leading -c/--config and -D/--directory options.
+		// Stop at the first non-option argument, treating it and all subsequent arguments as native args.
+		i := 0
+		for i < len(args) {
+			arg := args[i]
+			if arg == "-c" || arg == "--config" {
+				if i+1 >= len(args) {
+					return "", "", nil, fmt.Errorf("flag needs an argument: %s", arg)
+				}
+				configFile = args[i+1]
+				i += 2
+			} else if strings.HasPrefix(arg, "--config=") {
+				configFile = strings.TrimPrefix(arg, "--config=")
+				i++
+			} else if arg == "-D" || arg == "--directory" {
+				if i+1 >= len(args) {
+					return "", "", nil, fmt.Errorf("flag needs an argument: %s", arg)
+				}
+				dataDir = args[i+1]
+				i += 2
+			} else if strings.HasPrefix(arg, "--directory=") {
+				dataDir = strings.TrimPrefix(arg, "--directory=")
+				i++
+			} else {
+				nativeArgs = args[i:]
+				break
+			}
+		}
+		return configFile, dataDir, nativeArgs, nil
+	}
+
+	// Strictly parse agyPoolArgs before "--"
+	for i := 0; i < len(agyPoolArgs); i++ {
+		arg := agyPoolArgs[i]
+		if arg == "-c" || arg == "--config" {
+			if i+1 >= len(agyPoolArgs) {
+				return "", "", nil, fmt.Errorf("flag needs an argument: %s", arg)
+			}
+			configFile = agyPoolArgs[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--config=") {
+			configFile = strings.TrimPrefix(arg, "--config=")
+		} else if arg == "-D" || arg == "--directory" {
+			if i+1 >= len(agyPoolArgs) {
+				return "", "", nil, fmt.Errorf("flag needs an argument: %s", arg)
+			}
+			dataDir = agyPoolArgs[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--directory=") {
+			dataDir = strings.TrimPrefix(arg, "--directory=")
+		} else {
+			return "", "", nil, fmt.Errorf("unknown option for run: %s", arg)
+		}
+	}
+
+	return configFile, dataDir, nativeArgs, nil
+}
+
+// RunAgyWithLB parses run-scoped options (-c, -D), configures daemon/state, and execs native agy.
+func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
+	configFile, dataDir, nativeArgs, err := ParseRunArgs(extraArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] agy-pool run: %v%s\n", clrRed, err, clrReset)
+		return 2
+	}
+
+	// 1. Static config loading
+	var cfg *config.StaticConfig
+	if configFile != "" {
+		c, err := config.LoadConfigFile(configFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s[Error] Failed to load config %s: %v%s\n", clrRed, configFile, err, clrReset)
+			return 1
+		}
+		cfg = c
+		config.SetStaticConfig(cfg)
+	} else {
+		resolvedFile, _ := config.ResolveDefaultConfigFile()
+		if resolvedFile != "" {
+			c, err := config.LoadConfigFile(resolvedFile)
+			if err == nil {
+				cfg = c
+				config.SetStaticConfig(cfg)
+			}
+		}
+		if cfg == nil {
+			cfg = config.GetStaticConfig()
+		}
+	}
+
+	// 2. Data directory configuration
+	if dataDir != "" {
+		if err := config.ConfigureDataDir(dataDir); err != nil {
+			fmt.Fprintf(stderr, "%s[Error] Invalid data directory %s: %v%s\n", clrRed, dataDir, err, clrReset)
+			return 1
+		}
+	} else {
+		_ = config.ConfigureDefaultDataDir()
+	}
+
+	// 3. Ensure daemon is running
+	port := cfg.Server.Port
+	listen := cfg.Server.Listen
+	if listen == "" {
+		listen = "127.0.0.1"
+	}
+	if !daemon.IsDaemonRunning("", port) {
+		_, _ = daemon.StartDaemon(daemon.LaunchOptions{Foreground: false, Port: port})
+	}
+
+	// 4. Set gateway environment
 	env := os.Environ()
-	gatewayURL := fmt.Sprintf("http://127.0.0.1:%d", config.DefaultPort)
+	gatewayURL := fmt.Sprintf("http://%s:%d", listen, port)
 	env = append(env, "CLOUD_CODE_URL="+gatewayURL)
 
+	// 5. Sync active agy token
 	_, _ = accounts.SyncActiveAgyTokenFile()
 
-	agyPath := diagnostics.FindRealAgyBinary()
+	// 6. Find native agy binary
+	var agyPath string
+	if cfg.NativeAgy.Binary != nil && *cfg.NativeAgy.Binary != "" {
+		agyPath = *cfg.NativeAgy.Binary
+		if fi, err := os.Stat(agyPath); err != nil || fi.IsDir() || (fi.Mode()&0111) == 0 {
+			fmt.Fprintf(stderr, "%s[Error] Specified native_agy.binary %q is not executable.%s\n", clrRed, agyPath, clrReset)
+			return 1
+		}
+	} else {
+		agyPath = diagnostics.FindRealAgyBinary()
+	}
 	if agyPath == "" {
 		fmt.Fprintf(stderr, "%s[Error] Could not locate 'agy' executable in PATH.%s\n", clrRed, clrReset)
 		return 1
 	}
 
-	cmd := append([]string{agyPath}, extraArgs...)
+	// 7. Execute native agy with nativeArgs forwarded byte-for-byte
+	// Notice: caller's cwd is preserved unchanged (no os.Chdir).
+	cmd := append([]string{agyPath}, nativeArgs...)
 	if err := ExecHandler(agyPath, cmd, env); err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to execute agy: %v%s\n", clrRed, err, clrReset)
 		return 1
@@ -695,9 +829,21 @@ func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// RunAgyDirect resolves continue args, unsets CLOUD_CODE_URL, and execs agy directly.
+// RunAgyDirect resolves native agy execution bypassing the proxy gateway.
 func RunAgyDirect(extraArgs []string, stdout, stderr io.Writer) int {
-	extraArgs = conversation.ResolveContinueArg(extraArgs, stderr)
+	var nativeArgs []string
+	dashIdx := -1
+	for i, arg := range extraArgs {
+		if arg == "--" {
+			dashIdx = i
+			break
+		}
+	}
+	if dashIdx != -1 {
+		nativeArgs = extraArgs[dashIdx+1:]
+	} else {
+		nativeArgs = extraArgs
+	}
 
 	var env []string
 	for _, e := range os.Environ() {
@@ -712,7 +858,7 @@ func RunAgyDirect(extraArgs []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cmd := append([]string{agyPath}, extraArgs...)
+	cmd := append([]string{agyPath}, nativeArgs...)
 	if err := ExecHandler(agyPath, cmd, env); err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to execute agy: %v%s\n", clrRed, err, clrReset)
 		return 1

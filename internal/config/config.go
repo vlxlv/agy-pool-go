@@ -1,11 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -45,9 +47,40 @@ var QuotaRefreshBackoff = []time.Duration{
 	300 * time.Second,
 }
 
+// StaticConfig defines the v1 static configuration schema.
+type StaticConfig struct {
+	Version   int             `json:"version"`
+	Server    ServerConfig    `json:"server"`
+	Scheduler SchedulerConfig `json:"scheduler"`
+	NativeAgy NativeAgyConfig `json:"native_agy"`
+	Logging   LoggingConfig   `json:"logging"`
+}
+
+type ServerConfig struct {
+	Listen string `json:"listen"`
+	Port   int    `json:"port"`
+}
+
+type SchedulerConfig struct {
+	Strategy string `json:"strategy"`
+}
+
+type NativeAgyConfig struct {
+	Binary *string `json:"binary"`
+}
+
+type LoggingConfig struct {
+	MaxSizeBytes int64 `json:"max_size_bytes"`
+	BackupCount  int   `json:"backup_count"`
+}
+
 var (
 	realProductionGeminiDir string
 	configuredStateDir      string
+	configuredDataDir       string
+	dataDirMu               sync.RWMutex
+	activeStaticConfig      = DefaultStaticConfig()
+	activeConfigMu          sync.RWMutex
 	forbiddenWriteDirs      = make(map[string]bool)
 	testMode                = false
 )
@@ -112,20 +145,210 @@ func expandUser(path string) string {
 }
 
 func initStateDir() {
+	if envDir := os.Getenv("AGY_DATA_DIR"); envDir != "" {
+		_ = ConfigureDataDir(envDir)
+		return
+	}
 	if envDir := os.Getenv("AGY_GEMINI_DIR"); envDir != "" {
-		_ = ConfigureStateDir(envDir)
+		_ = ConfigureDataDir(envDir)
 		return
 	}
 
-	// Default Go development state root is ~/.gemini-go-dev/
+	// Default Go user-local layout: ~/.local/share/agy-pool
 	home := os.Getenv("HOME")
 	if home == "" {
 		if u, err := user.Current(); err == nil {
 			home = u.HomeDir
 		}
 	}
-	defaultDevDir := filepath.Join(home, ".gemini-go-dev")
-	_ = ConfigureStateDir(defaultDevDir)
+	defaultDataDir := filepath.Join(home, ".local", "share", "agy-pool")
+	_ = ConfigureDataDir(defaultDataDir)
+}
+
+// DefaultStaticConfig returns a StaticConfig populated with defaults.
+func DefaultStaticConfig() *StaticConfig {
+	return &StaticConfig{
+		Version: 1,
+		Server: ServerConfig{
+			Listen: "127.0.0.1",
+			Port:   DefaultPort,
+		},
+		Scheduler: SchedulerConfig{
+			Strategy: StrategyMaxQuota,
+		},
+		NativeAgy: NativeAgyConfig{
+			Binary: nil,
+		},
+		Logging: LoggingConfig{
+			MaxSizeBytes: DefaultMaxLogBytes,
+			BackupCount:  DefaultBackupLogCount,
+		},
+	}
+}
+
+// LoadConfigFile loads and validates a v1 static configuration JSON file.
+func LoadConfigFile(path string) (*StaticConfig, error) {
+	absPath, err := filepath.Abs(expandUser(path))
+	if err != nil {
+		return nil, fmt.Errorf("invalid config file path %q: %w", path, err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %q: %w", absPath, err)
+	}
+
+	// Verify no mutable state or directories are in static config
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("malformed JSON in config file %q: %w", absPath, err)
+	}
+	for _, forbiddenKey := range []string{"directory", "data_dir", "state_dir", "accounts", "runtime", "quota"} {
+		if _, exists := raw[forbiddenKey]; exists {
+			return nil, fmt.Errorf("config error: %q must not be in static config file (mutable state belongs in -D DIR)", forbiddenKey)
+		}
+	}
+
+	cfg := DefaultStaticConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config %q: %w", absPath, err)
+	}
+
+	if cfg.Version != 1 {
+		return nil, fmt.Errorf("unsupported config version %d (expected version 1)", cfg.Version)
+	}
+	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
+		return nil, fmt.Errorf("invalid server port %d", cfg.Server.Port)
+	}
+	if cfg.Server.Listen == "" {
+		cfg.Server.Listen = "127.0.0.1"
+	}
+	switch cfg.Scheduler.Strategy {
+	case StrategyMaxQuota, StrategyLeastUsed, StrategyRoundRobin:
+		// Valid
+	default:
+		return nil, fmt.Errorf("invalid scheduler strategy %q", cfg.Scheduler.Strategy)
+	}
+	if cfg.Logging.MaxSizeBytes <= 0 {
+		cfg.Logging.MaxSizeBytes = DefaultMaxLogBytes
+	}
+	if cfg.Logging.BackupCount <= 0 {
+		cfg.Logging.BackupCount = DefaultBackupLogCount
+	}
+
+	return cfg, nil
+}
+
+// ResolveDefaultConfigFile checks standard locations for an existing static config file.
+func ResolveDefaultConfigFile() (string, error) {
+	if explicit := os.Getenv("AGY_CONFIG_FILE"); explicit != "" {
+		abs, err := filepath.Abs(expandUser(explicit))
+		if err == nil {
+			if fi, err := os.Stat(abs); err == nil && !fi.IsDir() {
+				return abs, nil
+			}
+		}
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
+	}
+
+	// User-local layout: ~/.config/agy-pool/config.json
+	if home != "" {
+		userCfg := filepath.Join(home, ".config", "agy-pool", "config.json")
+		if fi, err := os.Stat(userCfg); err == nil && !fi.IsDir() {
+			return userCfg, nil
+		}
+	}
+
+	// System layout: /etc/agy-pool/config.json
+	sysCfg := "/etc/agy-pool/config.json"
+	if fi, err := os.Stat(sysCfg); err == nil && !fi.IsDir() {
+		return sysCfg, nil
+	}
+
+	return "", nil
+}
+
+// GetStaticConfig returns the active static configuration.
+func GetStaticConfig() *StaticConfig {
+	activeConfigMu.RLock()
+	defer activeConfigMu.RUnlock()
+	return activeStaticConfig
+}
+
+// SetStaticConfig updates the active static configuration.
+func SetStaticConfig(cfg *StaticConfig) {
+	activeConfigMu.Lock()
+	defer activeConfigMu.Unlock()
+	if cfg != nil {
+		activeStaticConfig = cfg
+	}
+}
+
+// GetDataDir returns the active writable data directory.
+func GetDataDir() string {
+	dataDirMu.RLock()
+	dir := configuredDataDir
+	dataDirMu.RUnlock()
+	if dir != "" {
+		return dir
+	}
+	_ = ConfigureDefaultDataDir()
+	dataDirMu.RLock()
+	defer dataDirMu.RUnlock()
+	return configuredDataDir
+}
+
+// ConfigureDataDir sets the writable data directory with fail-closed safety checks.
+func ConfigureDataDir(dir string) error {
+	abs, err := filepath.Abs(expandUser(dir))
+	if err != nil {
+		return fmt.Errorf("failed to resolve data directory %q: %w", dir, err)
+	}
+
+	realTarget := abs
+	if eval, err := filepath.EvalSymlinks(abs); err == nil {
+		realTarget = eval
+	}
+
+	if isProtectedProductionDir(realTarget) {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing to use Python production state (%s) during Go development", realTarget)
+	}
+
+	dataDirMu.Lock()
+	configuredDataDir = abs
+	configuredStateDir = abs
+	dataDirMu.Unlock()
+
+	// Ensure locks directory exists
+	locksDir := filepath.Join(abs, "locks")
+	_ = os.MkdirAll(locksDir, 0o700)
+
+	return nil
+}
+
+// ConfigureDefaultDataDir sets the default data directory.
+func ConfigureDefaultDataDir() error {
+	if envDir := os.Getenv("AGY_DATA_DIR"); envDir != "" {
+		return ConfigureDataDir(envDir)
+	}
+	if envDir := os.Getenv("AGY_GEMINI_DIR"); envDir != "" {
+		return ConfigureDataDir(envDir)
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
+	}
+	defaultDir := filepath.Join(home, ".local", "share", "agy-pool")
+	return ConfigureDataDir(defaultDir)
 }
 
 // IsTestMode reports whether the runtime is in test mode.
@@ -150,58 +373,90 @@ func GetRealProductionGeminiDir() string {
 
 // GetStateDir returns the currently configured state directory.
 func GetStateDir() string {
-	return configuredStateDir
+	return GetDataDir()
 }
 
 // GetAccountsFile returns the path to the accounts pool JSON file.
+// Prefers accounts.json in the data directory, falling back to agy-pool-accounts.json if present.
 func GetAccountsFile() string {
-	return filepath.Join(configuredStateDir, "agy-pool-accounts.json")
+	dir := GetDataDir()
+	cand1 := filepath.Join(dir, "accounts.json")
+	if _, err := os.Stat(cand1); err == nil {
+		return cand1
+	}
+	cand2 := filepath.Join(dir, "agy-pool-accounts.json")
+	if _, err := os.Stat(cand2); err == nil {
+		return cand2
+	}
+	return cand1
+}
+
+// GetRuntimeFile returns the path to runtime.json in GetDataDir().
+func GetRuntimeFile() string {
+	return filepath.Join(GetDataDir(), "runtime.json")
+}
+
+// GetQuotaFile returns the path to quota.json in GetDataDir().
+func GetQuotaFile() string {
+	return filepath.Join(GetDataDir(), "quota.json")
+}
+
+// GetPIDFile returns the path to the daemon PID file in GetDataDir().
+func GetPIDFile() string {
+	return filepath.Join(GetDataDir(), "agy-pool.pid")
+}
+
+// GetLogFile returns the path to the gateway log file in GetDataDir().
+func GetLogFile() string {
+	return filepath.Join(GetDataDir(), "agy-pool.log")
+}
+
+// GetLocksDir returns the path to the locks directory in GetDataDir().
+func GetLocksDir() string {
+	return filepath.Join(GetDataDir(), "locks")
 }
 
 // GetLockFile returns the path to the accounts lock file.
 func GetLockFile() string {
-	return filepath.Join(configuredStateDir, "agy-pool-accounts.json.lock")
+	dir := GetDataDir()
+	cand1 := filepath.Join(dir, "locks", "accounts.lock")
+	if _, err := os.Stat(cand1); err == nil {
+		return cand1
+	}
+	cand2 := filepath.Join(dir, "agy-pool-accounts.json.lock")
+	if _, err := os.Stat(cand2); err == nil {
+		return cand2
+	}
+	return cand1
 }
 
-// GetPIDFile returns the path to the daemon PID file.
-func GetPIDFile() string {
-	return filepath.Join(configuredStateDir, "agy-pool.pid")
+// GetSpecificLockFile returns a specific lock file inside DIR/locks/.
+func GetSpecificLockFile(name string) string {
+	return filepath.Join(GetDataDir(), "locks", name)
 }
 
-// GetLogFile returns the path to the gateway log file.
-func GetLogFile() string {
-	return filepath.Join(configuredStateDir, "agy-pool.log")
-}
-
-// GetAgyCliDir returns the path to the antigravity-cli directory.
+// GetAgyCliDir returns the path to native agy's antigravity-cli directory (under ~/.gemini).
 func GetAgyCliDir() string {
-	return filepath.Join(configuredStateDir, "antigravity-cli")
+	if envDir := os.Getenv("AGY_GEMINI_DIR"); envDir != "" {
+		return filepath.Join(envDir, "antigravity-cli")
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
+	}
+	return filepath.Join(home, ".gemini", "antigravity-cli")
 }
 
 // GetAgyTokenFile returns the path to the native agy token file.
 func GetAgyTokenFile() string {
-	return filepath.Join(configuredStateDir, "antigravity-cli", "antigravity-oauth-token")
+	return filepath.Join(GetAgyCliDir(), "antigravity-oauth-token")
 }
 
 // ConfigureStateDir configures the storage directory with fail-closed safety checks.
 func ConfigureStateDir(dir string) error {
-	abs, err := filepath.Abs(expandUser(dir))
-	if err != nil {
-		return fmt.Errorf("failed to resolve state directory %q: %w", dir, err)
-	}
-
-	// G1 HARD SAFETY DEFAULT: Refuse Python production state
-	realTarget := abs
-	if eval, err := filepath.EvalSymlinks(abs); err == nil {
-		realTarget = eval
-	}
-
-	if isProtectedProductionDir(realTarget) {
-		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing to use Python production state (%s) during Go development", realTarget)
-	}
-
-	configuredStateDir = abs
-	return nil
+	return ConfigureDataDir(dir)
 }
 
 func isProtectedProductionDir(path string) bool {

@@ -663,46 +663,40 @@ def test_differential_conversation():
         assert cid_py_2 == "c2_proj2"
 
         # Now test Go candidate on the exact same database and directories
-        py_bin = os.path.join(REPO_ROOT, "bin", "agy-pool")
         for test_path, expected_cid in [(proj1_deep, "c3_deep"), (proj1, "c1_old"), (proj2, "c2_proj2")]:
-            # Mock agy script to dump args
-            mock_agy = os.path.join(tmp_dir, "mock_agy.sh")
-            with open(mock_agy, "w") as f:
-                f.write("#!/bin/sh\necho \"ARGV:$@\"\n")
-            os.chmod(mock_agy, 0o755)
-
             env = os.environ.copy()
             env["HOME"] = tmp_dir
             env["AGY_TEST_MODE"] = "1"
             env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
-            env["AGY_BIN"] = mock_agy
 
-            p_py = subprocess.run(["python3", py_bin, "run", "-c", "--verbose"],
-                                  cwd=test_path, env=env, capture_output=True, text=True)
-            p_go = subprocess.run([GO_BIN, "run", "-c", "--verbose"],
-                                  cwd=test_path, env=env, capture_output=True, text=True)
+            # 1. Direct discovery parity
+            cid_py, title_py, dir_py = py_cli.find_latest_conversation_for_dir(test_path)
+            res_go = subprocess.run([GO_BIN, "eval-conversation", test_path],
+                                    cwd=test_path, env=env, capture_output=True, text=True)
+            assert res_go.returncode == 0, f"eval-conversation failed: {res_go.stderr}"
+            data_go = json.loads(res_go.stdout)
+            assert data_go["cid"] == cid_py == expected_cid, f"expected {expected_cid}, got py={cid_py}, go={data_go['cid']}"
 
-            assert p_py.returncode == 0
-            assert p_go.returncode == 0
-
-            # Compare dumped ARGV
-            py_lines = [l for l in p_py.stdout.splitlines() if l.startswith("ARGV:")]
-            go_lines = [l for l in p_go.stdout.splitlines() if l.startswith("ARGV:")]
-            assert py_lines, "Python did not run mock agy"
-            assert go_lines, "Go did not run mock agy"
-            assert py_lines[0] == f"ARGV:--conversation {expected_cid} --verbose", f"Python argv: {py_lines[0]}"
-            assert go_lines[0] == f"ARGV:--conversation {expected_cid} --verbose", f"Go argv: {go_lines[0]}"
+            # 2. Continue arg resolution parity
+            res_res = subprocess.run([GO_BIN, "eval-resolve-continue", "-c", "--verbose"],
+                                     cwd=test_path, env=env, capture_output=True, text=True)
+            assert res_res.returncode == 0
+            resolved_go = json.loads(res_res.stdout)["args"]
+            orig_cwd = os.getcwd()
+            try:
+                os.chdir(test_path)
+                resolved_py = py_cli.resolve_continue_arg(["-c", "--verbose"])
+            finally:
+                os.chdir(orig_cwd)
+            assert resolved_go == resolved_py == ["--conversation", expected_cid, "--verbose"], f"go={resolved_go}, py={resolved_py}"
 
         # Explicit --conversation overrides -c
-        p_py = subprocess.run(["python3", py_bin, "run", "--conversation", "explicit_conv_999", "-c"],
-                              cwd=proj1, env=env, capture_output=True, text=True)
-        p_go = subprocess.run([GO_BIN, "run", "--conversation", "explicit_conv_999", "-c"],
-                              cwd=proj1, env=env, capture_output=True, text=True)
-
-        py_lines = [l for l in p_py.stdout.splitlines() if l.startswith("ARGV:")]
-        go_lines = [l for l in p_go.stdout.splitlines() if l.startswith("ARGV:")]
-        assert py_lines[0] == "ARGV:--conversation explicit_conv_999 -c"
-        assert go_lines[0] == "ARGV:--conversation explicit_conv_999 -c"
+        res_explicit_go = subprocess.run([GO_BIN, "eval-resolve-continue", "--conversation", "explicit_conv_999", "-c"],
+                                         cwd=proj1, env=env, capture_output=True, text=True)
+        assert res_explicit_go.returncode == 0
+        explicit_go = json.loads(res_explicit_go.stdout)["args"]
+        explicit_py = py_cli.resolve_continue_arg(["--conversation", "explicit_conv_999", "-c"])
+        assert explicit_go == explicit_py == ["--conversation", "explicit_conv_999", "-c"]
 
     finally:
         py_config.AGY_CLI_DIR = orig_cli_dir
@@ -755,9 +749,34 @@ def test_differential_wrappers():
     assert "URL_VAR: NONE" in p_py_raw.stdout
     assert "URL_VAR: NONE" in p_go_raw.stdout
 
+    # 3. Canonical collision test: agy-pool run -c cfg -D data -- -c foo -D bar --future-option
+    cfg_file = os.path.join(tmp_dir, "test_config.json")
+    with open(cfg_file, "w") as f:
+        f.write('{"version": 1, "server": {"listen": "127.0.0.1", "port": 8899}, "scheduler": {"strategy": "max_quota"}, "native_agy": {"binary": null}, "logging": {"max_size_bytes": 5242880, "backup_count": 1}}')
+    data_dir = os.path.join(tmp_dir, "test_data")
+
+    p_go_collision = subprocess.run([
+        GO_BIN, "run",
+        "-c", cfg_file,
+        "-D", data_dir,
+        "--",
+        "-c", "foo",
+        "-D", "bar",
+        "--future-option"
+    ], env=env, capture_output=True, text=True)
+
+    assert p_go_collision.returncode == 0, f"collision test failed: {p_go_collision.stderr}"
+    assert "AGY_CALLED: -c foo -D bar --future-option" in p_go_collision.stdout, f"got stdout: {p_go_collision.stdout}"
+
+    # 4. Top-level rejection: -c and -D must NOT be global options
+    p_go_toplevel_c = subprocess.run([GO_BIN, "-c", cfg_file, "list"], env=env, capture_output=True, text=True)
+    assert p_go_toplevel_c.returncode == 2, f"expected code 2 for top-level -c, got {p_go_toplevel_c.returncode}"
+    p_go_toplevel_d = subprocess.run([GO_BIN, "-D", data_dir, "list"], env=env, capture_output=True, text=True)
+    assert p_go_toplevel_d.returncode == 2, f"expected code 2 for top-level -D, got {p_go_toplevel_d.returncode}"
+
     import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    print("  ✓ Wrapper argument and CLOUD_CODE_URL environment passthrough passed with 100% parity.")
+    print("  ✓ Wrapper argument, -c/-D scoping, -- delimiter, and environment passthrough passed with 100% parity.")
 
 def main():
     test_differential_capacity_cases()

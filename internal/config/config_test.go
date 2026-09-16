@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -54,13 +55,112 @@ func TestAllowDevAndTempDirs(t *testing.T) {
 	}
 
 	accountsFile := GetAccountsFile()
-	expected := filepath.Join(tmpDir, "agy-pool-accounts.json")
-	if accountsFile != expected {
-		t.Fatalf("expected %s, got %s", expected, accountsFile)
+	expectedCanonical := filepath.Join(tmpDir, "accounts.json")
+	expectedLegacy := filepath.Join(tmpDir, "agy-pool-accounts.json")
+	if accountsFile != expectedCanonical && accountsFile != expectedLegacy {
+		t.Fatalf("expected %s or %s, got %s", expectedCanonical, expectedLegacy, accountsFile)
 	}
 
 	err = AssertSafeWritePath(accountsFile)
 	if err != nil {
 		t.Fatalf("expected safe write path in temp dir, got %v", err)
+	}
+}
+
+func TestStaticConfigLoadAndValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	validCfg := filepath.Join(tmpDir, "config.json")
+	content := `{
+  "version": 1,
+  "server": {
+    "listen": "127.0.0.1",
+    "port": 8899
+  },
+  "scheduler": {
+    "strategy": "max_quota"
+  },
+  "native_agy": {
+    "binary": "/usr/bin/agy"
+  },
+  "logging": {
+    "max_size_bytes": 10485760,
+    "backup_count": 3
+  }
+}`
+	if err := os.WriteFile(validCfg, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := LoadConfigFile(validCfg)
+	if err != nil {
+		t.Fatalf("failed to load valid config: %v", err)
+	}
+	if cfg.Version != 1 || cfg.Server.Port != 8899 || cfg.Scheduler.Strategy != "max_quota" {
+		t.Fatalf("unexpected config values: %+v", cfg)
+	}
+	if cfg.NativeAgy.Binary == nil || *cfg.NativeAgy.Binary != "/usr/bin/agy" {
+		t.Fatalf("unexpected native agy binary: %+v", cfg.NativeAgy)
+	}
+	if cfg.Logging.MaxSizeBytes != 10485760 || cfg.Logging.BackupCount != 3 {
+		t.Fatalf("unexpected logging config: %+v", cfg.Logging)
+	}
+}
+
+func TestStaticConfigForbiddenKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	forbiddenKeys := []string{"directory", "data_dir", "state_dir", "accounts", "runtime", "quota"}
+
+	for _, key := range forbiddenKeys {
+		cfgPath := filepath.Join(tmpDir, key+".json")
+		content := `{"version": 1, "` + key + `": "/some/path"}`
+		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+		_, err := LoadConfigFile(cfgPath)
+		if err == nil {
+			t.Fatalf("expected error loading config with forbidden key %q, got nil", key)
+		}
+	}
+}
+
+func TestDataDirectoryLayout(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := ConfigureDataDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure data dir: %v", err)
+	}
+
+	// Verify path getters
+	if GetAccountsFile() != filepath.Join(tmpDir, "accounts.json") {
+		t.Fatalf("unexpected accounts file: %s", GetAccountsFile())
+	}
+	if GetRuntimeFile() != filepath.Join(tmpDir, "runtime.json") {
+		t.Fatalf("unexpected runtime file: %s", GetRuntimeFile())
+	}
+	if GetQuotaFile() != filepath.Join(tmpDir, "quota.json") {
+		t.Fatalf("unexpected quota file: %s", GetQuotaFile())
+	}
+	if GetPIDFile() != filepath.Join(tmpDir, "agy-pool.pid") {
+		t.Fatalf("unexpected PID file: %s", GetPIDFile())
+	}
+	if GetLogFile() != filepath.Join(tmpDir, "agy-pool.log") {
+		t.Fatalf("unexpected log file: %s", GetLogFile())
+	}
+	if GetLocksDir() != filepath.Join(tmpDir, "locks") {
+		t.Fatalf("unexpected locks dir: %s", GetLocksDir())
+	}
+	if GetLockFile() != filepath.Join(tmpDir, "locks", "accounts.lock") {
+		t.Fatalf("unexpected lock file: %s", GetLockFile())
+	}
+	if GetSpecificLockFile("pid.lock") != filepath.Join(tmpDir, "locks", "pid.lock") {
+		t.Fatalf("unexpected specific lock file: %s", GetSpecificLockFile("pid.lock"))
+	}
+
+	// Verify legacy accounts file fallback
+	legacyFile := filepath.Join(tmpDir, "agy-pool-accounts.json")
+	if err := os.WriteFile(legacyFile, []byte("{}"), 0600); err != nil {
+		t.Fatalf("failed to write legacy file: %v", err)
+	}
+	if GetAccountsFile() != legacyFile {
+		t.Fatalf("expected fallback to legacy accounts file %s, got %s", legacyFile, GetAccountsFile())
 	}
 }

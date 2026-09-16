@@ -14,6 +14,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/conversation"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/proxy"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
@@ -293,6 +294,26 @@ func HandleEval(cmd string, args []string) bool {
 			fmt.Println(string(out))
 			return true
 		}
+	case "eval-conversation":
+		dir := ""
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		cid, title, dirName, _ := conversation.FindLatestConversationForDir(dir)
+		out, _ := json.Marshal(map[string]string{
+			"cid":      cid,
+			"title":    title,
+			"dir_name": dirName,
+		})
+		fmt.Println(string(out))
+		return true
+	case "eval-resolve-continue":
+		res := conversation.ResolveContinueArg(args[1:], io.Discard)
+		out, _ := json.Marshal(map[string]any{
+			"args": res,
+		})
+		fmt.Println(string(out))
+		return true
 	}
 	return false
 }
