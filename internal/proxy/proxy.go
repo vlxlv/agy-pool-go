@@ -29,7 +29,7 @@ var (
 	TokenRefresher      func(account *storage.Account) (string, error)
 	QuotaRefresher      func(account *storage.Account)
 	LogRotator          func()
-	NowFunc             = time.Now
+	NowFunc                       = time.Now
 	LogWriter           io.Writer = os.Stderr
 	logMu               sync.Mutex
 )

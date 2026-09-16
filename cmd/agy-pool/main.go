@@ -3,13 +3,17 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/proxy"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
@@ -195,10 +199,45 @@ func main() {
 				fmt.Println(string(out))
 				return
 			}
+
+		case "proxy-test-server":
+			if len(os.Args) < 5 {
+				fmt.Fprintf(os.Stderr, "usage: agy-pool proxy-test-server <port> <state-dir> <backend-url>\n")
+				os.Exit(1)
+			}
+			port := os.Args[2]
+			stateDir := os.Args[3]
+			backendURL := os.Args[4]
+
+			if err := config.ConfigureStateDir(stateDir); err != nil {
+				fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+				os.Exit(1)
+			}
+			u, err := url.Parse(backendURL)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid backend-url: %v\n", err)
+				os.Exit(1)
+			}
+			proxy.BackendHostProvider = func() string { return u.Host }
+			proxy.BackendURLProvider = func() string { return backendURL }
+			proxy.TokenRefresher = func(acc *storage.Account) (string, error) {
+				return "token-" + acc.ID, nil
+			}
+
+			server := &http.Server{
+				Addr:    "127.0.0.1:" + port,
+				Handler: proxy.NewHandler(),
+			}
+			fmt.Println("READY")
+			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 	}
 
 	fmt.Println("agy-pool-go: Go candidate implementation (Phase G2 Development)")
 	fmt.Println("Usage: agy-pool <command> [args...]")
-	fmt.Println("Available commands: version, eval-scheduler, eval-capacity, eval-account-target, eval-display-name, eval-jwt, eval-error-classifier, eval-crypto")
+	fmt.Println("Available commands: version, eval-scheduler, eval-capacity, eval-account-target, eval-display-name, eval-jwt, eval-error-classifier, eval-crypto, proxy-test-server")
 }
