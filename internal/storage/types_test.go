@@ -113,17 +113,10 @@ func TestUnknownFieldPreservation(t *testing.T) {
 }
 
 func TestInvalidPoolSchemaFails(t *testing.T) {
-	// Missing accounts array
-	invalid1 := `{"version": 1, "strategy": "max_quota"}`
-	var p1 Pool
-	if err := json.Unmarshal([]byte(invalid1), &p1); err == nil {
-		t.Fatalf("expected error when accounts key is missing")
-	}
-
 	// Accounts is not a list
-	invalid2 := `{"version": 1, "strategy": "max_quota", "accounts": "invalid"}`
-	var p2 Pool
-	if err := json.Unmarshal([]byte(invalid2), &p2); err == nil {
+	invalid := `{"version": 1, "strategy": "max_quota", "accounts": "invalid"}`
+	var p Pool
+	if err := json.Unmarshal([]byte(invalid), &p); err == nil {
 		t.Fatalf("expected error when accounts is not a list")
 	}
 }

@@ -91,6 +91,14 @@ func readPoolUnlocked(path string) (*Pool, error) {
 		return nil, fmt.Errorf("failed to read pool file: %w", err)
 	}
 
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("corrupt pool state in %s: %w", path, err)
+	}
+	if _, ok := raw["accounts"]; !ok {
+		return nil, fmt.Errorf("pool state must be an object containing an accounts list")
+	}
+
 	var pool Pool
 	if err := json.Unmarshal(data, &pool); err != nil {
 		return nil, fmt.Errorf("corrupt pool state in %s: %w", path, err)

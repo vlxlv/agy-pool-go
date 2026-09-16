@@ -2,7 +2,6 @@ package storage
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 // QuotaWindow represents a single quota window (e.g. 5-hour or weekly).
@@ -135,7 +134,7 @@ type Account struct {
 	ValidationURL    *string     `json:"validation_url,omitempty"`
 	RateLimitedUntil *float64    `json:"rate_limited_until,omitempty"`
 	RequestCount     int64       `json:"request_count"`
-	GenCount         int64       `json:"gen_count"`
+	GenCount         *int64      `json:"gen_count,omitempty"`
 	ErrorCount       int64       `json:"error_count"`
 	LastUsedAt       *int64      `json:"last_used_at,omitempty"`
 	LastQuota        *QuotaState `json:"last_quota,omitempty"`
@@ -150,6 +149,17 @@ type Account struct {
 	GeminiWeeklyResetSec *float64 `json:"gemini_weekly_reset_sec,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// GetHits returns gen_count if present, falling back to request_count matching Python.
+func (a *Account) GetHits() int64 {
+	if a == nil {
+		return 0
+	}
+	if a.GenCount != nil {
+		return *a.GenCount
+	}
+	return a.RequestCount
 }
 
 func (a *Account) UnmarshalJSON(data []byte) error {
@@ -244,11 +254,6 @@ func (p *Pool) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
-	}
-
-	// Validate accounts list presence
-	if _, ok := raw["accounts"]; !ok {
-		return fmt.Errorf("pool state must be an object containing an accounts list")
 	}
 
 	type alias Pool
