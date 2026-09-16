@@ -46,10 +46,10 @@ func TestSaveAndLoadRoundtripAndPermissions(t *testing.T) {
 		t.Fatalf("SavePool failed: %v", err)
 	}
 
-	accountsFile := config.GetAccountsFile()
-	info, err := os.Stat(accountsFile)
+	stateDBFile := config.GetStateDBFile()
+	info, err := os.Stat(stateDBFile)
 	if err != nil {
-		t.Fatalf("failed to stat accounts file: %v", err)
+		t.Fatalf("failed to stat state.db: %v", err)
 	}
 
 	// Check 0600 permissions
@@ -72,8 +72,8 @@ func TestSaveAndLoadRoundtripAndPermissions(t *testing.T) {
 func TestCorruptFileReturnsError(t *testing.T) {
 	setupTestStorage(t)
 
-	accountsFile := config.GetAccountsFile()
-	if err := os.WriteFile(accountsFile, []byte("{not valid json"), 0o600); err != nil {
+	stateDBFile := config.GetStateDBFile()
+	if err := os.WriteFile(stateDBFile, []byte("{not valid sqlite database"), 0o600); err != nil {
 		t.Fatalf("failed to write corrupt file: %v", err)
 	}
 
@@ -92,8 +92,8 @@ func TestCorruptFileReturnsError(t *testing.T) {
 	}
 
 	// File content must still be the corrupt string (not overwritten)
-	raw, _ := os.ReadFile(accountsFile)
-	if string(raw) != "{not valid json" {
+	raw, _ := os.ReadFile(stateDBFile)
+	if string(raw) != "{not valid sqlite database" {
 		t.Fatalf("corrupt file was overwritten: %s", string(raw))
 	}
 }

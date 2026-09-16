@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -168,46 +170,49 @@ func AtomicJSONWrite(path string, data any) error {
 	return nil
 }
 
-// LoadPool reads the pool state under a shared read lock.
+// LoadPool reads the pool state from the authoritative SQLite state store under a read transaction.
 func LoadPool() (*Pool, error) {
 	if err := EnsureDirs(); err != nil {
 		return nil, err
 	}
 
-	filePath := config.GetAccountsFile()
-	lockPath := config.GetLockFile()
+	sdb, err := GetStateDB()
+	if err != nil {
+		return nil, err
+	}
 
 	var pool *Pool
-	err := WithFileLock(lockPath, false, func() error {
-		p, err := readPoolUnlocked(filePath)
+	err = sdb.View(context.Background(), func(tx *sql.Tx) error {
+		p, err := LoadPoolFromTx(tx)
 		if err != nil {
 			return err
 		}
 		pool = p
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
 	}
 	return pool, nil
 }
 
-// PoolTransaction executes an atomic read-modify-write transaction on the pool file.
-// If mutator returns an error or panics, the file is untouched.
+// PoolTransaction executes an atomic read-modify-write transaction on the authoritative state database.
+// If mutator returns an error or panics, the transaction is rolled back and state is untouched.
 func PoolTransaction(mutator func(pool *Pool) error) error {
 	if err := EnsureDirs(); err != nil {
 		return err
 	}
 
-	filePath := config.GetAccountsFile()
-	lockPath := config.GetLockFile()
+	sdb, err := GetStateDB()
+	if err != nil {
+		return err
+	}
 
 	poolMu.Lock()
 	defer poolMu.Unlock()
 
-	return WithFileLock(lockPath, true, func() error {
-		pool, err := readPoolUnlocked(filePath)
+	return sdb.Update(context.Background(), func(tx *sql.Tx) error {
+		pool, err := LoadPoolFromTx(tx)
 		if err != nil {
 			return err
 		}
@@ -216,11 +221,11 @@ func PoolTransaction(mutator func(pool *Pool) error) error {
 			return err
 		}
 
-		return AtomicJSONWrite(filePath, pool)
+		return SavePoolToTx(tx, pool)
 	})
 }
 
-// SavePool replaces the entire pool under a transaction lock.
+// SavePool replaces the entire pool under an immediate write transaction.
 func SavePool(pool *Pool) error {
 	return PoolTransaction(func(p *Pool) error {
 		*p = *pool

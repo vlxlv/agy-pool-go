@@ -459,6 +459,11 @@ func GetStateDir() string {
 	return GetDataDir()
 }
 
+// GetStateDBFile returns the path to state.db in GetDataDir().
+func GetStateDBFile() string {
+	return filepath.Join(GetDataDir(), "state.db")
+}
+
 // GetAccountsFile returns the path to the accounts pool JSON file.
 // Prefers accounts.json in the data directory, falling back to agy-pool-accounts.json if present.
 func GetAccountsFile() string {
