@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,9 +25,10 @@ const (
 
 // StateDB represents an open handle to the authoritative SQLite state store.
 type StateDB struct {
-	db   *sql.DB
-	path string
-	mu   sync.Mutex
+	db      *sql.DB
+	path    string
+	mu      sync.Mutex
+	writeMu sync.Mutex
 }
 
 var (
@@ -286,6 +288,9 @@ func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
 	db := s.db
 	s.mu.Unlock()
@@ -293,7 +298,19 @@ func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) error {
 		return errors.New("state database is closed")
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	var tx *sql.Tx
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		tx, err = db.BeginTx(ctx, nil)
+		if err == nil {
+			break
+		}
+		if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+			time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
+			continue
+		}
+		return fmt.Errorf("failed to begin immediate write transaction: %w", err)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to begin immediate write transaction: %w", err)
 	}
@@ -449,10 +466,10 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 			status, valURL   sql.NullString
 			rateLimitedUntil sql.NullFloat64
 
-			g5hFrac, gwFrac, tp5hFrac, tpwFrac, remFrac sql.NullFloat64
+			g5hFrac, gwFrac, tp5hFrac, tpwFrac, remFrac    sql.NullFloat64
 			g5hReset, gwReset, tp5hReset, tpwReset, qReset sql.NullString
-			qUpdatedAt                                   sql.NullInt64
-			rawExtra                                     sql.NullString
+			qUpdatedAt                                     sql.NullInt64
+			rawExtra                                       sql.NullString
 		)
 
 		if err := accRows.Scan(
