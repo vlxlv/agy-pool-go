@@ -24,11 +24,27 @@ func setupInstallerTestEnv(t *testing.T) (string, func()) {
 	origState := config.GetStateDir()
 	origTestMode := config.IsTestMode()
 	config.SetTestMode(true)
+	resetSandbox := config.SetSyntheticSandboxRoot(tempDir)
+
+	testHome := filepath.Join(tempDir, "test_home")
+	_ = os.MkdirAll(filepath.Join(testHome, ".local", "bin"), 0755)
+	_ = os.MkdirAll(filepath.Join(testHome, ".config", "agy-pool"), 0755)
+	_ = os.MkdirAll(filepath.Join(testHome, ".local", "share", "agy-pool"), 0755)
+	resetRoots := SetTestInstallerRoots(&InstallerRoots{
+		UserHome:   testHome,
+		BinDir:     filepath.Join(testHome, ".local", "bin"),
+		ConfigDir:  filepath.Join(testHome, ".config", "agy-pool"),
+		DataDir:    filepath.Join(testHome, ".local", "share", "agy-pool"),
+		SystemRoot: filepath.Join(tempDir, "test_system"),
+	})
+
 	if err := config.ConfigureStateDir(stateDir); err != nil {
 		t.Fatalf("ConfigureStateDir failed: %v", err)
 	}
 
 	cleanup := func() {
+		resetRoots()
+		resetSandbox()
 		_ = config.ConfigureStateDir(origState)
 		config.SetTestMode(origTestMode)
 		_ = os.RemoveAll(tempDir)

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,6 +53,14 @@ func StartDaemon(opts LaunchOptions) (*StartResult, error) {
 	}
 	if err := config.AssertSafeWritePath(logFile); err != nil {
 		return nil, err
+	}
+
+	if opts.Foreground {
+		err := RunForeground(context.Background(), ServerOptions{
+			Port:    port,
+			PIDFile: pidFile,
+		})
+		return &StartResult{PID: os.Getpid()}, err
 	}
 
 	entrypoint := opts.EntrypointPath

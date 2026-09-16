@@ -12,6 +12,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
+	"github.com/vlxlv/agy-pool-go/internal/installer"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 	_ "modernc.org/sqlite"
 )
@@ -31,16 +32,31 @@ func setupCLITestEnv(t *testing.T) (string, func()) {
 	origState := config.GetStateDir()
 	origTestMode := config.IsTestMode()
 	config.SetTestMode(true)
+	resetSandbox := config.SetSyntheticSandboxRoot(tempDir)
 	config.SetNativeAgyDir(stateDir)
 	if err := config.ConfigureStateDir(stateDir); err != nil {
 		t.Fatalf("ConfigureStateDir failed: %v", err)
 	}
+
+	testHome := filepath.Join(tempDir, "test_home")
+	_ = os.MkdirAll(filepath.Join(testHome, ".local", "bin"), 0755)
+	_ = os.MkdirAll(filepath.Join(testHome, ".config", "agy-pool"), 0755)
+	_ = os.MkdirAll(filepath.Join(testHome, ".local", "share", "agy-pool"), 0755)
+	resetRoots := installer.SetTestInstallerRoots(&installer.InstallerRoots{
+		UserHome:   testHome,
+		BinDir:     filepath.Join(testHome, ".local", "bin"),
+		ConfigDir:  filepath.Join(testHome, ".config", "agy-pool"),
+		DataDir:    filepath.Join(testHome, ".local", "share", "agy-pool"),
+		SystemRoot: filepath.Join(tempDir, "test_system"),
+	})
 
 	origExec := ExecHandler
 	origEntrypoint := daemon.EntrypointProvider
 	daemon.EntrypointProvider = func() string { return "/bin/true" }
 
 	cleanup := func() {
+		resetRoots()
+		resetSandbox()
 		daemon.EntrypointProvider = origEntrypoint
 		ExecHandler = origExec
 		config.SetNativeAgyDir("")

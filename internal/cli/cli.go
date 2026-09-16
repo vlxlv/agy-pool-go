@@ -149,8 +149,7 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		StatusCmd(stdout, stderr)
 		return 0
 	case "daemon-run":
-		_, _ = daemon.StartDaemon(daemon.LaunchOptions{Foreground: true})
-		return 0
+		return handleDaemonRun(args[1:], stdout, stderr)
 	case "migrate-legacy":
 		return handleMigrateLegacy(args[1:], stdout, stderr)
 	case "install":
@@ -792,6 +791,27 @@ func handleLogs(args []string, stdout, stderr io.Writer) int {
 		// For follow, wait until canceled
 	}
 
+	return 0
+}
+
+func handleDaemonRun(args []string, stdout, stderr io.Writer) int {
+	port := 0
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--port" && i+1 < len(args) {
+			p, err := strconv.Atoi(args[i+1])
+			if err == nil {
+				port = p
+			}
+			i++
+		}
+	}
+	err := daemon.RunForeground(context.Background(), daemon.ServerOptions{
+		Port: port,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "daemon-run error: %v\n", err)
+		return 1
+	}
 	return 0
 }
 

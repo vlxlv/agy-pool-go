@@ -73,33 +73,23 @@ func DetermineTargetDir(prefix, home string, isUsrLocalWritable func() bool) str
 	}
 
 	if home != "" {
-		userBin := filepath.Join(home, ".local", "bin")
-		if err := os.MkdirAll(userBin, 0755); err == nil {
-			return userBin
-		}
+		return filepath.Join(home, ".local", "bin")
 	}
 
-	return "/usr/local/bin"
+	roots := GetInstallerRoots()
+	return roots.BinDir
 }
 
 // AssertSafeInstallTarget guards against accidentally writing into forbidden host locations in tests.
 func AssertSafeInstallTarget(targetDir string) error {
-	if !config.IsTestMode() {
-		return nil
-	}
-	clean := filepath.Clean(targetDir)
-	if clean == "/usr/local/bin" || clean == "/usr/bin" {
-		return fmt.Errorf("[FAIL-CLOSED GUARD] installer test refused write to host system path: %s", clean)
-	}
-	realProd := config.GetRealProductionGeminiDir()
-	if strings.HasPrefix(clean, realProd) {
-		return fmt.Errorf("[FAIL-CLOSED GUARD] installer test refused write into production gemini dir: %s", clean)
-	}
-	return nil
+	return config.AssertSafeDestructivePath(targetDir)
 }
 
 // CopyFile copies src to dst and ensures mode 0755 permissions.
 func CopyFile(src, dst string) error {
+	if err := config.AssertSafeDestructivePath(dst); err != nil {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -108,6 +98,9 @@ func CopyFile(src, dst string) error {
 
 	// Write to temp file then rename for atomic replacement
 	tmpDst := dst + ".tmp"
+	if err := config.AssertSafeDestructivePath(tmpDst); err != nil {
+		return err
+	}
 	out, err := os.OpenFile(tmpDst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
@@ -144,21 +137,30 @@ func Install(opts Options) error {
 	}
 	fmt.Fprintf(out, "Found native agy: %s\n", nativeAgy)
 
+	roots := GetInstallerRoots()
+
 	prefix := opts.Prefix
 	if prefix == "" {
 		prefix = os.Getenv("PREFIX")
 	}
 	home := opts.HomeDir
 	if home == "" {
-		home = os.Getenv("HOME")
+		home = roots.UserHome
 	}
 
 	targetDir := opts.TargetDir
 	if targetDir == "" {
 		if opts.IsSystem {
-			targetDir = "/usr/local/bin"
+			if roots.SystemRoot != "" {
+				targetDir = filepath.Join(roots.SystemRoot, "usr", "local", "bin")
+			} else {
+				targetDir = "/usr/local/bin"
+			}
 		} else {
 			targetDir = DetermineTargetDir(prefix, home, func() bool {
+				if config.IsTestMode() {
+					return false
+				}
 				// Probe /usr/local/bin writability
 				testFile := "/usr/local/bin/.agy_write_probe"
 				if f, err := os.OpenFile(testFile, os.O_CREATE|os.O_WRONLY, 0600); err == nil {
@@ -189,6 +191,9 @@ func Install(opts Options) error {
 
 	// 3. Install thin agy shim
 	dstAgy := filepath.Join(targetDir, "agy")
+	if err := config.AssertSafeDestructivePath(dstAgy); err != nil {
+		return err
+	}
 	agyContent := UserAgyShimContent
 	if opts.IsSystem {
 		agyContent = SystemAgyShimContent
@@ -199,12 +204,18 @@ func Install(opts Options) error {
 
 	// 4. Install thin agy-raw shim
 	dstRaw := filepath.Join(targetDir, "agy-raw")
+	if err := config.AssertSafeDestructivePath(dstRaw); err != nil {
+		return err
+	}
 	if err := os.WriteFile(dstRaw, []byte(AgyRawShimContent), 0755); err != nil {
 		return fmt.Errorf("failed to write agy-raw script: %w", err)
 	}
 
 	// 5. Install agy-orig symlink
 	dstOrig := filepath.Join(targetDir, "agy-orig")
+	if err := config.AssertSafeDestructivePath(dstOrig); err != nil {
+		return err
+	}
 	_ = os.Remove(dstOrig)
 	if err := os.Symlink("agy-raw", dstOrig); err != nil {
 		_ = os.WriteFile(dstOrig, []byte(AgyRawShimContent), 0755)
@@ -215,10 +226,18 @@ func Install(opts Options) error {
 	dataDir := opts.DataDir
 	if opts.IsSystem {
 		if configDir == "" {
-			configDir = "/etc/agy-pool"
+			if roots.SystemRoot != "" {
+				configDir = filepath.Join(roots.SystemRoot, "etc", "agy-pool")
+			} else {
+				configDir = "/etc/agy-pool"
+			}
 		}
 		if dataDir == "" {
-			dataDir = "/var/lib/agy-pool"
+			if roots.SystemRoot != "" {
+				dataDir = filepath.Join(roots.SystemRoot, "var", "lib", "agy-pool")
+			} else {
+				dataDir = "/var/lib/agy-pool"
+			}
 		}
 	} else if home != "" {
 		if configDir == "" {
@@ -230,6 +249,9 @@ func Install(opts Options) error {
 	}
 
 	if configDir != "" {
+		if err := config.AssertSafeDestructivePath(configDir); err != nil {
+			return err
+		}
 		_ = os.MkdirAll(configDir, 0755)
 		cfgFile := filepath.Join(configDir, "config.json")
 		if _, err := os.Stat(cfgFile); os.IsNotExist(err) {
@@ -251,11 +273,17 @@ func Install(opts Options) error {
   }
 }
 `
+			if err := config.AssertSafeDestructivePath(cfgFile); err != nil {
+				return err
+			}
 			_ = os.WriteFile(cfgFile, []byte(defaultCfg), 0644)
 		}
 	}
 
 	if dataDir != "" {
+		if err := config.AssertSafeDestructivePath(dataDir); err != nil {
+			return err
+		}
 		_ = os.MkdirAll(filepath.Join(dataDir, "locks"), 0700)
 	}
 
@@ -289,6 +317,9 @@ func Install(opts Options) error {
 
 // AppendAliasIfMissing adds the agy-pool alias block to an rc file idempotently.
 func AppendAliasIfMissing(rcPath string) error {
+	if err := config.AssertSafeDestructivePath(rcPath); err != nil {
+		return err
+	}
 	content, err := os.ReadFile(rcPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -311,6 +342,9 @@ func AppendAliasIfMissing(rcPath string) error {
 
 // RemoveAlias cleans the agy-pool marker block from an rc file.
 func RemoveAlias(rcPath string) error {
+	if err := config.AssertSafeDestructivePath(rcPath); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(rcPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -352,48 +386,61 @@ func RemoveAlias(rcPath string) error {
 
 // Uninstall cleans up installed binaries, symlinks, and aliases while preserving user data.
 func Uninstall(opts Options) error {
+	roots := GetInstallerRoots()
+
 	prefix := opts.Prefix
 	if prefix == "" {
 		prefix = os.Getenv("PREFIX")
 	}
 	home := opts.HomeDir
 	if home == "" {
-		home = os.Getenv("HOME")
+		home = roots.UserHome
 	}
 
 	targetDir := opts.TargetDir
 	if targetDir == "" {
-		targetDir = DetermineTargetDir(prefix, home, nil)
+		if opts.IsSystem {
+			if roots.SystemRoot != "" {
+				targetDir = filepath.Join(roots.SystemRoot, "usr", "local", "bin")
+			} else {
+				targetDir = "/usr/local/bin"
+			}
+		} else {
+			targetDir = DetermineTargetDir(prefix, home, nil)
+		}
 	}
 
 	if err := AssertSafeInstallTarget(targetDir); err != nil {
 		return err
 	}
 
-	// 1. Remove executables and symlinks from targetDir
+	// 1. Remove executables and symlinks from targetDir ONLY
 	for _, name := range []string{"agy-pool", "agy-raw", "agy-orig"} {
-		_ = os.Remove(filepath.Join(targetDir, name))
-		if home != "" {
-			_ = os.Remove(filepath.Join(home, ".local", "bin", name))
+		p := filepath.Join(targetDir, name)
+		if err := config.AssertSafeDestructivePath(p); err != nil {
+			return err
 		}
+		_ = os.Remove(p)
 	}
 
 	// 2. Remove agy shim ONLY if it is an agy-pool shim (never delete native agy!)
 	agyPath := filepath.Join(targetDir, "agy")
 	if diagnostics.IsShimOrSelf(agyPath) {
+		if err := config.AssertSafeDestructivePath(agyPath); err != nil {
+			return err
+		}
 		_ = os.Remove(agyPath)
 	}
-	if home != "" {
-		userAgy := filepath.Join(home, ".local", "bin", "agy")
-		if diagnostics.IsShimOrSelf(userAgy) {
-			_ = os.Remove(userAgy)
-		}
-	}
 
-	// 2. Clean shell rc files
+	// 3. Clean shell rc files if home is set
 	if home != "" {
 		for _, rc := range []string{filepath.Join(home, ".bashrc"), filepath.Join(home, ".zshrc")} {
-			_ = RemoveAlias(rc)
+			if _, err := os.Stat(rc); err == nil {
+				if err := config.AssertSafeDestructivePath(rc); err != nil {
+					return err
+				}
+				_ = RemoveAlias(rc)
+			}
 		}
 	}
 

@@ -79,6 +79,7 @@ type LoggingConfig struct {
 }
 
 var (
+	realHostUserHome        string
 	realProductionGeminiDir string
 	configuredStateDir      string
 	configuredDataDir       string
@@ -89,12 +90,15 @@ var (
 	forbiddenDirsMu         sync.RWMutex
 	testMode                = false
 	testModeMu              sync.RWMutex
+	syntheticSandboxRoot    string
+	syntheticSandboxMu      sync.RWMutex
 )
 
 func init() {
+	realHostUserHome = detectRealHostUserHome()
 	realProductionGeminiDir = detectRealProductionGeminiDir()
-	forbiddenWriteDirs[realProductionGeminiDir] = true
-	forbiddenWriteDirs[filepath.Clean(realProductionGeminiDir)] = true
+
+	initForbiddenPaths()
 
 	if os.Getenv("AGY_TEST_MODE") == "1" {
 		testMode = true
@@ -102,6 +106,100 @@ func init() {
 
 	// Initialize state dir based on environment or default dev location
 	initStateDir()
+}
+
+func detectRealHostUserHome() string {
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		eval, err := filepath.EvalSymlinks(u.HomeDir)
+		if err == nil {
+			return eval
+		}
+		return filepath.Clean(u.HomeDir)
+	}
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		eval, err := filepath.EvalSymlinks(h)
+		if err == nil {
+			return eval
+		}
+		return filepath.Clean(h)
+	}
+	home := os.Getenv("HOME")
+	if home != "" {
+		return filepath.Clean(home)
+	}
+	return "/home/codex"
+}
+
+// GetRealHostUserHome returns the detected real OS home directory for the host user.
+func GetRealHostUserHome() string {
+	return realHostUserHome
+}
+
+// SetSyntheticSandboxRoot sets the active test sandbox root.
+// In test mode, paths strictly within this sandbox are permitted.
+func SetSyntheticSandboxRoot(root string) func() {
+	syntheticSandboxMu.Lock()
+	orig := syntheticSandboxRoot
+	if root != "" {
+		abs, err := filepath.Abs(root)
+		if err == nil {
+			if eval, err := filepath.EvalSymlinks(abs); err == nil {
+				syntheticSandboxRoot = filepath.Clean(eval)
+			} else {
+				syntheticSandboxRoot = filepath.Clean(abs)
+			}
+		} else {
+			syntheticSandboxRoot = filepath.Clean(root)
+		}
+	} else {
+		syntheticSandboxRoot = ""
+	}
+	syntheticSandboxMu.Unlock()
+
+	return func() {
+		syntheticSandboxMu.Lock()
+		syntheticSandboxRoot = orig
+		syntheticSandboxMu.Unlock()
+	}
+}
+
+// GetSyntheticSandboxRoot returns the active test sandbox root.
+func GetSyntheticSandboxRoot() string {
+	syntheticSandboxMu.RLock()
+	defer syntheticSandboxMu.RUnlock()
+	return syntheticSandboxRoot
+}
+
+func initForbiddenPaths() {
+	forbiddenDirsMu.Lock()
+	defer forbiddenDirsMu.Unlock()
+
+	paths := []string{
+		realProductionGeminiDir,
+		filepath.Join(realHostUserHome, ".gemini"),
+		filepath.Join(realHostUserHome, ".local", "bin"),
+		filepath.Join(realHostUserHome, ".config", "agy-pool"),
+		filepath.Join(realHostUserHome, ".local", "share", "agy-pool"),
+		filepath.Join(realHostUserHome, ".bashrc"),
+		filepath.Join(realHostUserHome, ".zshrc"),
+		filepath.Join(realHostUserHome, ".profile"),
+		filepath.Join(realHostUserHome, ".bash_profile"),
+		"/usr/local/bin",
+		"/usr/bin",
+		"/etc/agy-pool",
+		"/var/lib/agy-pool",
+	}
+
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		clean := filepath.Clean(p)
+		forbiddenWriteDirs[clean] = true
+		if eval, err := filepath.EvalSymlinks(clean); err == nil {
+			forbiddenWriteDirs[filepath.Clean(eval)] = true
+		}
+	}
 }
 
 func detectRealProductionGeminiDir() string {
@@ -117,8 +215,8 @@ func detectRealProductionGeminiDir() string {
 	}
 
 	// Detect real user home from OS user database independent of mutable $HOME
-	if u, err := user.Current(); err == nil && u.HomeDir != "" {
-		geminiPath := filepath.Join(u.HomeDir, ".gemini")
+	if realHostUserHome != "" {
+		geminiPath := filepath.Join(realHostUserHome, ".gemini")
 		eval, err := filepath.EvalSymlinks(geminiPath)
 		if err == nil {
 			return eval
@@ -650,37 +748,102 @@ func ConfigureStateDir(dir string) error {
 
 func isProtectedProductionDir(path string) bool {
 	clean := filepath.Clean(path)
+
+	syntheticSandboxMu.RLock()
+	sandbox := syntheticSandboxRoot
+	syntheticSandboxMu.RUnlock()
+
+	if sandbox != "" && (clean == sandbox || strings.HasPrefix(clean, sandbox+string(os.PathSeparator))) {
+		return false
+	}
+
 	forbiddenDirsMu.RLock()
-	defer forbiddenDirsMu.RUnlock()
-	for forbidden := range forbiddenWriteDirs {
-		if clean == forbidden || strings.HasPrefix(clean, forbidden+string(os.PathSeparator)) {
-			return true
+	realProd := realProductionGeminiDir
+	forbiddenDirsMu.RUnlock()
+
+	if realProd != "" && (clean == realProd || strings.HasPrefix(clean, realProd+string(os.PathSeparator))) {
+		return true
+	}
+
+	if IsTestMode() {
+		forbiddenDirsMu.RLock()
+		defer forbiddenDirsMu.RUnlock()
+		for forbidden := range forbiddenWriteDirs {
+			if clean == forbidden || strings.HasPrefix(clean, forbidden+string(os.PathSeparator)) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// AssertSafeWritePath ensures a target path never targets real production state.
-func AssertSafeWritePath(path string) error {
+// AssertSafeDestructivePath guards against destructive operations (write, delete, truncate, symlink)
+// targeting real production and real host locations in test mode.
+func AssertSafeDestructivePath(path string) error {
 	if path == "" {
 		return nil
 	}
 	abs, err := filepath.Abs(expandUser(path))
 	if err != nil {
-		return fmt.Errorf("[FAIL-CLOSED GUARD] failed to resolve write path %q: %w", path, err)
+		return fmt.Errorf("[FAIL-CLOSED GUARD] failed to resolve destructive path %q: %w", path, err)
+	}
+	cleanAbs := filepath.Clean(abs)
+
+	// Check 1: nominal path
+	if isProtectedProductionDir(cleanAbs) {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s", cleanAbs)
 	}
 
-	realPath := abs
-	if eval, err := filepath.EvalSymlinks(abs); err == nil {
-		realPath = eval
-	} else if parentEval, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
-		realPath = filepath.Join(parentEval, filepath.Base(abs))
+	// Check 2: enclosing directory resolved
+	if parentEval, err := filepath.EvalSymlinks(filepath.Dir(cleanAbs)); err == nil {
+		cleanParent := filepath.Clean(parentEval)
+		resolvedParentPath := filepath.Join(cleanParent, filepath.Base(cleanAbs))
+		if isProtectedProductionDir(cleanParent) || isProtectedProductionDir(resolvedParentPath) {
+			return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s", resolvedParentPath)
+		}
 	}
 
-	if isProtectedProductionDir(realPath) {
-		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s", realPath)
+	// Check 3: follow symlink hops
+	curr := cleanAbs
+	for hop := 0; hop < 16; hop++ {
+		fi, err := os.Lstat(curr)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			break
+		}
+		target, err := os.Readlink(curr)
+		if err != nil {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(curr), target)
+		}
+		cleanTarget := filepath.Clean(target)
+		if isProtectedProductionDir(cleanTarget) {
+			return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s (via %s)", cleanTarget, curr)
+		}
+		if targetParentEval, err := filepath.EvalSymlinks(filepath.Dir(cleanTarget)); err == nil {
+			cleanTargetParent := filepath.Clean(targetParentEval)
+			if isProtectedProductionDir(cleanTargetParent) {
+				return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s (via %s)", cleanTargetParent, curr)
+			}
+		}
+		curr = cleanTarget
 	}
+
+	// Check 4: fully evaluated target
+	if eval, err := filepath.EvalSymlinks(cleanAbs); err == nil {
+		cleanEval := filepath.Clean(eval)
+		if isProtectedProductionDir(cleanEval) {
+			return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s", cleanEval)
+		}
+	}
+
 	return nil
+}
+
+// AssertSafeWritePath ensures a target path never targets real production state.
+func AssertSafeWritePath(path string) error {
+	return AssertSafeDestructivePath(path)
 }
 
 // AssertSafeReadPath ensures test code does not accidentally read real production state.
@@ -692,16 +855,17 @@ func AssertSafeReadPath(path string) error {
 	if err != nil {
 		return fmt.Errorf("[FAIL-CLOSED GUARD] failed to resolve read path %q: %w", path, err)
 	}
+	cleanAbs := filepath.Clean(abs)
 
-	realPath := abs
-	if eval, err := filepath.EvalSymlinks(abs); err == nil {
-		realPath = eval
-	} else if parentEval, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
-		realPath = filepath.Join(parentEval, filepath.Base(abs))
+	if isProtectedProductionDir(cleanAbs) {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing read from protected production path in test mode: %s", cleanAbs)
 	}
 
-	if isProtectedProductionDir(realPath) {
-		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing read from protected production path in test mode: %s", realPath)
+	if eval, err := filepath.EvalSymlinks(cleanAbs); err == nil {
+		cleanEval := filepath.Clean(eval)
+		if isProtectedProductionDir(cleanEval) {
+			return fmt.Errorf("[FAIL-CLOSED GUARD] refusing read from protected production path in test mode: %s", cleanEval)
+		}
 	}
 	return nil
 }
