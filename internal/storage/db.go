@@ -379,6 +379,7 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 	strategy := "max_quota"
 	var activeID *string
 	var rrID *string
+	var poolExtra map[string]json.RawMessage
 
 	for rows.Next() {
 		var k, v sql.NullString
@@ -402,6 +403,13 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 			if v.Valid && v.String != "" {
 				val := v.String
 				rrID = &val
+			}
+		case "pool_extra":
+			if v.Valid && v.String != "" {
+				var ex map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(v.String), &ex); err == nil {
+					poolExtra = ex
+				}
 			}
 		}
 	}
@@ -571,6 +579,7 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 		ActiveAccountID:         activeID,
 		RoundRobinLastAccountID: rrID,
 		Accounts:                accountsList,
+		Extra:                   poolExtra,
 	}, nil
 }
 
@@ -607,6 +616,14 @@ func SavePoolToTx(tx *sql.Tx, pool *Pool) error {
 		if _, err := tx.Exec("DELETE FROM runtime_global WHERE key = 'round_robin_last_account_id'"); err != nil {
 			return fmt.Errorf("failed to delete round_robin_last_account_id: %w", err)
 		}
+	}
+
+	if len(pool.Extra) > 0 {
+		if b, err := json.Marshal(pool.Extra); err == nil {
+			_, _ = tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('pool_extra', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(b))
+		}
+	} else {
+		_, _ = tx.Exec("DELETE FROM runtime_global WHERE key = 'pool_extra'")
 	}
 
 	// 2. Remove accounts not in pool

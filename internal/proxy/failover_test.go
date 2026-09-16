@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -358,8 +357,7 @@ func TestUnknownFieldPreservationDuringFailover(t *testing.T) {
 		return "token-" + account.ID, nil
 	}
 
-	// Write custom JSON with future unknown fields at root, account, and quota levels
-	accountsPath := config.GetAccountsFile()
+	// Write custom state with future unknown fields at root, account, and quota levels
 	rawJSON := `{
 		"version": 1,
 		"strategy": "max_quota",
@@ -377,7 +375,13 @@ func TestUnknownFieldPreservationDuringFailover(t *testing.T) {
 			}
 		]
 	}`
-	_ = storage.AtomicJSONWrite(accountsPath, json.RawMessage(rawJSON))
+	var p storage.Pool
+	if err := json.Unmarshal([]byte(rawJSON), &p); err != nil {
+		t.Fatalf("failed to unmarshal test JSON: %v", err)
+	}
+	if err := storage.SavePool(&p); err != nil {
+		t.Fatalf("failed to save test pool: %v", err)
+	}
 
 	handler := NewHandler()
 	req := httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader("{}"))
@@ -402,4 +406,74 @@ func TestUnknownFieldPreservationDuringFailover(t *testing.T) {
 		t.Fatalf("future_quota_metric lost: %+v", stored.LastQuota.Extra)
 	}
 	_ = tmp
+}
+
+func TestRecordQuotaError_429Atomicity(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	now := time.Now().Unix()
+	frac5h := 0.85
+	fracWeekly := 0.92
+
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{
+		ID:         "acc_429_test",
+		Email:      "rate_limited@example.com",
+		ErrorCount: 0,
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  &frac5h,
+				ResetTime: "2026-09-17T12:00:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  &fracWeekly,
+				ResetTime: "2026-09-24T00:00:00Z",
+			},
+			RemainingFraction: &frac5h,
+			UpdatedAt:         &now,
+		},
+	}
+	pool.Accounts = append(pool.Accounts, acc)
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save test pool: %v", err)
+	}
+
+	headers := http.Header{}
+	headers.Set("Retry-After", "120")
+
+	// Call RecordQuotaError
+	delay := RecordQuotaError(acc, headers)
+	if delay != 120 {
+		t.Fatalf("expected delay 120, got %d", delay)
+	}
+
+	// Verify atomicity in state.db
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	stored := storage.FindAccount(loaded, acc)
+	if stored == nil {
+		t.Fatalf("stored account not found")
+	}
+
+	// 1. Cooldown must be set
+	if stored.RateLimitedUntil == nil || *stored.RateLimitedUntil <= float64(now) {
+		t.Fatalf("rate_limited_until was not updated atomically: %v", stored.RateLimitedUntil)
+	}
+	// 2. ErrorCount must be incremented
+	if stored.ErrorCount != 1 {
+		t.Fatalf("error_count was not incremented atomically: %d", stored.ErrorCount)
+	}
+	// 3. Quota freshness must be invalidated (updated_at = 0)
+	if stored.LastQuota == nil || stored.LastQuota.UpdatedAt == nil || *stored.LastQuota.UpdatedAt != 0 {
+		t.Fatalf("last_quota.updated_at was not set to 0 atomically: %+v", stored.LastQuota)
+	}
+	// 4. Cached quota windows MUST be preserved intact
+	if stored.LastQuota.Gemini5H == nil || stored.LastQuota.Gemini5H.Fraction == nil || *stored.LastQuota.Gemini5H.Fraction != 0.85 {
+		t.Fatalf("gemini_5h window was lost or corrupted during 429 mutation: %+v", stored.LastQuota.Gemini5H)
+	}
+	if stored.LastQuota.GeminiWeekly == nil || stored.LastQuota.GeminiWeekly.Fraction == nil || *stored.LastQuota.GeminiWeekly.Fraction != 0.92 {
+		t.Fatalf("gemini_weekly window was lost or corrupted during 429 mutation: %+v", stored.LastQuota.GeminiWeekly)
+	}
 }
