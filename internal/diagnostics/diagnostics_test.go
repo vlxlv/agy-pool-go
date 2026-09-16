@@ -29,7 +29,9 @@ func setupDoctorTestEnv(t *testing.T) (string, func()) {
 
 	origState := config.GetStateDir()
 	origTestMode := config.IsTestMode()
+	origGeminiDir := os.Getenv("AGY_GEMINI_DIR")
 	config.SetTestMode(true)
+	os.Setenv("AGY_GEMINI_DIR", stateDir)
 	if err := config.ConfigureStateDir(stateDir); err != nil {
 		t.Fatalf("ConfigureStateDir failed: %v", err)
 	}
@@ -37,6 +39,11 @@ func setupDoctorTestEnv(t *testing.T) (string, func()) {
 	cleanup := func() {
 		_ = config.ConfigureStateDir(origState)
 		config.SetTestMode(origTestMode)
+		if origGeminiDir != "" {
+			os.Setenv("AGY_GEMINI_DIR", origGeminiDir)
+		} else {
+			os.Unsetenv("AGY_GEMINI_DIR")
+		}
 		SetAgyBinaryFinder(nil)
 		SetAgyVersionProvider(nil)
 		SetBackendHostProvider(nil)

@@ -16,6 +16,7 @@ import (
 type LaunchOptions struct {
 	Port           int
 	StateDir       string
+	ConfigFile     string
 	PIDFile        string
 	LogFile        string
 	EntrypointPath string
@@ -110,10 +111,16 @@ func StartDaemon(opts LaunchOptions) (*StartResult, error) {
 	cmd.Stdout = logFD
 	cmd.Stderr = logFD
 
-	// Environment: propagate state directory if custom
+	// Environment: propagate state directory and config file if specified
 	cmd.Env = os.Environ()
-	if opts.StateDir != "" {
-		cmd.Env = append(cmd.Env, "AGY_GEMINI_DIR="+opts.StateDir)
+	dataDir := opts.StateDir
+	if dataDir == "" {
+		dataDir = config.GetDataDir()
+	}
+	cmd.Env = append(cmd.Env, "AGY_DATA_DIR="+dataDir)
+	cmd.Env = append(cmd.Env, "AGY_GEMINI_DIR="+dataDir)
+	if opts.ConfigFile != "" {
+		cmd.Env = append(cmd.Env, "AGY_CONFIG_FILE="+opts.ConfigFile)
 	}
 
 	// Detached session: create a new session group

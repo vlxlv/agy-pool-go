@@ -94,11 +94,11 @@ func getSelfPaths() map[string]bool {
 	}
 
 	// ~/.local/bin/agy-pool
-	var home string
-	if u, err := user.Current(); err == nil && u.HomeDir != "" {
-		home = u.HomeDir
-	} else {
-		home = os.Getenv("HOME")
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
 	}
 	if home != "" {
 		userBin := filepath.Join(home, ".local", "bin", "agy-pool")
@@ -120,6 +120,66 @@ func getSelfPaths() map[string]bool {
 	return paths
 }
 
+// IsShimOrSelf reports whether a path is the agy-pool binary itself, an agy/agy-raw shim,
+// or a symlink resolving to one.
+func IsShimOrSelf(path string) bool {
+	if path == "" {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+
+	// 1. Check known self paths
+	selfPaths := getSelfPaths()
+	if selfPaths[abs] {
+		return true
+	}
+	realPath, err := filepath.EvalSymlinks(abs)
+	if err == nil && selfPaths[realPath] {
+		return true
+	}
+	if realPath == "" {
+		realPath = abs
+	}
+	if filepath.Base(realPath) == "agy-pool" {
+		return true
+	}
+
+	// 2. Inode / SameFile check against running executable
+	if exe, err := os.Executable(); err == nil {
+		if fi1, err1 := os.Stat(abs); err1 == nil {
+			if fi2, err2 := os.Stat(exe); err2 == nil && os.SameFile(fi1, fi2) {
+				return true
+			}
+		}
+	}
+
+	// 3. Inspect file header for shim signature
+	f, err := os.Open(realPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 1024)
+	n, _ := f.Read(buf)
+	if n > 0 {
+		header := string(buf[:n])
+		if strings.Contains(header, "agy-pool run") ||
+			strings.Contains(header, "agy-pool raw") ||
+			strings.Contains(header, "agy-pool direct") ||
+			strings.Contains(header, "agy-pool orig") ||
+			strings.Contains(header, "# agy-pool") ||
+			strings.Contains(header, "agy-pool integration") {
+			return true
+		}
+	}
+
+	return false
+}
+
 // FindRealAgyBinary locates the underlying native agy executable dynamically without self-recursion.
 func FindRealAgyBinary() string {
 	hooksMu.RLock()
@@ -129,26 +189,20 @@ func FindRealAgyBinary() string {
 		return finder()
 	}
 
-	selfPaths := getSelfPaths()
+	var candidates []string
 
-	// 1. AGY_BIN environment override
-	if explicit := os.Getenv("AGY_BIN"); explicit != "" {
-		if fi, err := os.Stat(explicit); err == nil && !fi.IsDir() {
-			abs, err := filepath.Abs(explicit)
-			if err == nil {
-				realCand, err := filepath.EvalSymlinks(abs)
-				if err != nil {
-					realCand = abs
-				}
-				if !selfPaths[realCand] && filepath.Base(realCand) != "agy-pool" {
-					return abs
-				}
-			}
-		}
+	// 1. Configured native_agy.binary
+	cfg := config.GetStaticConfig()
+	if cfg != nil && cfg.NativeAgy.Binary != nil && *cfg.NativeAgy.Binary != "" {
+		candidates = append(candidates, *cfg.NativeAgy.Binary)
 	}
 
-	// 2. Ordered candidate locations matching Python reference
-	var candidates []string
+	// 2. AGY_BIN environment override
+	if explicit := os.Getenv("AGY_BIN"); explicit != "" {
+		candidates = append(candidates, explicit)
+	}
+
+	// 3. Ordered candidate locations matching Python reference
 	if prefix := os.Getenv("PREFIX"); prefix != "" {
 		candidates = append(candidates, filepath.Join(prefix, "bin", "agy"))
 	}
@@ -159,33 +213,45 @@ func FindRealAgyBinary() string {
 		"/usr/bin/agy",
 	)
 
-	var home string
-	if u, err := user.Current(); err == nil && u.HomeDir != "" {
-		home = u.HomeDir
-	} else {
-		home = os.Getenv("HOME")
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
 	}
 	if home != "" {
 		candidates = append(candidates, filepath.Join(home, ".local", "bin", "agy"))
 	}
 
-	if p, err := exec.LookPath("agy"); err == nil {
-		candidates = append(candidates, p)
+	// 4. All PATH entries to find native agy even if preceded by shims on PATH
+	pathEnv := os.Getenv("PATH")
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir != "" {
+			candidates = append(candidates, filepath.Join(dir, "agy"))
+		}
 	}
 
+	seen := make(map[string]bool)
 	for _, cand := range candidates {
 		if cand == "" {
 			continue
 		}
-		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && fi.Mode()&0111 != 0 {
-			realCand, err := filepath.EvalSymlinks(cand)
-			if err != nil {
-				realCand = filepath.Clean(cand)
-			}
-			if !selfPaths[realCand] && filepath.Base(realCand) != "agy-pool" {
-				return cand
-			}
+		clean := filepath.Clean(cand)
+		if seen[clean] {
+			continue
 		}
+		seen[clean] = true
+
+		fi, err := os.Stat(clean)
+		if err != nil || fi.IsDir() || fi.Mode()&0111 == 0 {
+			continue
+		}
+
+		if IsShimOrSelf(clean) {
+			continue
+		}
+
+		return clean
 	}
 
 	return ""

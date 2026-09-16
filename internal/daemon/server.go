@@ -95,10 +95,28 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	}
 
 	currentPID := os.Getpid()
+	cfg := config.GetStaticConfig()
+	cfgPath := ""
+	cfgHash := ""
+	if p, err := config.ResolveDefaultConfigFile(); err == nil && p != "" {
+		cfgPath = p
+		if h, err := config.ComputeConfigFileHash(p); err == nil {
+			cfgHash = h
+		}
+	}
+	listenHost := "127.0.0.1"
+	if cfg != nil && cfg.Server.Listen != "" {
+		listenHost = cfg.Server.Listen
+	}
 	pidInfo := DaemonInfo{
 		PID:         currentPID,
 		Version:     VersionProvider(),
 		ScriptMtime: scriptMtime,
+		ConfigPath:  cfgPath,
+		ConfigHash:  cfgHash,
+		DataDir:     config.GetDataDir(),
+		Listen:      listenHost,
+		Port:        actualPort,
 	}
 	if err := WritePIDFile(pidFile, pidInfo); err != nil {
 		return fmt.Errorf("failed to write pid file: %w", err)

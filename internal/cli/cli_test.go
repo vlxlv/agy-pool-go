@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
+	_ "modernc.org/sqlite"
 )
 
 func setupCLITestEnv(t *testing.T) (string, func()) {
@@ -488,5 +490,164 @@ func TestRunTopLevelOptionsRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid choice: '-D'") {
 		t.Errorf("expected invalid choice error for -D, got: %s", stderr.String())
+	}
+}
+
+func TestRunBareContinueResolvesConversation(t *testing.T) {
+	tempDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	// 1. Setup mock conversation DB
+	cliDir := config.GetAgyCliDir()
+	_ = os.MkdirAll(cliDir, 0700)
+	dbPath := filepath.Join(cliDir, "conversation_summaries.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err == nil {
+		_, _ = db.Exec("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT, last_modified_time INTEGER);")
+		_, _ = db.Exec("INSERT INTO conversation_summaries VALUES ('conv_12345678', 'Test Session', '[\"file://" + tempDir + "\"]', 5000);")
+		db.Close()
+	}
+
+	// 2. Setup config and data dir
+	cfgFile := filepath.Join(tempDir, "config.json")
+	dataDir := filepath.Join(tempDir, "state_run")
+	cfgContent := `{"version": 1, "server": {"port": 9199}}`
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	diagnostics.SetAgyBinaryFinder(func() string { return "/fake/bin/agy" })
+
+	var capturedBinary string
+	var capturedArgs []string
+	ExecHandler = func(binary string, argv []string, env []string) error {
+		capturedBinary = binary
+		capturedArgs = argv
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	// Test running with bare "-c" after "--"
+	code := Main([]string{
+		"run",
+		"-c", cfgFile,
+		"-D", dataDir,
+		"--",
+		"-c",
+	}, nil, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run expected 0, got %d. stderr: %s", code, stderr.String())
+	}
+	if capturedBinary != "/fake/bin/agy" {
+		t.Errorf("expected /fake/bin/agy, got %q", capturedBinary)
+	}
+	if len(capturedArgs) == 0 {
+		t.Fatalf("expected capturedArgs not to be empty")
+	}
+
+	// Verify -D configured the data directory without chdir
+	if config.GetDataDir() != dataDir {
+		t.Errorf("expected data dir %q, got %q", dataDir, config.GetDataDir())
+	}
+}
+
+func TestFindRealAgyBinaryExcludesShims(t *testing.T) {
+	tempDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	// Ensure no mock override is active
+	diagnostics.SetAgyBinaryFinder(nil)
+
+	shimDir := filepath.Join(tempDir, "shim_bin")
+	realDir := filepath.Join(tempDir, "real_bin")
+	if err := os.MkdirAll(shimDir, 0755); err != nil {
+		t.Fatalf("failed to create shimDir: %v", err)
+	}
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create realDir: %v", err)
+	}
+
+	// Create an agy-pool integration shim in shimDir
+	shimFile := filepath.Join(shimDir, "agy")
+	shimContent := `#!/bin/sh
+# agy: agy-pool integration shim
+exec agy-pool run "$@"
+`
+	if err := os.WriteFile(shimFile, []byte(shimContent), 0755); err != nil {
+		t.Fatalf("failed to write shim: %v", err)
+	}
+
+	// Create a real mock agy executable in realDir
+	realFile := filepath.Join(realDir, "agy")
+	realContent := `#!/bin/sh
+echo "real native agy v1.0.0"
+`
+	if err := os.WriteFile(realFile, []byte(realContent), 0755); err != nil {
+		t.Fatalf("failed to write real mock: %v", err)
+	}
+
+	// Set PATH with shimDir FIRST, then realDir
+	origPath := os.Getenv("PATH")
+	defer os.Setenv("PATH", origPath)
+	os.Setenv("PATH", shimDir+string(os.PathListSeparator)+realDir)
+
+	// Isolate HOME, PREFIX, and AGY_BIN
+	origHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", origHome)
+	os.Setenv("HOME", tempDir)
+
+	origPrefix := os.Getenv("PREFIX")
+	defer os.Setenv("PREFIX", origPrefix)
+	os.Unsetenv("PREFIX")
+
+	origAgyBin := os.Getenv("AGY_BIN")
+	defer os.Setenv("AGY_BIN", origAgyBin)
+	os.Unsetenv("AGY_BIN")
+
+	found := diagnostics.FindRealAgyBinary()
+	if found != realFile {
+		t.Fatalf("expected FindRealAgyBinary to skip shim %s and find real binary %s, got: %s", shimFile, realFile, found)
+	}
+}
+
+func TestMigrateLegacyCommand(t *testing.T) {
+	tempDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	srcFile := filepath.Join(tempDir, "legacy_pool.json")
+	targetDir := filepath.Join(tempDir, "target_data")
+	content := `{
+  "version": 1,
+  "strategy": "max_quota",
+  "accounts": [
+    {"id": "acc_1", "email": "migrated@example.com", "access_token": "tok1"}
+  ]
+}`
+	if err := os.WriteFile(srcFile, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write legacy pool: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"migrate-legacy", "-s", srcFile, "-D", targetDir}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("migrate-legacy failed with code %d, stderr: %s", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Successfully migrated 1 account") {
+		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+
+	// Verify target accounts.json exists
+	targetAccounts := filepath.Join(targetDir, "accounts.json")
+	if _, err := os.Stat(targetAccounts); err != nil {
+		t.Fatalf("target accounts file was not created: %v", err)
+	}
+
+	// Verify source was untouched
+	data, err := os.ReadFile(srcFile)
+	if err != nil || string(data) != content {
+		t.Fatalf("source file was modified or unreadable")
 	}
 }

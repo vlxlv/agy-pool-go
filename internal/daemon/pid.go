@@ -30,6 +30,11 @@ type DaemonInfo struct {
 	PID         int    `json:"pid"`
 	Version     string `json:"version,omitempty"`
 	ScriptMtime int64  `json:"script_mtime,omitempty"`
+	ConfigPath  string `json:"config_path,omitempty"`
+	ConfigHash  string `json:"config_hash,omitempty"`
+	DataDir     string `json:"data_dir,omitempty"`
+	Listen      string `json:"listen,omitempty"`
+	Port        int    `json:"port,omitempty"`
 }
 
 var (
@@ -250,4 +255,52 @@ func TryAcquirePIDLock(pidFile string) (func(), error) {
 		f.Close()
 	}
 	return unlock, nil
+}
+
+// CheckDaemonMismatch checks if an existing running daemon matches the requested configuration, data dir, and port.
+// Returns an empty string if there is no conflict or no daemon, or a diagnostic message describing any mismatch.
+func CheckDaemonMismatch(pidFile string, expectedPort int, expectedConfigPath string) string {
+	if pidFile == "" {
+		pidFile = PIDFileProvider()
+	}
+	info := GetDaemonInfo(pidFile)
+	if info == nil || info.PID <= 0 {
+		return ""
+	}
+
+	// Verify PID is running
+	if err := syscall.Kill(info.PID, 0); err != nil {
+		return ""
+	}
+
+	// 1. Port mismatch
+	if expectedPort > 0 && info.Port > 0 && info.Port != expectedPort {
+		return fmt.Sprintf("daemon port mismatch: running on port %d, requested %d", info.Port, expectedPort)
+	}
+
+	// 2. Data directory mismatch
+	currentDataDir := config.GetDataDir()
+	if info.DataDir != "" && currentDataDir != "" && filepath.Clean(info.DataDir) != filepath.Clean(currentDataDir) {
+		return fmt.Sprintf("daemon data directory mismatch: running with %q, requested %q", info.DataDir, currentDataDir)
+	}
+
+	// 3. Config path mismatch
+	if expectedConfigPath != "" && info.ConfigPath != "" {
+		if filepath.Clean(expectedConfigPath) != filepath.Clean(info.ConfigPath) {
+			return fmt.Sprintf("daemon config mismatch: running with %q, requested %q", info.ConfigPath, expectedConfigPath)
+		}
+		// 4. Config hash mismatch (file modified since start)
+		if info.ConfigHash != "" {
+			if currHash, err := config.ComputeConfigFileHash(expectedConfigPath); err == nil && currHash != info.ConfigHash {
+				return fmt.Sprintf("daemon config file %q modified since start (hash mismatch)", expectedConfigPath)
+			}
+		}
+	}
+
+	// 5. Version mismatch
+	if info.Version != "" && config.Version != "" && info.Version != config.Version {
+		return fmt.Sprintf("daemon version mismatch: running %s, binary version is %s", info.Version, config.Version)
+	}
+
+	return ""
 }

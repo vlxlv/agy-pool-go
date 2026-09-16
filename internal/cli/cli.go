@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/conversation"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
@@ -148,6 +150,8 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "daemon-run":
 		_, _ = daemon.StartDaemon(daemon.LaunchOptions{Foreground: true})
 		return 0
+	case "migrate-legacy":
+		return handleMigrateLegacy(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,daemon-run,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
@@ -512,6 +516,48 @@ func handleImport(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func handleMigrateLegacy(args []string, stdout, stderr io.Writer) int {
+	sourcePath := ""
+	dataDir := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-s" || arg == "--source" {
+			if i+1 < len(args) {
+				sourcePath = args[i+1]
+				i++
+			}
+		} else if strings.HasPrefix(arg, "--source=") {
+			sourcePath = strings.TrimPrefix(arg, "--source=")
+		} else if arg == "-D" || arg == "--directory" {
+			if i+1 < len(args) {
+				dataDir = args[i+1]
+				i++
+			}
+		} else if strings.HasPrefix(arg, "--directory=") {
+			dataDir = strings.TrimPrefix(arg, "--directory=")
+		} else if !strings.HasPrefix(arg, "-") && sourcePath == "" {
+			sourcePath = arg
+		}
+	}
+	if sourcePath == "" {
+		home := os.Getenv("HOME")
+		sourcePath = filepath.Join(home, ".gemini", "agy-pool-accounts.json")
+	}
+	if dataDir == "" {
+		dataDir = config.GetDataDir()
+	}
+
+	res, err := storage.MigrateLegacyPool(sourcePath, dataDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Legacy migration failed: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "%s✓ Successfully migrated %d account(s) to %s%s\n", clrGreen, res.AccountsCount, res.TargetFile, clrReset)
+	fmt.Fprintf(stdout, "%sSource file %s remains untouched.%s\n", clrDim, res.SourcePath, clrReset)
+	return 0
+}
+
 func handleLogs(args []string, stdout, stderr io.Writer) int {
 	lines := 20
 	follow := false
@@ -785,14 +831,28 @@ func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
 		_ = config.ConfigureDefaultDataDir()
 	}
 
-	// 3. Ensure daemon is running
+	// 3. Ensure daemon is running for this instance
 	port := cfg.Server.Port
 	listen := cfg.Server.Listen
 	if listen == "" {
 		listen = "127.0.0.1"
 	}
-	if !daemon.IsDaemonRunning("", port) {
-		_, _ = daemon.StartDaemon(daemon.LaunchOptions{Foreground: false, Port: port})
+	pidFile := config.GetPIDFile()
+	logFile := config.GetLogFile()
+
+	if mismatch := daemon.CheckDaemonMismatch(pidFile, port, configFile); mismatch != "" {
+		fmt.Fprintf(stderr, "%s[agy-pool] Notice: %s%s\n", clrYellow, mismatch, clrReset)
+	}
+
+	if !daemon.IsDaemonRunning(pidFile, port) {
+		_, _ = daemon.StartDaemon(daemon.LaunchOptions{
+			Foreground: false,
+			Port:       port,
+			StateDir:   config.GetDataDir(),
+			ConfigFile: configFile,
+			PIDFile:    pidFile,
+			LogFile:    logFile,
+		})
 	}
 
 	// 4. Set gateway environment
@@ -819,9 +879,12 @@ func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 7. Execute native agy with nativeArgs forwarded byte-for-byte
+	// 7. Resolve native agy arguments (e.g. -c / --continue to --conversation <id>)
+	resolvedArgs := conversation.ResolveContinueArg(nativeArgs, stderr)
+
+	// 8. Execute native agy with resolvedArgs
 	// Notice: caller's cwd is preserved unchanged (no os.Chdir).
-	cmd := append([]string{agyPath}, nativeArgs...)
+	cmd := append([]string{agyPath}, resolvedArgs...)
 	if err := ExecHandler(agyPath, cmd, env); err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to execute agy: %v%s\n", clrRed, err, clrReset)
 		return 1
@@ -858,7 +921,8 @@ func RunAgyDirect(extraArgs []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cmd := append([]string{agyPath}, nativeArgs...)
+	resolvedArgs := conversation.ResolveContinueArg(nativeArgs, stderr)
+	cmd := append([]string{agyPath}, resolvedArgs...)
 	if err := ExecHandler(agyPath, cmd, env); err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to execute agy: %v%s\n", clrRed, err, clrReset)
 		return 1
