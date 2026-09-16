@@ -253,6 +253,9 @@ func RemoveAccount(target string) (*storage.Account, error) {
 				pool.ActiveAccountID = nil
 			}
 		}
+		if pool.RoundRobinLastAccountID != nil && *pool.RoundRobinLastAccountID == found.ID {
+			pool.RoundRobinLastAccountID = nil
+		}
 		removed = found
 		return nil
 	})

@@ -311,3 +311,196 @@ func TestRefreshToken_ConcurrentSingleFlight(t *testing.T) {
 		t.Fatalf("expected exactly 1 upstream request due to lock reuse, got %d", hits)
 	}
 }
+
+func TestRefreshToken_RemovedAccountNotRecreated(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	refreshReached := make(chan struct{})
+	allowRefreshResponse := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(refreshReached)
+		<-allowRefreshResponse
+
+		resp := map[string]any{
+			"access_token":  "new-at-after-remove",
+			"refresh_token": "new-rf-after-remove",
+			"expires_in":    3600,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	origTokenURL := TokenURL
+	TokenURL = server.URL
+	defer func() { TokenURL = origTokenURL }()
+
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{
+		ID:           "acc_victim",
+		Email:        "victim@example.com",
+		RefreshToken: "valid-rf",
+	}
+	pool.Accounts = append(pool.Accounts, acc)
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save pool: %v", err)
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		localAcc := &storage.Account{
+			ID:           "acc_victim",
+			Email:        "victim@example.com",
+			RefreshToken: "valid-rf",
+		}
+		_, err := RefreshToken(localAcc)
+		errChan <- err
+	}()
+
+	// Wait until refresh is in-flight at upstream server
+	<-refreshReached
+
+	// Remove the account from storage while refresh request is in flight
+	err := storage.PoolTransaction(func(p *storage.Pool) error {
+		p.Accounts = make([]*storage.Account, 0)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to delete account during refresh: %v", err)
+	}
+
+	// Verify account is gone from storage
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if len(loaded.Accounts) != 0 {
+		t.Fatalf("account was not deleted before refresh completed")
+	}
+
+	// Unblock upstream response
+	close(allowRefreshResponse)
+
+	// Refresh should complete with an error (account removed)
+	refreshErr := <-errChan
+	if refreshErr == nil {
+		t.Fatalf("expected RefreshToken to report error when persisting to removed account, got nil")
+	}
+
+	// CRITICAL CHECK: Account MUST NOT have been recreated in storage!
+	reloaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to reload pool: %v", err)
+	}
+	if len(reloaded.Accounts) != 0 {
+		t.Fatalf("SECURITY VIOLATION: removed account was recreated by late refresh response: %+v", reloaded.Accounts[0])
+	}
+}
+
+func TestRefreshToken_ConcurrentActiveSwitch(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	refreshReached := make(chan struct{})
+	allowRefreshResponse := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(refreshReached)
+		<-allowRefreshResponse
+
+		resp := map[string]any{
+			"access_token":  "new-at-acc1",
+			"expires_in":    3600,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	origTokenURL := TokenURL
+	TokenURL = server.URL
+	defer func() { TokenURL = origTokenURL }()
+
+	pool := storage.NewEmptyPool()
+	acc1 := &storage.Account{ID: "acc_1", Email: "acc1@example.com", RefreshToken: "rf1"}
+	acc2 := &storage.Account{ID: "acc_2", Email: "acc2@example.com", RefreshToken: "rf2"}
+	pool.Accounts = append(pool.Accounts, acc1, acc2)
+	pool.ActiveAccountID = &acc1.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save pool: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		localAcc1 := &storage.Account{ID: "acc_1", RefreshToken: "rf1"}
+		_, err := RefreshToken(localAcc1)
+		done <- err
+	}()
+
+	<-refreshReached
+
+	// Switch active account to acc_2 while acc_1 is refreshing
+	err := storage.PoolTransaction(func(p *storage.Pool) error {
+		p.ActiveAccountID = &acc2.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to switch active account: %v", err)
+	}
+
+	close(allowRefreshResponse)
+	if err := <-done; err != nil {
+		t.Fatalf("RefreshToken failed: %v", err)
+	}
+
+	// Verify active account remained acc_2
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_2" {
+		t.Fatalf("active account was overwritten by refresh race! got %v, want acc_2", loaded.ActiveAccountID)
+	}
+}
+
+func TestRefreshToken_RotatedTokenPreserved(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"access_token":  "new-at-rotated",
+			"refresh_token": "brand-new-rotated-rf-999",
+			"expires_in":    3600,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	origTokenURL := TokenURL
+	TokenURL = server.URL
+	defer func() { TokenURL = origTokenURL }()
+
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{ID: "acc_1", Email: "user@example.com", RefreshToken: "initial-rf"}
+	pool.Accounts = append(pool.Accounts, acc)
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save pool: %v", err)
+	}
+
+	tok, err := RefreshToken(acc)
+	if err != nil {
+		t.Fatalf("RefreshToken failed: %v", err)
+	}
+	if tok != "new-at-rotated" {
+		t.Fatalf("unexpected token: %s", tok)
+	}
+
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if loaded.Accounts[0].RefreshToken != "brand-new-rotated-rf-999" {
+		t.Fatalf("rotated refresh token was not preserved: got %s", loaded.Accounts[0].RefreshToken)
+	}
+}

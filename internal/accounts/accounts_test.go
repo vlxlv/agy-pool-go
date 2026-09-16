@@ -643,3 +643,129 @@ func TestSymlinkToProductionRejected(t *testing.T) {
 		t.Fatalf("expected path with distinct prefix name not to be rejected, got: %v", err)
 	}
 }
+
+func TestRemoveAccountRepairsActiveAndRRCursor(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	// 1. Setup 3 accounts: acc_1, acc_2, acc_3
+	p := storage.NewEmptyPool()
+	p.Accounts = []*storage.Account{
+		{ID: "acc_1", Email: "first@example.com"},
+		{ID: "acc_2", Email: "second@example.com"},
+		{ID: "acc_3", Email: "third@example.com"},
+	}
+	p.ActiveAccountID = &p.Accounts[0].ID
+	p.RoundRobinLastAccountID = &p.Accounts[1].ID
+	if err := storage.SavePool(p); err != nil {
+		t.Fatalf("failed to save initial pool: %v", err)
+	}
+
+	// 2. Remove middle account (acc_2), which is the RR cursor
+	rem, err := RemoveAccount("acc_2")
+	if err != nil {
+		t.Fatalf("RemoveAccount acc_2 failed: %v", err)
+	}
+	if rem.ID != "acc_2" {
+		t.Fatalf("expected removed account acc_2, got %s", rem.ID)
+	}
+
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if len(loaded.Accounts) != 2 {
+		t.Fatalf("expected 2 remaining accounts, got %d", len(loaded.Accounts))
+	}
+	// Active account should still be acc_1
+	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_1" {
+		t.Fatalf("active account corrupted: got %v, want acc_1", loaded.ActiveAccountID)
+	}
+	// RR cursor was pointing to acc_2, must be repaired to nil
+	if loaded.RoundRobinLastAccountID != nil {
+		t.Fatalf("RR cursor pointing to deleted account was not repaired to nil: got %s", *loaded.RoundRobinLastAccountID)
+	}
+
+	// 3. Remove active account (acc_1)
+	rem, err = RemoveAccount("acc_1")
+	if err != nil {
+		t.Fatalf("RemoveAccount acc_1 failed: %v", err)
+	}
+	if rem.ID != "acc_1" {
+		t.Fatalf("expected removed account acc_1, got %s", rem.ID)
+	}
+
+	loaded, err = storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if len(loaded.Accounts) != 1 {
+		t.Fatalf("expected 1 remaining account, got %d", len(loaded.Accounts))
+	}
+	// Active account must be repaired to the remaining account (acc_3)
+	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_3" {
+		t.Fatalf("active account was not repaired to remaining account: got %v, want acc_3", loaded.ActiveAccountID)
+	}
+
+	// 4. Remove final account (acc_3)
+	rem, err = RemoveAccount("acc_3")
+	if err != nil {
+		t.Fatalf("RemoveAccount acc_3 failed: %v", err)
+	}
+	if rem.ID != "acc_3" {
+		t.Fatalf("expected removed account acc_3, got %s", rem.ID)
+	}
+
+	loaded, err = storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if len(loaded.Accounts) != 0 {
+		t.Fatalf("expected 0 remaining accounts, got %d", len(loaded.Accounts))
+	}
+	if loaded.ActiveAccountID != nil {
+		t.Fatalf("active account not nil after removing final account: got %v", loaded.ActiveAccountID)
+	}
+	if loaded.RoundRobinLastAccountID != nil {
+		t.Fatalf("RR cursor not nil after removing final account: got %v", loaded.RoundRobinLastAccountID)
+	}
+}
+
+func TestImportReplaceAtomicity(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	// Setup initial state with 2 accounts
+	p := storage.NewEmptyPool()
+	p.Accounts = []*storage.Account{
+		{ID: "acc_1", Email: "keep1@example.com", AccessToken: "tok1"},
+		{ID: "acc_2", Email: "keep2@example.com", AccessToken: "tok2"},
+	}
+	p.ActiveAccountID = &p.Accounts[0].ID
+	if err := storage.SavePool(p); err != nil {
+		t.Fatalf("failed to save initial pool: %v", err)
+	}
+
+	// Attempt import with corrupt/invalid backup file in replace mode
+	tmpDir := t.TempDir()
+	badBackup := filepath.Join(tmpDir, "bad_backup.json")
+	_ = os.WriteFile(badBackup, []byte("NOT VALID JSON BACKUP"), 0o600)
+
+	_, err := ImportPool(badBackup, "", true, false)
+	if err == nil {
+		t.Fatalf("expected error importing bad backup, got nil")
+	}
+
+	// CRITICAL CHECK: Existing accounts MUST remain 100% intact!
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if len(loaded.Accounts) != 2 {
+		t.Fatalf("pool was corrupted or cleared by failed replace import! got %d accounts", len(loaded.Accounts))
+	}
+	if loaded.Accounts[0].Email != "keep1@example.com" || loaded.Accounts[1].Email != "keep2@example.com" {
+		t.Fatalf("pool accounts modified after failed replace: %+v", loaded.Accounts)
+	}
+	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_1" {
+		t.Fatalf("active account modified after failed replace: %v", loaded.ActiveAccountID)
+	}
+}

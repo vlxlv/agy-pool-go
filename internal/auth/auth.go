@@ -172,14 +172,18 @@ func PersistAccountFields(account *storage.Account, updateTokens, updateStatus, 
 	return storage.PoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
 		if stored == nil {
-			return nil
+			return fmt.Errorf("account '%s' does not exist in pool", account.ID)
 		}
 		if updateTokens {
 			stored.AccessToken = account.AccessToken
-			stored.RefreshToken = account.RefreshToken
+			if account.RefreshToken != "" {
+				stored.RefreshToken = account.RefreshToken
+			}
 			stored.TokenExpiry = account.TokenExpiry
 			stored.UpdatedAt = account.UpdatedAt
-			stored.IDToken = account.IDToken
+			if account.IDToken != "" {
+				stored.IDToken = account.IDToken
+			}
 		}
 		if updateStatus {
 			stored.Status = account.Status
@@ -207,6 +211,10 @@ func RefreshToken(account *storage.Account) (string, error) {
 		return account.AccessToken, nil
 	}
 
+	if account.RefreshToken == "" {
+		return "", errors.New("Missing refresh_token")
+	}
+
 	lockKey := account.ID
 	if lockKey == "" {
 		lockKey = account.Email
@@ -216,31 +224,35 @@ func RefreshToken(account *storage.Account) (string, error) {
 	}
 	h := sha256.Sum256([]byte(lockKey))
 	lockName := hex.EncodeToString(h[:])[:24]
-	lockPath := filepath.Join(config.GetStateDir(), fmt.Sprintf("agy-pool-refresh-%s.lock", lockName))
+	lockPath := filepath.Join(config.GetLocksDir(), fmt.Sprintf("refresh-%s.lock", lockName))
 
 	var refreshedToken string
 	err := storage.WithFileLock(lockPath, true, func() error {
-		// Another goroutine/process may have refreshed while waiting for lock.
+		// Verify account exists in state store before proceeding
 		storedPool, err := storage.LoadPool()
-		if err == nil {
-			stored := storage.FindAccount(storedPool, account)
-			if stored != nil {
-				if stored.AccessToken != "" {
-					account.AccessToken = stored.AccessToken
-				}
-				if stored.RefreshToken != "" {
-					account.RefreshToken = stored.RefreshToken
-				}
-				if stored.TokenExpiry != nil {
-					account.TokenExpiry = stored.TokenExpiry
-				}
-				if stored.UpdatedAt != nil {
-					account.UpdatedAt = stored.UpdatedAt
-				}
-				if stored.IDToken != "" {
-					account.IDToken = stored.IDToken
-				}
-			}
+		if err != nil {
+			return fmt.Errorf("failed to load pool state: %w", err)
+		}
+		stored := storage.FindAccount(storedPool, account)
+		if stored == nil {
+			return fmt.Errorf("account '%s' not found", account.ID)
+		}
+
+		// Another goroutine/process may have refreshed while waiting for lock.
+		if stored.AccessToken != "" {
+			account.AccessToken = stored.AccessToken
+		}
+		if stored.RefreshToken != "" {
+			account.RefreshToken = stored.RefreshToken
+		}
+		if stored.TokenExpiry != nil {
+			account.TokenExpiry = stored.TokenExpiry
+		}
+		if stored.UpdatedAt != nil {
+			account.UpdatedAt = stored.UpdatedAt
+		}
+		if stored.IDToken != "" {
+			account.IDToken = stored.IDToken
 		}
 
 		currentNow := NowFunc()
