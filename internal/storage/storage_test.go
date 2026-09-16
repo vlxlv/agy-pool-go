@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -285,9 +288,32 @@ func TestMigrateLegacyPool(t *testing.T) {
 		t.Fatalf("legacy source file was mutated during migration! before: %s, after: %s", srcHashBefore, srcHashAfter)
 	}
 
-	// Verify target accounts.json exists and loads
+	// Verify target accounts.json and state.db exist and load
+	targetDB := filepath.Join(targetDir, "state.db")
+	sdb, err := OpenStateDB(targetDB)
+	if err != nil {
+		t.Fatalf("failed to open migrated state.db: %v", err)
+	}
+	defer sdb.Close()
+
+	var dbPool *Pool
+	err = sdb.View(context.Background(), func(tx *sql.Tx) error {
+		var lErr error
+		dbPool, lErr = LoadPoolFromTx(tx)
+		return lErr
+	})
+	if err != nil {
+		t.Fatalf("failed to load pool from migrated state.db: %v", err)
+	}
+	if len(dbPool.Accounts) != 2 || dbPool.Accounts[0].ID != "acc_1" || dbPool.Accounts[1].ID != "acc_2" {
+		t.Fatalf("unexpected accounts in migrated state.db: %+v", dbPool.Accounts)
+	}
+	if dbPool.ActiveAccountID == nil || *dbPool.ActiveAccountID != "acc_1" {
+		t.Fatalf("unexpected active account in migrated state.db: %v", dbPool.ActiveAccountID)
+	}
+
 	targetAccounts := filepath.Join(targetDir, "accounts.json")
-	loaded, err := readPoolUnlocked(targetAccounts)
+	loaded, err := ReadPoolUnlocked(targetAccounts)
 	if err != nil {
 		t.Fatalf("failed to load migrated target accounts.json: %v", err)
 	}
@@ -302,6 +328,110 @@ func TestMigrateLegacyPool(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected fail-closed error migrating to production dir %s, got nil", prodDir)
 		}
+	}
+}
+
+func TestMigrateSplitJSONToDB(t *testing.T) {
+	setupTestStorage(t)
+
+	srcDir := filepath.Join(t.TempDir(), "split_src")
+	if err := os.MkdirAll(srcDir, 0700); err != nil {
+		t.Fatalf("failed to create src dir: %v", err)
+	}
+	targetDir := filepath.Join(t.TempDir(), "db_target")
+
+	// 1. Create accounts.json
+	accs := `{
+		"version": 1,
+		"accounts": [
+			{
+				"id": "acc_split1",
+				"email": "user1@example.com",
+				"access_token": "tok1",
+				"refresh_token": "ref1"
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(srcDir, "accounts.json"), []byte(accs), 0600); err != nil {
+		t.Fatalf("failed to write accounts.json: %v", err)
+	}
+
+	// 2. Create runtime.json
+	active := "acc_split1"
+	rr := "acc_split1"
+	rt := TargetRuntimeFile{
+		Version:                 1,
+		ActiveAccountID:         &active,
+		RoundRobinLastAccountID: &rr,
+		AccountsRuntime: map[string]*TargetAccountRuntimeRecord{
+			"acc_split1": {
+				Status:       "active",
+				RequestCount: 99,
+				ErrorCount:   3,
+			},
+		},
+	}
+	rtBytes, _ := json.Marshal(rt)
+	if err := os.WriteFile(filepath.Join(srcDir, "runtime.json"), rtBytes, 0600); err != nil {
+		t.Fatalf("failed to write runtime.json: %v", err)
+	}
+
+	// 3. Create quota.json
+	rem := 0.75
+	updated := int64(1234567)
+	q := TargetQuotaFile{
+		Version: 1,
+		AccountsQuota: map[string]*QuotaState{
+			"acc_split1": {
+				RemainingFraction: &rem,
+				UpdatedAt:         &updated,
+			},
+		},
+	}
+	qBytes, _ := json.Marshal(q)
+	if err := os.WriteFile(filepath.Join(srcDir, "quota.json"), qBytes, 0600); err != nil {
+		t.Fatalf("failed to write quota.json: %v", err)
+	}
+
+	// Migrate
+	res, err := MigrateSplitJSONToDB(srcDir, targetDir)
+	if err != nil {
+		t.Fatalf("MigrateSplitJSONToDB failed: %v", err)
+	}
+	if res.AccountsCount != 1 || res.ActiveAccountID != "acc_split1" {
+		t.Fatalf("unexpected migration result: %+v", res)
+	}
+
+	// Verify target state.db
+	targetDB := filepath.Join(targetDir, "state.db")
+	sdb, err := OpenStateDB(targetDB)
+	if err != nil {
+		t.Fatalf("failed to open target state.db: %v", err)
+	}
+	defer sdb.Close()
+
+	err = sdb.View(context.Background(), func(tx *sql.Tx) error {
+		p, err := LoadPoolFromTx(tx)
+		if err != nil {
+			return err
+		}
+		if len(p.Accounts) != 1 {
+			return fmt.Errorf("expected 1 account, got %d", len(p.Accounts))
+		}
+		a := p.Accounts[0]
+		if a.ID != "acc_split1" || a.RequestCount != 99 || a.ErrorCount != 3 {
+			return fmt.Errorf("runtime not preserved: %+v", a)
+		}
+		if a.LastQuota == nil || a.LastQuota.RemainingFraction == nil || *a.LastQuota.RemainingFraction != 0.75 {
+			return fmt.Errorf("quota not preserved: %+v", a.LastQuota)
+		}
+		if p.RoundRobinLastAccountID == nil || *p.RoundRobinLastAccountID != "acc_split1" {
+			return fmt.Errorf("round robin cursor not preserved: %v", p.RoundRobinLastAccountID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("verification failed: %v", err)
 	}
 }
 

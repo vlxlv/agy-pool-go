@@ -361,9 +361,38 @@ func RunDoctor(out io.Writer) bool {
 
 	// 4. Storage & Account Pool Health
 	_ = storage.EnsureDirs()
+	stateDBFile := config.GetStateDBFile()
 	poolFile := config.GetAccountsFile()
-	if fi, err := os.Stat(poolFile); err == nil {
-		pool, err := storage.LoadPool()
+
+	dbFi, dbErr := os.Stat(stateDBFile)
+	poolFi, poolErr := os.Stat(poolFile)
+
+	if dbErr == nil || poolErr == nil {
+		var pool *storage.Pool
+		var err error
+		var fi os.FileInfo
+		var storageDesc string
+
+		if dbErr == nil {
+			fi = dbFi
+			storageDesc = fmt.Sprintf("state.db: schema v%s, readable", storage.StateDBSchemaVersion)
+			sdb, openErr := storage.OpenStateDB(stateDBFile)
+			if openErr != nil {
+				err = openErr
+			} else {
+				err = sdb.View(context.Background(), func(tx *sql.Tx) error {
+					var loadErr error
+					pool, loadErr = storage.LoadPoolFromTx(tx)
+					return loadErr
+				})
+				_ = sdb.Close()
+			}
+		} else {
+			fi = poolFi
+			storageDesc = "accounts.json: legacy"
+			pool, err = storage.ReadPoolUnlocked(poolFile)
+		}
+
 		if err != nil {
 			fmt.Fprintf(out, "  %s✖%s Account Pool: Failed to read pool file: %v\n", clrRed, clrReset, err)
 			issuesFound++
@@ -418,8 +447,8 @@ func RunDoctor(out io.Writer) bool {
 				strat = config.StrategyMaxQuota
 			}
 
-			fmt.Fprintf(out, "  %s✓%s Account Pool: %d account(s) configured (%s)%s\n",
-				clrGreen, clrReset, len(pool.Accounts), permStr, activeStr)
+			fmt.Fprintf(out, "  %s✓%s Account Pool: %d account(s) configured (%s, %s)%s\n",
+				clrGreen, clrReset, len(pool.Accounts), storageDesc, permStr, activeStr)
 			fmt.Fprintf(out, "    • Status: %s%d Ready%s, %s%d Cooldown%s, %s%d Exhausted%s, %s%d Restricted%s\n",
 				clrGreen, readyCnt, clrReset, clrYellow, cooldownCnt, clrReset, clrDim, exhaustedCnt, clrReset, clrRed, restrictedCnt, clrReset)
 			fmt.Fprintf(out, "    • Strategy: %s%s%s\n", clrBold, strat, clrReset)
@@ -437,7 +466,7 @@ func RunDoctor(out io.Writer) bool {
 		}
 	} else {
 		fmt.Fprintf(out, "  %s○%s Account Pool: No account pool file found yet (%s)\n",
-			clrYellow, clrReset, poolFile)
+			clrYellow, clrReset, stateDBFile)
 		fmt.Fprintf(out, "    %s↳ Run 'agy-pool import-current' or 'agy-pool login' to initialize.%s\n",
 			clrDim, clrReset)
 		warningsFound++

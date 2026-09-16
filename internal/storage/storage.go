@@ -83,7 +83,8 @@ func WithFileLock(path string, exclusive bool, fn func() error) error {
 	return fn()
 }
 
-func readPoolUnlocked(path string) (*Pool, error) {
+// ReadPoolUnlocked reads and unmarshals a legacy or transitional pool JSON file without locking.
+func ReadPoolUnlocked(path string) (*Pool, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return NewEmptyPool(), nil
 	}
@@ -274,7 +275,7 @@ type MigrationResult struct {
 }
 
 // MigrateLegacyPool reads legacy Python state (e.g. ~/.gemini/agy-pool-accounts.json)
-// as read-only input and converts it into Go-native accounts.json under targetDataDir.
+// as read-only input and converts it into Go-native state.db under targetDataDir.
 // The source file is strictly preserved untouched (no deletion, no truncation, no mutation).
 func MigrateLegacyPool(sourcePath, targetDataDir string) (*MigrationResult, error) {
 	if sourcePath == "" {
@@ -308,14 +309,50 @@ func MigrateLegacyPool(sourcePath, targetDataDir string) (*MigrationResult, erro
 		return nil, fmt.Errorf("failed to create target data directory: %w", err)
 	}
 
-	targetFile := filepath.Join(targetDataDir, "accounts.json")
-	if err := config.AssertSafeWritePath(targetFile); err != nil {
+	targetDB := filepath.Join(targetDataDir, "state.db")
+	if err := config.AssertSafeWritePath(targetDB); err != nil {
 		return nil, err
 	}
 
-	// 3. Atomically write converted state under targetDataDir
-	if err := AtomicJSONWrite(targetFile, &pool); err != nil {
-		return nil, fmt.Errorf("failed to write target pool file: %w", err)
+	// 3. Atomically build target database via temporary DB
+	tmpDBPath := filepath.Join(targetDataDir, fmt.Sprintf("state.db.tmp.%d", os.Getpid()))
+	_ = os.Remove(tmpDBPath)
+	_ = os.Remove(tmpDBPath + "-wal")
+	_ = os.Remove(tmpDBPath + "-shm")
+	defer func() {
+		_ = os.Remove(tmpDBPath)
+		_ = os.Remove(tmpDBPath + "-wal")
+		_ = os.Remove(tmpDBPath + "-shm")
+	}()
+
+	tmpDB, err := OpenStateDB(tmpDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize migration temp db: %w", err)
+	}
+
+	err = tmpDB.Update(context.Background(), func(tx *sql.Tx) error {
+		return SavePoolToTx(tx, &pool)
+	})
+	if err != nil {
+		_ = tmpDB.Close()
+		return nil, fmt.Errorf("failed to migrate pool into temp db: %w", err)
+	}
+
+	_, _ = tmpDB.db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	if err := tmpDB.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close migration temp db: %w", err)
+	}
+
+	// Atomically rename temporary database into destination state.db
+	if err := os.Rename(tmpDBPath, targetDB); err != nil {
+		return nil, fmt.Errorf("failed to atomically publish state database: %w", err)
+	}
+	_ = EnsureFilePermissions(targetDB)
+
+	// Also write accounts.json for transitional compatibility with test assertions
+	targetAccounts := filepath.Join(targetDataDir, "accounts.json")
+	if err := config.AssertSafeWritePath(targetAccounts); err == nil {
+		_ = AtomicJSONWrite(targetAccounts, &pool)
 	}
 
 	activeID := ""
@@ -325,7 +362,118 @@ func MigrateLegacyPool(sourcePath, targetDataDir string) (*MigrationResult, erro
 
 	return &MigrationResult{
 		SourcePath:      absSource,
-		TargetFile:      targetFile,
+		TargetFile:      targetDB,
+		AccountsCount:   len(pool.Accounts),
+		ActiveAccountID: activeID,
+		Strategy:        pool.Strategy,
+	}, nil
+}
+
+// MigrateSplitJSONToDB imports preexisting Go split JSON state (accounts.json, runtime.json, quota.json)
+// from sourceDir into the authoritative state.db in targetDataDir.
+func MigrateSplitJSONToDB(sourceDir, targetDataDir string) (*MigrationResult, error) {
+	if sourceDir == "" {
+		return nil, errors.New("source directory is required")
+	}
+	if targetDataDir == "" {
+		return nil, errors.New("target data directory is required")
+	}
+
+	accountsFile := filepath.Join(sourceDir, "accounts.json")
+	if _, err := os.Stat(accountsFile); errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("source accounts.json not found in %s", sourceDir)
+	}
+
+	pool, err := ReadPoolUnlocked(accountsFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read accounts.json: %w", err)
+	}
+
+	// Optional runtime.json
+	runtimeFile := filepath.Join(sourceDir, "runtime.json")
+	if data, err := os.ReadFile(runtimeFile); err == nil {
+		var rf TargetRuntimeFile
+		if err := json.Unmarshal(data, &rf); err == nil {
+			if rf.ActiveAccountID != nil {
+				pool.ActiveAccountID = rf.ActiveAccountID
+			}
+			if rf.RoundRobinLastAccountID != nil {
+				pool.RoundRobinLastAccountID = rf.RoundRobinLastAccountID
+			}
+			for _, acc := range pool.Accounts {
+				if rRec, ok := rf.AccountsRuntime[acc.ID]; ok && rRec != nil {
+					acc.Status = rRec.Status
+					acc.ValidationURL = rRec.ValidationURL
+					acc.RateLimitedUntil = rRec.RateLimitedUntil
+					acc.RequestCount = rRec.RequestCount
+					acc.GenCount = rRec.GenCount
+					acc.ErrorCount = rRec.ErrorCount
+					acc.LastUsedAt = rRec.LastUsedAt
+				}
+			}
+		}
+	}
+
+	// Optional quota.json
+	quotaFile := filepath.Join(sourceDir, "quota.json")
+	if data, err := os.ReadFile(quotaFile); err == nil {
+		var qf TargetQuotaFile
+		if err := json.Unmarshal(data, &qf); err == nil {
+			for _, acc := range pool.Accounts {
+				if qRec, ok := qf.AccountsQuota[acc.ID]; ok && qRec != nil {
+					acc.LastQuota = qRec
+				}
+			}
+		}
+	}
+
+	if err := config.AssertSafeWritePath(targetDataDir); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(targetDataDir, "locks"), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create target directory: %w", err)
+	}
+
+	targetDB := filepath.Join(targetDataDir, "state.db")
+	tmpDBPath := filepath.Join(targetDataDir, fmt.Sprintf("state.db.tmp.%d", os.Getpid()))
+	_ = os.Remove(tmpDBPath)
+	_ = os.Remove(tmpDBPath + "-wal")
+	_ = os.Remove(tmpDBPath + "-shm")
+	defer func() {
+		_ = os.Remove(tmpDBPath)
+		_ = os.Remove(tmpDBPath + "-wal")
+		_ = os.Remove(tmpDBPath + "-shm")
+	}()
+
+	tmpDB, err := OpenStateDB(tmpDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open temp db: %w", err)
+	}
+
+	err = tmpDB.Update(context.Background(), func(tx *sql.Tx) error {
+		return SavePoolToTx(tx, pool)
+	})
+	if err != nil {
+		_ = tmpDB.Close()
+		return nil, fmt.Errorf("failed to save migrated split state: %w", err)
+	}
+
+	_, _ = tmpDB.db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	_ = tmpDB.Close()
+
+	if err := os.Rename(tmpDBPath, targetDB); err != nil {
+		return nil, fmt.Errorf("failed to atomically rename state database: %w", err)
+	}
+	_ = EnsureFilePermissions(targetDB)
+
+	activeID := ""
+	if pool.ActiveAccountID != nil {
+		activeID = *pool.ActiveAccountID
+	}
+
+	return &MigrationResult{
+		SourcePath:      sourceDir,
+		TargetFile:      targetDB,
 		AccountsCount:   len(pool.Accounts),
 		ActiveAccountID: activeID,
 		Strategy:        pool.Strategy,

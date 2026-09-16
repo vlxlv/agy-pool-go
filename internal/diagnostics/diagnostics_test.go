@@ -264,3 +264,64 @@ func TestRunDoctor_TLSFailureWarning(t *testing.T) {
 		t.Errorf("expected TLS warning message, got: %s", out)
 	}
 }
+
+func TestRunDoctor_StateDBInspectionAndCorruption(t *testing.T) {
+	_, cleanup := setupDoctorTestEnv(t)
+	defer cleanup()
+
+	SetAgyBinaryFinder(func() string { return "/bin/true" })
+	SetTLSProber(func(host string, timeout time.Duration) error { return nil })
+
+	// 1. Healthy state.db
+	secretEmail := "hidden_doctor_user@example.com"
+	secretToken := "ya29.sensitive_secret_token_12345"
+	now := time.Now().Unix()
+	pool := &storage.Pool{
+		Version: 1,
+		Accounts: []*storage.Account{
+			{
+				ID:          "acc_db1",
+				Name:        "Test SQLite User",
+				Email:       secretEmail,
+				AccessToken: secretToken,
+				Status:      "active",
+				CreatedAt:   &now,
+			},
+		},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save pool into state.db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	ok := RunDoctor(&buf)
+	if !ok {
+		t.Fatalf("expected RunDoctor to succeed on valid state.db")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "state.db: schema v1, readable") {
+		t.Errorf("expected state.db schema and readability in doctor output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 account(s) configured") {
+		t.Errorf("expected account count 1 in doctor output, got:\n%s", out)
+	}
+	if strings.Contains(out, secretEmail) || strings.Contains(out, secretToken) {
+		t.Errorf("PRIVACY VIOLATION: sensitive email or token leaked in doctor output:\n%s", out)
+	}
+
+	// 2. Corrupt state.db (0-byte file)
+	stateDBFile := config.GetStateDBFile()
+	if err := os.Truncate(stateDBFile, 0); err != nil {
+		t.Fatalf("failed to truncate state.db: %v", err)
+	}
+
+	buf.Reset()
+	ok = RunDoctor(&buf)
+	if ok {
+		t.Fatalf("expected RunDoctor to fail on 0-byte corrupt state.db")
+	}
+	out = buf.String()
+	if !strings.Contains(out, "Failed to read pool file") {
+		t.Errorf("expected error message on corrupt state.db, got:\n%s", out)
+	}
+}
