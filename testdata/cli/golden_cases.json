@@ -1,0 +1,167 @@
+[
+  {
+    "name": "version",
+    "args": [
+      "--version"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "agy-pool"
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "help",
+    "args": [
+      "--help"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "usage: agy-pool"
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "list_empty",
+    "args": [
+      "list"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "No accounts in pool yet."
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "strategy_view",
+    "args": [
+      "strategy"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "Current load balancing strategy:"
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "strategy_invalid",
+    "args": [
+      "strategy",
+      "invalid_strat_choice"
+    ],
+    "exit_code": 1,
+    "stdout_contains": [
+      "[Error] Invalid strategy 'invalid_strat_choice'"
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "rename_missing",
+    "args": [
+      "rename"
+    ],
+    "exit_code": 2,
+    "stdout_contains": [],
+    "stderr_contains": [
+      "usage: agy-pool rename",
+      "error: the following arguments are required"
+    ]
+  },
+  {
+    "name": "rename_empty_name",
+    "args": [
+      "rename",
+      "1",
+      ""
+    ],
+    "exit_code": 1,
+    "stdout_contains": [
+      "[Error] Account name cannot be empty."
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "rename_not_found",
+    "args": [
+      "rename",
+      "nonexistent",
+      "NewName"
+    ],
+    "exit_code": 1,
+    "stdout_contains": [
+      "[Error] Account 'nonexistent' not found."
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "remove_missing",
+    "args": [
+      "remove"
+    ],
+    "exit_code": 2,
+    "stdout_contains": [],
+    "stderr_contains": [
+      "usage: agy-pool remove",
+      "error: the following arguments are required"
+    ]
+  },
+  {
+    "name": "remove_not_found",
+    "args": [
+      "remove",
+      "nonexistent"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "[Error] Account 'nonexistent' not found."
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "switch_not_found",
+    "args": [
+      "switch",
+      "nonexistent"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "[Error] Account pool is empty."
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "export_empty",
+    "args": [
+      "export",
+      "backup.json"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "No accounts in pool to export."
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "import_missing_file",
+    "args": [
+      "import"
+    ],
+    "exit_code": 2,
+    "stdout_contains": [],
+    "stderr_contains": [
+      "usage: agy-pool import",
+      "error: the following arguments are required"
+    ]
+  },
+  {
+    "name": "invalid_command",
+    "args": [
+      "nonexistent_command"
+    ],
+    "exit_code": 2,
+    "stdout_contains": [],
+    "stderr_contains": [
+      "invalid choice: 'nonexistent_command'"
+    ]
+  }
+]

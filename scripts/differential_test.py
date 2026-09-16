@@ -573,6 +573,192 @@ def test_differential_daemon():
 
     print("  ✓ Daemon formatting, PID parsing, stale detection, log rotation, and log clear passed with 100% parity.")
 
+def test_differential_cli():
+    print("Testing differential CLI commands and exit codes...")
+    fixtures_path = os.path.join(GO_ROOT, "testdata", "cli", "golden_cases.json")
+    with open(fixtures_path, "r", encoding="utf-8") as f:
+        cases = json.load(f)
+
+    py_bin = os.path.join(REPO_ROOT, "bin", "agy-pool")
+
+    for c in cases:
+        name = c["name"]
+        args = c["args"]
+        expected_rc = c["exit_code"]
+
+        tmp_py = tempfile.mkdtemp(prefix=f"diff_cli_py_{name}_")
+        tmp_go = tempfile.mkdtemp(prefix=f"diff_cli_go_{name}_")
+
+        env_py = os.environ.copy()
+        env_py["HOME"] = tmp_py
+        env_py["AGY_TEST_MODE"] = "1"
+        env_py["AGY_GEMINI_DIR"] = os.path.join(tmp_py, ".gemini")
+
+        env_go = os.environ.copy()
+        env_go["HOME"] = tmp_go
+        env_go["AGY_TEST_MODE"] = "1"
+        env_go["AGY_GEMINI_DIR"] = os.path.join(tmp_go, ".gemini")
+
+        p_py = subprocess.run(["python3", py_bin] + args, env=env_py, capture_output=True, text=True)
+        p_go = subprocess.run([GO_BIN] + args, env=env_go, capture_output=True, text=True)
+
+        assert p_py.returncode == expected_rc, f"[{name}] Python exit code {p_py.returncode} != expected {expected_rc}"
+        assert p_go.returncode == expected_rc, f"[{name}] Go exit code {p_go.returncode} != expected {expected_rc}"
+
+        for pat in c.get("stdout_contains", []):
+            assert pat in p_py.stdout, f"[{name}] Python stdout missing {pat!r}\nGot: {p_py.stdout}"
+            assert pat in p_go.stdout, f"[{name}] Go stdout missing {pat!r}\nGot: {p_go.stdout}"
+
+        for pat in c.get("stderr_contains", []):
+            assert pat in p_py.stderr, f"[{name}] Python stderr missing {pat!r}\nGot: {p_py.stderr}"
+            assert pat in p_go.stderr, f"[{name}] Go stderr missing {pat!r}\nGot: {p_go.stderr}"
+
+        import shutil
+        shutil.rmtree(tmp_py, ignore_errors=True)
+        shutil.rmtree(tmp_go, ignore_errors=True)
+
+    print(f"  ✓ All {len(cases)} CLI golden test cases passed with exact exit-code and semantic parity.")
+
+def test_differential_conversation():
+    print("Testing differential conversation session discovery and -c resolution...")
+    import sqlite3
+    from agy_pool import cli as py_cli
+    from agy_pool import config as py_config
+
+    tmp_dir = tempfile.mkdtemp(prefix="diff_conv_")
+    db_dir = os.path.join(tmp_dir, ".gemini", "antigravity-cli")
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, "conversation_summaries.db")
+
+    proj1 = os.path.join(tmp_dir, "workspaces", "project1")
+    proj1_deep = os.path.join(proj1, "src", "backend")
+    proj2 = os.path.join(tmp_dir, "workspaces", "project2")
+    os.makedirs(proj1_deep, exist_ok=True)
+    os.makedirs(proj2, exist_ok=True)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, workspace_uris TEXT, last_modified_time INTEGER)")
+        conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                     ("c1_old", "Project 1 Base", json.dumps([f"file://{proj1}"]), 1000))
+        conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                     ("c2_proj2", "Project 2 Session", json.dumps([f"file://{proj2}"]), 2000))
+        conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                     ("c3_deep", "Project 1 Deep", json.dumps([f"file://{proj1_deep}"]), 3000))
+
+    # Test Python selection
+    orig_cli_dir = py_config.AGY_CLI_DIR
+    py_config.AGY_CLI_DIR = db_dir
+
+    try:
+        # 1. Inside proj1_deep
+        cid_py, title_py, dir_py = py_cli.find_latest_conversation_for_dir(proj1_deep)
+        assert cid_py == "c3_deep"
+
+        # 2. Inside proj1 (workspace of c1_old)
+        cid_py_p, title_py_p, dir_py_p = py_cli.find_latest_conversation_for_dir(proj1)
+        assert cid_py_p == "c1_old"
+
+        # 3. Inside proj2
+        cid_py_2, title_py_2, dir_py_2 = py_cli.find_latest_conversation_for_dir(proj2)
+        assert cid_py_2 == "c2_proj2"
+
+        # Now test Go candidate on the exact same database and directories
+        py_bin = os.path.join(REPO_ROOT, "bin", "agy-pool")
+        for test_path, expected_cid in [(proj1_deep, "c3_deep"), (proj1, "c1_old"), (proj2, "c2_proj2")]:
+            # Mock agy script to dump args
+            mock_agy = os.path.join(tmp_dir, "mock_agy.sh")
+            with open(mock_agy, "w") as f:
+                f.write("#!/bin/sh\necho \"ARGV:$@\"\n")
+            os.chmod(mock_agy, 0o755)
+
+            env = os.environ.copy()
+            env["HOME"] = tmp_dir
+            env["AGY_TEST_MODE"] = "1"
+            env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
+            env["AGY_BIN"] = mock_agy
+
+            p_py = subprocess.run(["python3", py_bin, "run", "-c", "--verbose"],
+                                  cwd=test_path, env=env, capture_output=True, text=True)
+            p_go = subprocess.run([GO_BIN, "run", "-c", "--verbose"],
+                                  cwd=test_path, env=env, capture_output=True, text=True)
+
+            assert p_py.returncode == 0
+            assert p_go.returncode == 0
+
+            # Compare dumped ARGV
+            py_lines = [l for l in p_py.stdout.splitlines() if l.startswith("ARGV:")]
+            go_lines = [l for l in p_go.stdout.splitlines() if l.startswith("ARGV:")]
+            assert py_lines, "Python did not run mock agy"
+            assert go_lines, "Go did not run mock agy"
+            assert py_lines[0] == f"ARGV:--conversation {expected_cid} --verbose", f"Python argv: {py_lines[0]}"
+            assert go_lines[0] == f"ARGV:--conversation {expected_cid} --verbose", f"Go argv: {go_lines[0]}"
+
+        # Explicit --conversation overrides -c
+        p_py = subprocess.run(["python3", py_bin, "run", "--conversation", "explicit_conv_999", "-c"],
+                              cwd=proj1, env=env, capture_output=True, text=True)
+        p_go = subprocess.run([GO_BIN, "run", "--conversation", "explicit_conv_999", "-c"],
+                              cwd=proj1, env=env, capture_output=True, text=True)
+
+        py_lines = [l for l in p_py.stdout.splitlines() if l.startswith("ARGV:")]
+        go_lines = [l for l in p_go.stdout.splitlines() if l.startswith("ARGV:")]
+        assert py_lines[0] == "ARGV:--conversation explicit_conv_999 -c"
+        assert go_lines[0] == "ARGV:--conversation explicit_conv_999 -c"
+
+    finally:
+        py_config.AGY_CLI_DIR = orig_cli_dir
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    print("  ✓ Conversation discovery and -c argument resolution passed with zero-tolerance parity.")
+
+def test_differential_wrappers():
+    print("Testing differential wrapper execution (run vs raw)...")
+    tmp_dir = tempfile.mkdtemp(prefix="diff_wrap_")
+    py_bin = os.path.join(REPO_ROOT, "bin", "agy-pool")
+
+    mock_agy = os.path.join(tmp_dir, "mock_agy.sh")
+    with open(mock_agy, "w") as f:
+        f.write("#!/bin/sh\n")
+        f.write("echo \"AGY_CALLED: $@\"\n")
+        f.write("echo \"URL_VAR: ${CLOUD_CODE_URL:-NONE}\"\n")
+    os.chmod(mock_agy, 0o755)
+
+    env = os.environ.copy()
+    env["HOME"] = tmp_dir
+    env["AGY_TEST_MODE"] = "1"
+    env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
+    env["AGY_BIN"] = mock_agy
+
+    # 1. agy-pool run
+    p_py_run = subprocess.run(["python3", py_bin, "run", "--hello", "world space"],
+                              env=env, capture_output=True, text=True)
+    p_go_run = subprocess.run([GO_BIN, "run", "--hello", "world space"],
+                              env=env, capture_output=True, text=True)
+
+    assert p_py_run.returncode == 0
+    assert p_go_run.returncode == 0
+    assert "AGY_CALLED: --hello world space" in p_py_run.stdout
+    assert "AGY_CALLED: --hello world space" in p_go_run.stdout
+    assert "URL_VAR: http://127.0.0.1:8899" in p_py_run.stdout
+    assert "URL_VAR: http://127.0.0.1:8899" in p_go_run.stdout
+
+    # 2. agy-pool raw
+    p_py_raw = subprocess.run(["python3", py_bin, "raw", "--hello", "world space"],
+                              env=env, capture_output=True, text=True)
+    p_go_raw = subprocess.run([GO_BIN, "raw", "--hello", "world space"],
+                              env=env, capture_output=True, text=True)
+
+    assert p_py_raw.returncode == 0
+    assert p_go_raw.returncode == 0
+    assert "AGY_CALLED: --hello world space" in p_py_raw.stdout
+    assert "AGY_CALLED: --hello world space" in p_go_raw.stdout
+    assert "URL_VAR: NONE" in p_py_raw.stdout
+    assert "URL_VAR: NONE" in p_go_raw.stdout
+
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    print("  ✓ Wrapper argument and CLOUD_CODE_URL environment passthrough passed with 100% parity.")
+
 def main():
     test_differential_capacity_cases()
     test_differential_scheduler_scenarios()
@@ -581,6 +767,9 @@ def main():
     test_differential_crypto()
     test_differential_proxy()
     test_differential_daemon()
+    test_differential_cli()
+    test_differential_conversation()
+    test_differential_wrappers()
     print("\nALL DIFFERENTIAL TESTS PASSED WITH 100% PARITY!")
 
 if __name__ == "__main__":
