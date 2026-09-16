@@ -778,6 +778,91 @@ def test_differential_wrappers():
     shutil.rmtree(tmp_dir, ignore_errors=True)
     print("  ✓ Wrapper argument, -c/-D scoping, -- delimiter, and environment passthrough passed with 100% parity.")
 
+def test_differential_installer_and_migration():
+    print("Testing differential installer lifecycle and migration...")
+    import shutil
+    tmp_dir = tempfile.mkdtemp(prefix="agy_installer_diff_")
+    env = os.environ.copy()
+    env["HOME"] = tmp_dir
+    env["AGY_TEST_MODE"] = "1"
+    env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
+
+    # 1. Precondition failure when native agy is missing
+    target_bin = os.path.join(tmp_dir, "bin")
+    p_fail = subprocess.run([
+        GO_BIN, "install",
+        "--target", target_bin,
+        "--native-agy", os.path.join(tmp_dir, "nonexistent"),
+        "--skip-rc"
+    ], env=env, capture_output=True, text=True)
+    assert p_fail.returncode == 1, f"expected code 1, got {p_fail.returncode}"
+    assert "Native agy was not found" in p_fail.stderr
+
+    # 2. Mock native agy
+    real_bin = os.path.join(tmp_dir, "real_bin")
+    os.makedirs(real_bin, exist_ok=True)
+    mock_agy = os.path.join(real_bin, "agy")
+    with open(mock_agy, "w") as f:
+        f.write("#!/bin/sh\necho 'mock native agy'\n")
+    os.chmod(mock_agy, 0o755)
+
+    cfg_dir = os.path.join(tmp_dir, "cfg")
+    data_dir = os.path.join(tmp_dir, "data")
+
+    # 3. Successful user install
+    p_install = subprocess.run([
+        GO_BIN, "install",
+        "--user",
+        "--target", target_bin,
+        "--native-agy", mock_agy,
+        "--config-dir", cfg_dir,
+        "--data-dir", data_dir,
+        "--skip-rc"
+    ], env=env, capture_output=True, text=True)
+    assert p_install.returncode == 0, f"install failed: {p_install.stderr}"
+    assert "Successfully installed agy-pool" in p_install.stdout
+
+    # Verify shim content
+    shim_path = os.path.join(target_bin, "agy")
+    assert os.path.exists(shim_path)
+    with open(shim_path, "r") as f:
+        content = f.read()
+    assert "agy-pool run" in content
+
+    # Verify config and data
+    assert os.path.exists(os.path.join(cfg_dir, "config.json"))
+    assert os.path.isdir(os.path.join(data_dir, "locks"))
+
+    # 4. Uninstall leaves native agy and data untouched
+    p_uninstall = subprocess.run([
+        GO_BIN, "uninstall",
+        "--target", target_bin
+    ], env=env, capture_output=True, text=True)
+    assert p_uninstall.returncode == 0, f"uninstall failed: {p_uninstall.stderr}"
+    assert not os.path.exists(shim_path), "shim was not removed"
+    assert os.path.exists(mock_agy), "native agy was deleted!"
+    assert os.path.exists(os.path.join(cfg_dir, "config.json")), "config was deleted!"
+
+    # 5. Test migrate-legacy command
+    legacy_file = os.path.join(tmp_dir, "legacy_pool.json")
+    with open(legacy_file, "w") as f:
+        f.write(json.dumps({
+            "version": 1,
+            "strategy": "max_quota",
+            "accounts": [{"id": "acc_1", "email": "migrated@example.com", "access_token": "tok1"}]
+        }))
+    target_data = os.path.join(tmp_dir, "migrated_data")
+    p_mig = subprocess.run([
+        GO_BIN, "migrate-legacy",
+        "-s", legacy_file,
+        "-D", target_data
+    ], env=env, capture_output=True, text=True)
+    assert p_mig.returncode == 0, f"migration failed: {p_mig.stderr}"
+    assert os.path.exists(os.path.join(target_data, "accounts.json"))
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    print("  ✓ Installer lifecycle, native-agy protection, and legacy migration passed with 100% parity.")
+
 def main():
     test_differential_capacity_cases()
     test_differential_scheduler_scenarios()
@@ -789,6 +874,7 @@ def main():
     test_differential_cli()
     test_differential_conversation()
     test_differential_wrappers()
+    test_differential_installer_and_migration()
     print("\nALL DIFFERENTIAL TESTS PASSED WITH 100% PARITY!")
 
 if __name__ == "__main__":
