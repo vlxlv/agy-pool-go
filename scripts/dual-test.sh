@@ -6,7 +6,15 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PYTHON_ROOT="$(cd "$GO_ROOT/../agy-pool" && pwd)"
+if [ -n "$AGY_PYTHON_ROOT" ] && [ -d "$AGY_PYTHON_ROOT" ]; then
+    PYTHON_ROOT="$AGY_PYTHON_ROOT"
+elif [ -d "$GO_ROOT/../agy-pool" ]; then
+    PYTHON_ROOT="$(cd "$GO_ROOT/../agy-pool" && pwd)"
+elif [ -d "$GO_ROOT/../../agy-pool" ]; then
+    PYTHON_ROOT="$(cd "$GO_ROOT/../../agy-pool" && pwd)"
+else
+    PYTHON_ROOT="/home/codex/agy-pool"
+fi
 
 echo -e "\033[1;36m======================================================"
 echo -e "       agy-pool Differential Parity Verification      "
@@ -50,5 +58,5 @@ python3 "$SCRIPT_DIR/differential_test.py"
 echo -e "\033[32m[✓] Differential test suite passed with 100% parity.\033[0m"
 
 echo -e "\n\033[1;32m======================================================"
-echo -e "   ALL G1, G2A & G2B DIFFERENTIAL CHECKS PASSED!      "
+echo -e " ALL G1, G2A, G2B & G2C DIFFERENTIAL CHECKS PASSED!   "
 echo -e "======================================================\033[0m"

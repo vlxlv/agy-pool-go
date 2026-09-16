@@ -12,7 +12,18 @@ import json
 import tempfile
 
 # Ensure Python modules from reference repository are loadable
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agy-pool"))
+def find_python_repo():
+    if os.environ.get("AGY_PYTHON_ROOT") and os.path.exists(os.environ["AGY_PYTHON_ROOT"]):
+        return os.environ["AGY_PYTHON_ROOT"]
+    cand1 = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agy-pool"))
+    if os.path.exists(cand1):
+        return cand1
+    cand2 = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "agy-pool"))
+    if os.path.exists(cand2):
+        return cand2
+    return "/home/codex/agy-pool"
+
+REPO_ROOT = find_python_repo()
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 

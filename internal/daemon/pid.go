@@ -101,21 +101,35 @@ func ReadPIDFile(path string) (*DaemonInfo, error) {
 	}, nil
 }
 
-// IsProcessAlive reports whether a process with the given PID is currently alive.
+// IsProcessAlive reports whether a process with the given PID is currently alive (and not a zombie).
 func IsProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
 	err := syscall.Kill(pid, 0)
-	if err == nil {
-		return true
+	if err != nil {
+		// If permission is denied (EPERM), the process exists but is owned by another user
+		if errors.Is(err, syscall.EPERM) {
+			return true
+		}
+		return false
 	}
-	// If permission is denied (EPERM), the process exists but is owned by another user
-	if errors.Is(err, syscall.EPERM) {
-		return true
+
+	// On Linux, verify the process is not a zombie (terminated waiting for parent reap)
+	statusPath := fmt.Sprintf("/proc/%d/status", pid)
+	if data, err := os.ReadFile(statusPath); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "State:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 && fields[1] == "Z" {
+					return false
+				}
+				break
+			}
+		}
 	}
-	// ESRCH: No such process
-	return false
+
+	return true
 }
 
 // IsAgyPoolProcess validates that a live PID belongs to agy-pool, avoiding false positives on PID reuse.

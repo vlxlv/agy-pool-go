@@ -1,3 +1,4 @@
 bin/
+/agy-pool
 *.tmp
 *.bak

@@ -19,7 +19,18 @@ import urllib.error
 import threading
 import http.server
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agy-pool"))
+def find_python_repo():
+    if os.environ.get("AGY_PYTHON_ROOT") and os.path.exists(os.environ["AGY_PYTHON_ROOT"]):
+        return os.environ["AGY_PYTHON_ROOT"]
+    cand1 = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agy-pool"))
+    if os.path.exists(cand1):
+        return cand1
+    cand2 = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "agy-pool"))
+    if os.path.exists(cand2):
+        return cand2
+    return "/home/codex/agy-pool"
+
+REPO_ROOT = find_python_repo()
 GO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GO_BIN = os.path.join(GO_ROOT, "bin", "agy-pool")
 
@@ -35,6 +46,7 @@ from agy_pool import auth
 from agy_pool import accounts
 from agy_pool import proxy as py_proxy
 from agy_pool import storage as py_storage
+from agy_pool import daemon as py_daemon
 
 def run_go_cmd(subcmd, input_data):
     p = subprocess.run(
@@ -484,6 +496,83 @@ def test_differential_proxy():
         upstream_server.shutdown()
         upstream_server.server_close()
 
+def test_differential_daemon():
+    print("Testing differential daemon lifecycle & log operations...")
+
+    # 1. Format size parity
+    for sz in [0, 500, 1023, 1024, 1536, 2048, 1048576, 5242880, 104857600]:
+        py_fmt = py_daemon._format_size(sz)
+        go_res = run_go_cmd("eval-daemon", {"action": "format_size", "bytes": sz})
+        go_fmt = go_res.get("formatted")
+        assert py_fmt == go_fmt, f"Format mismatch for {sz}: py={py_fmt}, go={go_fmt}"
+
+    # 2. Missing PID file
+    tmp_d = tempfile.mkdtemp(prefix="agy_daemon_diff_")
+    missing_pid = os.path.join(tmp_d, "missing.pid")
+    py_daemon.set_pid_file_provider(lambda: missing_pid)
+    py_info = py_daemon.get_daemon_info()
+    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": missing_pid})
+    assert py_info is None, f"Expected py_info None, got {py_info}"
+    assert go_res.get("info") is None, f"Expected go_info None, got {go_res.get('info')}"
+
+    # 3. Dead PID file (stale PID)
+    stale_pid_file = os.path.join(tmp_d, "stale.pid")
+    dead_pid = 4194300
+    with open(stale_pid_file, "w") as f:
+        json.dump({"pid": dead_pid, "version": "0.1.0"}, f)
+    py_daemon.set_pid_file_provider(lambda: stale_pid_file)
+    py_info = py_daemon.get_daemon_info()
+    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": stale_pid_file})
+    assert py_info is None, f"Expected stale PID py_info None, got {py_info}"
+    assert go_res.get("info") is None, f"Expected stale PID go_info None, got {go_res.get('info')}"
+
+    # 4. Malformed PID file
+    malformed_pid_file = os.path.join(tmp_d, "malformed.pid")
+    with open(malformed_pid_file, "w") as f:
+        f.write("{invalid json")
+    py_daemon.set_pid_file_provider(lambda: malformed_pid_file)
+    py_info = py_daemon.get_daemon_info()
+    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": malformed_pid_file})
+    assert py_info is None, f"Expected malformed py_info None"
+    assert go_res.get("info") is None, f"Expected malformed go_info None"
+
+    # 5. Live PID file with current process PID
+    live_pid_file = os.path.join(tmp_d, "live.pid")
+    with open(live_pid_file, "w") as f:
+        json.dump({"pid": os.getpid(), "version": "0.1.0", "script_mtime": 1000}, f)
+    py_daemon.set_pid_file_provider(lambda: live_pid_file)
+    py_info = py_daemon.get_daemon_info()
+    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": live_pid_file})
+    assert py_info is not None and py_info.get("pid") == os.getpid()
+    assert go_res.get("info") is not None and go_res["info"]["pid"] == os.getpid()
+
+    # 6. Log rotation differential
+    log_py = os.path.join(tmp_d, "py.log")
+    log_go = os.path.join(tmp_d, "go.log")
+    with open(log_py, "w") as f:
+        f.write("test log data line 1\nline 2\n")
+    with open(log_go, "w") as f:
+        f.write("test log data line 1\nline 2\n")
+
+    py_rot = py_daemon.rotate_log_if_needed(log_py, force=True, backup_count=2)
+    go_res = run_go_cmd("eval-daemon", {"action": "rotate_log", "path": log_go, "backup_count": 2, "force": True})
+    assert py_rot is True
+    assert go_res.get("rotated") is True
+    assert os.path.getsize(log_py) == 0
+    assert os.path.getsize(log_go) == 0
+    assert os.path.exists(log_py + ".1") and os.path.exists(log_go + ".1")
+    assert os.path.getsize(log_py + ".1") == os.path.getsize(log_go + ".1")
+
+    # 7. Clear log differential
+    py_daemon.clear_log(log_py, backup_count=2)
+    go_res = run_go_cmd("eval-daemon", {"action": "clear_log", "path": log_go, "backup_count": 2})
+    assert not os.path.exists(log_py + ".1")
+    assert not os.path.exists(log_go + ".1")
+    assert os.path.getsize(log_py) == 0
+    assert os.path.getsize(log_go) == 0
+
+    print("  ✓ Daemon formatting, PID parsing, stale detection, log rotation, and log clear passed with 100% parity.")
+
 def main():
     test_differential_capacity_cases()
     test_differential_scheduler_scenarios()
@@ -491,6 +580,7 @@ def main():
     test_differential_accounts()
     test_differential_crypto()
     test_differential_proxy()
+    test_differential_daemon()
     print("\nALL DIFFERENTIAL TESTS PASSED WITH 100% PARITY!")
 
 if __name__ == "__main__":

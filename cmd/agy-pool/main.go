@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -9,10 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/proxy"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
@@ -234,10 +237,89 @@ func main() {
 				os.Exit(1)
 			}
 			return
+
+		case "daemon-run":
+			port := 0
+			for i := 2; i < len(os.Args); i++ {
+				if os.Args[i] == "--port" && i+1 < len(os.Args) {
+					_, _ = fmt.Sscanf(os.Args[i+1], "%d", &port)
+					i++
+				}
+			}
+			if err := daemon.RunForeground(context.Background(), daemon.ServerOptions{
+				Port: port,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+
+		case "eval-daemon":
+			var input struct {
+				Action      string `json:"action"`
+				Bytes       int64  `json:"bytes"`
+				Path        string `json:"path"`
+				MaxBytes    int64  `json:"max_bytes"`
+				BackupCount int    `json:"backup_count"`
+				Force       bool   `json:"force"`
+				Port        int    `json:"port"`
+			}
+			if err := readStdinJSON(&input); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			switch input.Action {
+			case "format_size":
+				formatted := daemon.FormatSize(input.Bytes)
+				out, _ := json.Marshal(map[string]any{"formatted": formatted})
+				fmt.Println(string(out))
+				return
+			case "read_pid":
+				info, err := daemon.ReadPIDFile(input.Path)
+				errMsg := ""
+				if err != nil {
+					errMsg = err.Error()
+				}
+				out, _ := json.Marshal(map[string]any{"info": info, "error": errMsg})
+				fmt.Println(string(out))
+				return
+			case "get_daemon_info":
+				info := daemon.GetDaemonInfo(input.Path)
+				out, _ := json.Marshal(map[string]any{"info": info})
+				fmt.Println(string(out))
+				return
+			case "rotate_log":
+				rotated, err := daemon.RotateLogIfNeeded(input.Path, input.MaxBytes, input.BackupCount, input.Force)
+				errMsg := ""
+				if err != nil {
+					errMsg = err.Error()
+				}
+				out, _ := json.Marshal(map[string]any{"rotated": rotated, "error": errMsg})
+				fmt.Println(string(out))
+				return
+			case "clear_log":
+				err := daemon.ClearLog(input.Path, input.BackupCount)
+				errMsg := ""
+				if err != nil {
+					errMsg = err.Error()
+				}
+				out, _ := json.Marshal(map[string]any{"error": errMsg})
+				fmt.Println(string(out))
+				return
+			case "stop_daemon":
+				err := daemon.StopDaemon(input.Path, input.Port, 3*time.Second)
+				errMsg := ""
+				if err != nil {
+					errMsg = err.Error()
+				}
+				out, _ := json.Marshal(map[string]any{"error": errMsg})
+				fmt.Println(string(out))
+				return
+			}
 		}
 	}
 
 	fmt.Println("agy-pool-go: Go candidate implementation (Phase G2 Development)")
 	fmt.Println("Usage: agy-pool <command> [args...]")
-	fmt.Println("Available commands: version, eval-scheduler, eval-capacity, eval-account-target, eval-display-name, eval-jwt, eval-error-classifier, eval-crypto, proxy-test-server")
+	fmt.Println("Available commands: version, eval-scheduler, eval-capacity, eval-account-target, eval-display-name, eval-jwt, eval-error-classifier, eval-crypto, proxy-test-server, daemon-run, eval-daemon")
 }
