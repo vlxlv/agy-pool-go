@@ -313,6 +313,36 @@ func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return nil
 }
 
+// ReserveRoundRobinCandidates executes candidate ordering and advances the round_robin cursor
+// within ONE immediate SQLite transaction, updating ONLY the cursor in runtime_global.
+func (s *StateDB) ReserveRoundRobinCandidates(now float64, orderFn func(candidates []*Account, strategy string, pool *Pool, now float64) []*Account) ([]*Account, error) {
+	var candidates []*Account
+	err := s.Update(context.Background(), func(tx *sql.Tx) error {
+		pool, err := LoadPoolFromTx(tx)
+		if err != nil {
+			return err
+		}
+		if len(pool.Accounts) == 0 {
+			candidates = nil
+			return nil
+		}
+		ordered := orderFn(pool.Accounts, config.StrategyRoundRobin, pool, now)
+		if len(ordered) > 0 && ordered[0].ID != "" {
+			resID := ordered[0].ID
+			pool.RoundRobinLastAccountID = &resID
+			if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('round_robin_last_account_id', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", resID); err != nil {
+				return fmt.Errorf("failed to advance round_robin cursor: %w", err)
+			}
+		}
+		candidates = ordered
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
 func serializeAny(v any) *string {
 	if v == nil {
 		return nil

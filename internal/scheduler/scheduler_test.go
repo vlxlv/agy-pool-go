@@ -156,3 +156,178 @@ func floatPtr(f float64) *float64 {
 func int64Ptr(i int64) *int64 {
 	return &i
 }
+
+func TestRoundRobin_StaleMissingCursor(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+
+	now := 1789560000.0
+	pool := storage.NewEmptyPool()
+	pool.Strategy = "round_robin"
+	ghostID := "acc_ghost"
+	pool.RoundRobinLastAccountID = &ghostID
+	pool.Accounts = []*storage.Account{
+		{ID: "acc_1", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0.9), UpdatedAt: int64Ptr(int64(now - 10))}},
+		{ID: "acc_2", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0.9), UpdatedAt: int64Ptr(int64(now - 10))}},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	// Reservation must not fail; it falls back to normal order and updates cursor
+	acc, err := ReserveRoundRobinAccount(now)
+	if err != nil {
+		t.Fatalf("ReserveRoundRobinAccount failed with stale cursor: %v", err)
+	}
+	if acc == nil || acc.ID != "acc_1" {
+		t.Fatalf("expected fallback to acc_1, got %v", acc)
+	}
+
+	loaded, _ := storage.LoadPool()
+	if loaded.RoundRobinLastAccountID == nil || *loaded.RoundRobinLastAccountID != "acc_1" {
+		t.Fatalf("cursor was not updated from stale value: got %v", loaded.RoundRobinLastAccountID)
+	}
+}
+
+func TestRoundRobin_RestartPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+
+	now := 1789560000.0
+	pool := storage.NewEmptyPool()
+	pool.Strategy = "round_robin"
+	pool.Accounts = []*storage.Account{
+		{ID: "acc_1"},
+		{ID: "acc_2"},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	// 1. Reserve acc_1
+	acc, err := ReserveRoundRobinAccount(now)
+	if err != nil || acc == nil || acc.ID != "acc_1" {
+		t.Fatalf("1st reservation failed: %v", err)
+	}
+
+	// 2. Simulate complete restart by closing DB
+	sdb, err := storage.GetStateDB()
+	if err != nil {
+		t.Fatalf("GetStateDB failed: %v", err)
+	}
+	if err := sdb.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// 3. Re-open and reserve again -> must pick acc_2!
+	acc2, err := ReserveRoundRobinAccount(now)
+	if err != nil || acc2 == nil || acc2.ID != "acc_2" {
+		t.Fatalf("reservation after restart failed: want acc_2, got %v (err: %v)", acc2, err)
+	}
+}
+
+func TestRoundRobin_FailedDispatchNoRollback(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+
+	now := 1789560000.0
+	pool := storage.NewEmptyPool()
+	pool.Strategy = "round_robin"
+	pool.Accounts = []*storage.Account{
+		{ID: "acc_1"},
+		{ID: "acc_2"},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	// Reserve acc_1
+	acc, err := ReserveRoundRobinAccount(now)
+	if err != nil || acc == nil || acc.ID != "acc_1" {
+		t.Fatalf("reservation failed: %v", err)
+	}
+
+	// Simulated downstream network failure (e.g. Google returned 500 or timeout)
+	// Caller does NOT rollback RR cursor
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	if loaded.RoundRobinLastAccountID == nil || *loaded.RoundRobinLastAccountID != "acc_1" {
+		t.Fatalf("cursor was unexpectedly rolled back: %v", loaded.RoundRobinLastAccountID)
+	}
+}
+
+func TestRoundRobin_NonRRStrategyCursorUnchanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+
+	now := 1789560000.0
+	pool := storage.NewEmptyPool()
+	initCursor := "acc_preserved"
+	pool.RoundRobinLastAccountID = &initCursor
+	pool.Accounts = []*storage.Account{
+		{ID: "acc_1", RequestCount: 5},
+		{ID: "acc_2", RequestCount: 1},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	// Evaluate with max_quota and least_used
+	_ = OrderCandidates(pool.Accounts, config.StrategyMaxQuota, pool, now)
+	_ = OrderCandidates(pool.Accounts, config.StrategyLeastUsed, pool, now)
+
+	// Check that cursor in state.db was NOT mutated
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	if loaded.RoundRobinLastAccountID == nil || *loaded.RoundRobinLastAccountID != "acc_preserved" {
+		t.Fatalf("non-RR strategy mutated cursor! got %v", loaded.RoundRobinLastAccountID)
+	}
+}
+
+func TestSchedulerSnapshotConsistent(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+
+	now := 1789560000.0
+	p := storage.NewEmptyPool()
+	p.Strategy = "max_quota"
+	p.Accounts = append(p.Accounts, &storage.Account{
+		ID:           "acc_1",
+		Email:        "snap@example.com",
+		RequestCount: 15,
+		Status:       "active",
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: floatPtr(0.75),
+			UpdatedAt:         int64Ptr(int64(now - 30)),
+		},
+	})
+	if err := storage.SavePool(p); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	snap, err := GetSchedulerSnapshot()
+	if err != nil {
+		t.Fatalf("GetSchedulerSnapshot failed: %v", err)
+	}
+	if snap == nil || len(snap.Accounts) != 1 {
+		t.Fatalf("invalid snapshot: %+v", snap)
+	}
+	acc := snap.Accounts[0]
+	if acc.ID != "acc_1" || acc.RequestCount != 15 || acc.LastQuota == nil || *acc.LastQuota.RemainingFraction != 0.75 {
+		t.Fatalf("snapshot data inconsistent: %+v", acc)
+	}
+}

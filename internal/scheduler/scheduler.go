@@ -147,26 +147,19 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 	return result
 }
 
+// GetSchedulerSnapshot reads an authoritative point-in-time snapshot from state.db.
+func GetSchedulerSnapshot() (*storage.Pool, error) {
+	return storage.LoadPool()
+}
+
 // ReserveRoundRobinCandidates atomically selects candidate ordering and advances
-// the persisted round_robin cursor under a storage transaction before network dispatch.
+// the persisted round_robin cursor under an immediate SQLite transaction before network dispatch.
 func ReserveRoundRobinCandidates(now float64) ([]*storage.Account, error) {
-	var candidates []*storage.Account
-	err := storage.PoolTransaction(func(pool *storage.Pool) error {
-		if len(pool.Accounts) == 0 {
-			candidates = nil
-			return nil
-		}
-		ordered := OrderCandidates(pool.Accounts, config.StrategyRoundRobin, pool, now)
-		if len(ordered) > 0 && ordered[0].ID != "" {
-			pool.RoundRobinLastAccountID = &ordered[0].ID
-		}
-		candidates = ordered
-		return nil
-	})
+	sdb, err := storage.GetStateDB()
 	if err != nil {
 		return nil, err
 	}
-	return candidates, nil
+	return sdb.ReserveRoundRobinCandidates(now, OrderCandidates)
 }
 
 // ReserveRoundRobinAccount atomically reserves and returns the next account candidate.
