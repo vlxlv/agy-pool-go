@@ -13,12 +13,12 @@ import (
 )
 
 type FixtureOrderingCase struct {
-	TestID             string              `json:"test_id"`
-	Strategy           string              `json:"strategy"`
-	Now                float64             `json:"now"`
-	Pool               *storage.Pool       `json:"pool"`
-	Candidates         []*storage.Account  `json:"candidates"`
-	ExpectedOrderedIDs []string            `json:"expected_ordered_ids"`
+	TestID             string             `json:"test_id"`
+	Strategy           string             `json:"strategy"`
+	Now                float64            `json:"now"`
+	Pool               *storage.Pool      `json:"pool"`
+	Candidates         []*storage.Account `json:"candidates"`
+	ExpectedOrderedIDs []string           `json:"expected_ordered_ids"`
 }
 
 func TestSchedulerOrderingGoldenCases(t *testing.T) {
