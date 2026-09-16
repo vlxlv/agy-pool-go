@@ -393,3 +393,67 @@ func NextBackoffDelay(attempt int) time.Duration {
 	}
 	return config.QuotaRefreshBackoff[attempt]
 }
+
+const (
+	// BackendHost is the default Google Cloud Code PA host.
+	BackendHost = "daily-cloudcode-pa.googleapis.com"
+
+	// BackendURLBase is the default base URL for Google Cloud Code PA.
+	BackendURLBase = "https://" + BackendHost
+
+	// DefaultUA is the default user agent for proxy forwarding.
+	DefaultUA = "antigravity/cli"
+)
+
+// IsQuotaError reports whether an HTTP response status and body indicate quota exhaustion or rate limits.
+func IsQuotaError(status int, body []byte) bool {
+	if status == 429 {
+		return true
+	}
+	if status != 403 {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	markers := []string{
+		"resource_exhausted", "quota_exceeded", "rate_limit_exceeded",
+		"quota exceeded", "quota exhausted", "exceeded your current quota",
+		"insufficient quota",
+	}
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseRetryAfter parses a Retry-After header string into delay seconds clamped between 5s and 86400s (24h).
+func ParseRetryAfter(raw string, defaultSec int64) int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultSec
+	}
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if seconds < 5 {
+			return 5
+		}
+		if seconds > 86400 {
+			return 86400
+		}
+		return seconds
+	}
+	for _, layout := range []string{time.RFC1123, time.RFC1123Z, time.RFC850, time.ANSIC} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			seconds := int64(time.Until(t).Seconds())
+			if seconds < 5 {
+				return 5
+			}
+			if seconds > 86400 {
+				return 86400
+			}
+			return seconds
+		}
+	}
+	return defaultSec
+}
+
