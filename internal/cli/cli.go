@@ -17,6 +17,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/conversation"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
+	"github.com/vlxlv/agy-pool-go/internal/installer"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -152,6 +153,10 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	case "migrate-legacy":
 		return handleMigrateLegacy(args[1:], stdout, stderr)
+	case "install":
+		return handleInstall(args[1:], stdout, stderr)
+	case "uninstall":
+		return handleUninstall(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,daemon-run,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
@@ -555,6 +560,138 @@ func handleMigrateLegacy(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "%s✓ Successfully migrated %d account(s) to %s%s\n", clrGreen, res.AccountsCount, res.TargetFile, clrReset)
 	fmt.Fprintf(stdout, "%sSource file %s remains untouched.%s\n", clrDim, res.SourcePath, clrReset)
+	return 0
+}
+
+func handleInstall(args []string, stdout, stderr io.Writer) int {
+	opts := installer.Options{
+		Stdout: stdout,
+		Stderr: stderr,
+	}
+	if exe, err := os.Executable(); err == nil {
+		opts.SourceBinary = exe
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			fmt.Fprintf(stdout, "usage: agy-pool install [--user] [--system] [--prefix PREFIX] [--target DIR] [--bin-dir DIR] [--config-dir DIR] [--data-dir DIR] [--native-agy PATH] [--skip-rc]\n")
+			return 0
+		case arg == "--user":
+			opts.IsSystem = false
+		case arg == "--system":
+			opts.IsSystem = true
+		case arg == "--prefix":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool install: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.Prefix = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--prefix="):
+			opts.Prefix = strings.TrimPrefix(arg, "--prefix=")
+		case arg == "--target" || arg == "--bin-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool install: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.TargetDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--target="):
+			opts.TargetDir = strings.TrimPrefix(arg, "--target=")
+		case strings.HasPrefix(arg, "--bin-dir="):
+			opts.TargetDir = strings.TrimPrefix(arg, "--bin-dir=")
+		case arg == "--config-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool install: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.ConfigDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--config-dir="):
+			opts.ConfigDir = strings.TrimPrefix(arg, "--config-dir=")
+		case arg == "--data-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool install: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.DataDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--data-dir="):
+			opts.DataDir = strings.TrimPrefix(arg, "--data-dir=")
+		case arg == "--native-agy":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool install: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.NativeAgyPath = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--native-agy="):
+			opts.NativeAgyPath = strings.TrimPrefix(arg, "--native-agy=")
+		case arg == "--skip-rc":
+			opts.SkipShellRC = true
+		default:
+			fmt.Fprintf(stderr, "agy-pool install: error: unrecognized argument: %s\n", arg)
+			return 2
+		}
+	}
+
+	if err := installer.Install(opts); err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Installation failed: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s✓ Successfully installed agy-pool%s\n", clrGreen, clrReset)
+	return 0
+}
+
+func handleUninstall(args []string, stdout, stderr io.Writer) int {
+	opts := installer.Options{
+		Stdout: stdout,
+		Stderr: stderr,
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			fmt.Fprintf(stdout, "usage: agy-pool uninstall [--user] [--system] [--prefix PREFIX] [--target DIR] [--bin-dir DIR]\n")
+			return 0
+		case arg == "--user":
+			opts.IsSystem = false
+		case arg == "--system":
+			opts.IsSystem = true
+		case arg == "--prefix":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool uninstall: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.Prefix = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--prefix="):
+			opts.Prefix = strings.TrimPrefix(arg, "--prefix=")
+		case arg == "--target" || arg == "--bin-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool uninstall: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.TargetDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--target="):
+			opts.TargetDir = strings.TrimPrefix(arg, "--target=")
+		case strings.HasPrefix(arg, "--bin-dir="):
+			opts.TargetDir = strings.TrimPrefix(arg, "--bin-dir=")
+		default:
+			fmt.Fprintf(stderr, "agy-pool uninstall: error: unrecognized argument: %s\n", arg)
+			return 2
+		}
+	}
+
+	if err := installer.Uninstall(opts); err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Uninstallation failed: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s✓ Successfully uninstalled agy-pool%s\n", clrGreen, clrReset)
 	return 0
 }
 
