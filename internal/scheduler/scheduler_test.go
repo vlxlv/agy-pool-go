@@ -49,11 +49,18 @@ func TestSchedulerOrderingGoldenCases(t *testing.T) {
 	}
 }
 
-func TestRoundRobinAtomicReservation(t *testing.T) {
+func setupTestStateDir(t *testing.T) string {
+	t.Helper()
 	tmpDir := t.TempDir()
 	if err := config.ConfigureStateDir(tmpDir); err != nil {
 		t.Fatalf("failed to configure state dir: %v", err)
 	}
+	t.Cleanup(config.ResetDataDir)
+	return tmpDir
+}
+
+func TestRoundRobinAtomicReservation(t *testing.T) {
+	setupTestStateDir(t)
 
 	now := 1789560000.0
 	pool := storage.NewEmptyPool()
@@ -99,10 +106,7 @@ func TestRoundRobinAtomicReservation(t *testing.T) {
 }
 
 func TestConcurrentRoundRobinReservation(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := config.ConfigureStateDir(tmpDir); err != nil {
-		t.Fatalf("failed to configure state dir: %v", err)
-	}
+	setupTestStateDir(t)
 
 	now := 1789560000.0
 	pool := storage.NewEmptyPool()
@@ -159,10 +163,7 @@ func int64Ptr(i int64) *int64 {
 }
 
 func TestRoundRobin_StaleMissingCursor(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := config.ConfigureStateDir(tmpDir); err != nil {
-		t.Fatalf("failed to configure state dir: %v", err)
-	}
+	setupTestStateDir(t)
 
 	now := 1789560000.0
 	pool := storage.NewEmptyPool()
@@ -193,10 +194,7 @@ func TestRoundRobin_StaleMissingCursor(t *testing.T) {
 }
 
 func TestRoundRobin_RestartPersistence(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := config.ConfigureStateDir(tmpDir); err != nil {
-		t.Fatalf("failed to configure state dir: %v", err)
-	}
+	setupTestStateDir(t)
 
 	now := 1789560000.0
 	pool := storage.NewEmptyPool()
@@ -232,10 +230,7 @@ func TestRoundRobin_RestartPersistence(t *testing.T) {
 }
 
 func TestRoundRobin_FailedDispatchNoRollback(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := config.ConfigureStateDir(tmpDir); err != nil {
-		t.Fatalf("failed to configure state dir: %v", err)
-	}
+	setupTestStateDir(t)
 
 	now := 1789560000.0
 	pool := storage.NewEmptyPool()
@@ -266,10 +261,7 @@ func TestRoundRobin_FailedDispatchNoRollback(t *testing.T) {
 }
 
 func TestRoundRobin_NonRRStrategyCursorUnchanged(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := config.ConfigureStateDir(tmpDir); err != nil {
-		t.Fatalf("failed to configure state dir: %v", err)
-	}
+	setupTestStateDir(t)
 
 	now := 1789560000.0
 	pool := storage.NewEmptyPool()
@@ -298,10 +290,7 @@ func TestRoundRobin_NonRRStrategyCursorUnchanged(t *testing.T) {
 }
 
 func TestSchedulerSnapshotConsistent(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := config.ConfigureStateDir(tmpDir); err != nil {
-		t.Fatalf("failed to configure state dir: %v", err)
-	}
+	setupTestStateDir(t)
 
 	now := 1789560000.0
 	p := storage.NewEmptyPool()

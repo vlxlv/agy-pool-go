@@ -54,6 +54,7 @@ func TestAllowDevAndTempDirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success configuring temp dir, got %v", err)
 	}
+	t.Cleanup(ResetDataDir)
 
 	accountsFile := GetAccountsFile()
 	expectedCanonical := filepath.Join(tmpDir, "accounts.json")
@@ -129,6 +130,7 @@ func TestDataDirectoryLayout(t *testing.T) {
 	if err := ConfigureDataDir(tmpDir); err != nil {
 		t.Fatalf("failed to configure data dir: %v", err)
 	}
+	t.Cleanup(ResetDataDir)
 
 	// Verify path getters
 	if GetAccountsFile() != filepath.Join(tmpDir, "accounts.json") {

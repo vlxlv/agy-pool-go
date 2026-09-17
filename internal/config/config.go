@@ -502,6 +502,14 @@ func ConfigureDataDir(dir string) error {
 	return nil
 }
 
+// ResetDataDir resets the configured data and state directory.
+func ResetDataDir() {
+	dataDirMu.Lock()
+	configuredDataDir = ""
+	configuredStateDir = ""
+	dataDirMu.Unlock()
+}
+
 // ConfigureDefaultDataDir sets the default data directory.
 func ConfigureDefaultDataDir() error {
 	if envDir := os.Getenv("AGY_DATA_DIR"); envDir != "" {

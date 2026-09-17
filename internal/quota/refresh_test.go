@@ -25,6 +25,7 @@ func setupQuotaTestDir(t *testing.T) string {
 		TokenRefresher = nil
 		HTTPClient = nil
 		ResetRefreshState()
+		config.ResetDataDir()
 	})
 
 	if err := config.ConfigureStateDir(tmp); err != nil {
@@ -465,16 +466,19 @@ func TestQueryQuota_ValidationError(t *testing.T) {
 
 // 8. 429 invalidates freshness without erasing known windows
 func TestQuotaFreshness_429InvalidationSemantics(t *testing.T) {
+	future5h := time.Now().Add(4 * time.Hour).UTC().Format(time.RFC3339)
+	futureWeekly := time.Now().Add(6 * 24 * time.Hour).UTC().Format(time.RFC3339)
+
 	acc := &storage.Account{
 		ID: "429-acc",
 		LastQuota: &storage.QuotaState{
 			Gemini5H: &storage.QuotaWindow{
 				Fraction:  floatPtr(0.75),
-				ResetTime: "2026-09-17T18:00:00Z",
+				ResetTime: future5h,
 			},
 			GeminiWeekly: &storage.QuotaWindow{
 				Fraction:  floatPtr(0.85),
-				ResetTime: "2026-09-24T00:00:00Z",
+				ResetTime: futureWeekly,
 			},
 			UpdatedAt: int64Ptr(time.Now().Unix() - 20),
 		},

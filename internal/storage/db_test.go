@@ -131,6 +131,7 @@ func TestCascadeDeletion(t *testing.T) {
 	if err := config.ConfigureStateDir(tmpDir); err != nil {
 		t.Fatalf("failed to configure state dir: %v", err)
 	}
+	t.Cleanup(config.ResetDataDir)
 
 	p := NewEmptyPool()
 	p.Accounts = append(p.Accounts, &Account{

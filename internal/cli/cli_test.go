@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,10 +17,7 @@ import (
 
 func setupCLITestEnv(t *testing.T) (string, func()) {
 	t.Helper()
-	tempDir, err := os.MkdirTemp("", "agy_cli_test_*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
+	tempDir := t.TempDir()
 
 	stateDir := filepath.Join(tempDir, ".gemini")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
@@ -51,19 +49,30 @@ func setupCLITestEnv(t *testing.T) (string, func()) {
 	origEntrypoint := daemon.EntrypointProvider
 	daemon.EntrypointProvider = func() string { return "/bin/true" }
 
+	var once sync.Once
 	cleanup := func() {
-		resetRoots()
-		resetSandbox()
-		daemon.EntrypointProvider = origEntrypoint
-		ExecHandler = origExec
-		config.SetNativeAgyDir("")
-		_ = config.ConfigureStateDir(origState)
-		config.SetTestMode(origTestMode)
-		diagnostics.SetAgyBinaryFinder(nil)
-		diagnostics.SetAgyVersionProvider(nil)
-		diagnostics.SetTLSProber(nil)
-		_ = os.RemoveAll(tempDir)
+		once.Do(func() {
+			resetRoots()
+			resetSandbox()
+			daemon.EntrypointProvider = origEntrypoint
+			ExecHandler = origExec
+			config.SetNativeAgyDir("")
+			if origState != "" {
+				if _, err := os.Stat(origState); err == nil {
+					_ = config.ConfigureStateDir(origState)
+				} else {
+					config.ResetDataDir()
+				}
+			} else {
+				config.ResetDataDir()
+			}
+			config.SetTestMode(origTestMode)
+			diagnostics.SetAgyBinaryFinder(nil)
+			diagnostics.SetAgyVersionProvider(nil)
+			diagnostics.SetTLSProber(nil)
+		})
 	}
+	t.Cleanup(cleanup)
 
 	return tempDir, cleanup
 }

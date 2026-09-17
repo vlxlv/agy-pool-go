@@ -29,6 +29,8 @@ cleanup() {
     rm -rf "$TMP_STATE"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 export AGY_TEST_MODE=1
 export AGY_GEMINI_DIR="$TMP_STATE/.gemini"

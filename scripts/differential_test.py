@@ -11,6 +11,8 @@ import sys
 import json
 import subprocess
 import tempfile
+import atexit
+import shutil
 import base64
 import socket
 import time
@@ -37,8 +39,10 @@ GO_BIN = os.path.join(GO_ROOT, "bin", "agy-pool")
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+_module_temp_dir = tempfile.mkdtemp(prefix="diff_module_init_")
+atexit.register(lambda: shutil.rmtree(_module_temp_dir, ignore_errors=True))
 os.environ["AGY_TEST_MODE"] = "1"
-os.environ["AGY_GEMINI_DIR"] = os.path.join(tempfile.mkdtemp(), ".gemini")
+os.environ["AGY_GEMINI_DIR"] = os.path.join(_module_temp_dir, ".gemini")
 
 from agy_pool import quota
 from agy_pool import scheduler
@@ -389,45 +393,44 @@ def test_differential_proxy():
         }
 
     # Setup isolated state directories
-    tmp_py = tempfile.mkdtemp(prefix="agy_py_state_")
-    tmp_go = tempfile.mkdtemp(prefix="agy_go_state_")
+    with tempfile.TemporaryDirectory(prefix="agy_py_state_") as tmp_py, \
+         tempfile.TemporaryDirectory(prefix="agy_go_state_") as tmp_go:
 
-    with open(os.path.join(tmp_py, "agy-pool-accounts.json"), "w") as f:
-        json.dump(make_pool_state(), f)
-    with open(os.path.join(tmp_go, "agy-pool-accounts.json"), "w") as f:
-        json.dump(make_pool_state(), f)
+        with open(os.path.join(tmp_py, "agy-pool-accounts.json"), "w") as f:
+            json.dump(make_pool_state(), f)
+        with open(os.path.join(tmp_go, "agy-pool-accounts.json"), "w") as f:
+            json.dump(make_pool_state(), f)
 
-    # Configure and start Python proxy
-    from agy_pool import config as py_config
-    py_config.configure_paths(tmp_py)
-    py_proxy.set_backend_host_provider(lambda: f"127.0.0.1:{port_upstream}")
-    py_proxy.set_backend_url_provider(lambda: f"http://127.0.0.1:{port_upstream}")
-    py_proxy.set_token_refresher(lambda acc: f"token-{acc.get('id')}")
+        # Configure and start Python proxy
+        from agy_pool import config as py_config
+        py_config.configure_paths(tmp_py)
+        py_proxy.set_backend_host_provider(lambda: f"127.0.0.1:{port_upstream}")
+        py_proxy.set_backend_url_provider(lambda: f"http://127.0.0.1:{port_upstream}")
+        py_proxy.set_token_refresher(lambda acc: f"token-{acc.get('id')}")
 
-    py_server = accounts.ThreadedHTTPServer(("127.0.0.1", port_py), py_proxy.SmartProxyHandler)
-    py_thread = threading.Thread(target=py_server.serve_forever, daemon=True)
-    py_thread.start()
+        py_server = accounts.ThreadedHTTPServer(("127.0.0.1", port_py), py_proxy.SmartProxyHandler)
+        py_thread = threading.Thread(target=py_server.serve_forever, daemon=True)
+        py_thread.start()
 
-    # Start Go proxy server process
-    go_cmd = [
-        GO_BIN, "proxy-test-server",
-        str(port_go),
-        tmp_go,
-        f"http://127.0.0.1:{port_upstream}"
-    ]
-    go_proc = subprocess.Popen(
-        go_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=GO_ROOT
-    )
+        # Start Go proxy server process
+        go_cmd = [
+            GO_BIN, "proxy-test-server",
+            str(port_go),
+            tmp_go,
+            f"http://127.0.0.1:{port_upstream}"
+        ]
+        go_proc = subprocess.Popen(
+            go_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=GO_ROOT
+        )
 
-    # Wait for Go server ready
-    ready_line = go_proc.stdout.readline()
-    assert "READY" in ready_line, f"Go proxy server failed to start: {ready_line}"
+        # Wait for Go server ready
+        ready_line = go_proc.stdout.readline()
+        assert "READY" in ready_line, f"Go proxy server failed to start: {ready_line}"
 
-    try:
         def request_pair(path, method="POST", data=b"{}"):
             # Request to Python
             req_py = urllib.request.Request(f"http://127.0.0.1:{port_py}{path}", data=data, method=method)
@@ -451,50 +454,50 @@ def test_differential_proxy():
 
             return (py_status, py_body), (go_status, go_body)
 
-        # 1. Normal Request
-        (py_status, py_body), (go_status, go_body) = request_pair("/v1/normal")
-        assert py_status == 200, f"Py status = {py_status}"
-        assert go_status == 200, f"Go status = {go_status}"
-        assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on /v1/normal: Py={py_body}, Go={go_body}"
-
-        # 2. 429 Failover
-        (py_status, py_body), (go_status, go_body) = request_pair("/v1/failover_429")
-        assert py_status == 200, f"Py failover status = {py_status}"
-        assert go_status == 200, f"Go failover status = {go_status}"
-        assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on 429 failover"
-
-        # 3. Validation Failover
-        (py_status, py_body), (go_status, go_body) = request_pair("/v1/failover_val")
-        assert py_status == 200, f"Py validation status = {py_status}"
-        assert go_status == 200, f"Go validation status = {go_status}"
-        assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on validation failover"
-
-        # 4. Ordinary Error (400 Bad Request) - No failover
-        (py_status, py_body), (go_status, go_body) = request_pair("/v1/bad_request")
-        assert py_status == 400, f"Py bad request status = {py_status}"
-        assert go_status == 400, f"Go bad request status = {go_status}"
-        assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on bad request"
-
-        # 5. Streaming (SSE)
-        (py_status, py_body), (go_status, go_body) = request_pair("/v1/stream", method="GET", data=None)
-        assert py_status == 200, f"Py stream status = {py_status}"
-        assert go_status == 200, f"Go stream status = {go_status}"
-        assert b"chunk 1" in py_body and b"chunk 2" in py_body
-        assert b"chunk 1" in go_body and b"chunk 2" in go_body
-
-        print("  ✓ End-to-end Python vs Go proxy forwarding, failover, no-replay, and streaming passed with 100% parity.")
-
-    finally:
-        # Teardown
-        go_proc.terminate()
         try:
-            go_proc.wait(timeout=2)
-        except Exception:
-            go_proc.kill()
-        py_server.shutdown()
-        py_server.server_close()
-        upstream_server.shutdown()
-        upstream_server.server_close()
+            # 1. Normal Request
+            (py_status, py_body), (go_status, go_body) = request_pair("/v1/normal")
+            assert py_status == 200, f"Py status = {py_status}"
+            assert go_status == 200, f"Go status = {go_status}"
+            assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on /v1/normal: Py={py_body}, Go={go_body}"
+
+            # 2. 429 Failover
+            (py_status, py_body), (go_status, go_body) = request_pair("/v1/failover_429")
+            assert py_status == 200, f"Py failover status = {py_status}"
+            assert go_status == 200, f"Go failover status = {go_status}"
+            assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on 429 failover"
+
+            # 3. Validation Failover
+            (py_status, py_body), (go_status, go_body) = request_pair("/v1/failover_val")
+            assert py_status == 200, f"Py validation status = {py_status}"
+            assert go_status == 200, f"Go validation status = {go_status}"
+            assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on validation failover"
+
+            # 4. Ordinary Error (400 Bad Request) - No failover
+            (py_status, py_body), (go_status, go_body) = request_pair("/v1/bad_request")
+            assert py_status == 400, f"Py bad request status = {py_status}"
+            assert go_status == 400, f"Go bad request status = {go_status}"
+            assert json.loads(py_body) == json.loads(go_body), f"Body mismatch on bad request"
+
+            # 5. Streaming (SSE)
+            (py_status, py_body), (go_status, go_body) = request_pair("/v1/stream", method="GET", data=None)
+            assert py_status == 200, f"Py stream status = {py_status}"
+            assert go_status == 200, f"Go stream status = {go_status}"
+            assert b"chunk 1" in py_body and b"chunk 2" in py_body
+            assert b"chunk 1" in go_body and b"chunk 2" in go_body
+
+            print("  ✓ End-to-end Python vs Go proxy forwarding, failover, no-replay, and streaming passed with 100% parity.")
+        finally:
+            # Teardown
+            go_proc.terminate()
+            try:
+                go_proc.wait(timeout=2)
+            except Exception:
+                go_proc.kill()
+            py_server.shutdown()
+            py_server.server_close()
+            upstream_server.shutdown()
+            upstream_server.server_close()
 
 def test_differential_daemon():
     print("Testing differential daemon lifecycle & log operations...")
@@ -507,69 +510,69 @@ def test_differential_daemon():
         assert py_fmt == go_fmt, f"Format mismatch for {sz}: py={py_fmt}, go={go_fmt}"
 
     # 2. Missing PID file
-    tmp_d = tempfile.mkdtemp(prefix="agy_daemon_diff_")
-    missing_pid = os.path.join(tmp_d, "missing.pid")
-    py_daemon.set_pid_file_provider(lambda: missing_pid)
-    py_info = py_daemon.get_daemon_info()
-    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": missing_pid})
-    assert py_info is None, f"Expected py_info None, got {py_info}"
-    assert go_res.get("info") is None, f"Expected go_info None, got {go_res.get('info')}"
+    with tempfile.TemporaryDirectory(prefix="agy_daemon_diff_") as tmp_d:
+        missing_pid = os.path.join(tmp_d, "missing.pid")
+        py_daemon.set_pid_file_provider(lambda: missing_pid)
+        py_info = py_daemon.get_daemon_info()
+        go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": missing_pid})
+        assert py_info is None, f"Expected py_info None, got {py_info}"
+        assert go_res.get("info") is None, f"Expected go_info None, got {go_res.get('info')}"
 
-    # 3. Dead PID file (stale PID)
-    stale_pid_file = os.path.join(tmp_d, "stale.pid")
-    dead_pid = 4194300
-    with open(stale_pid_file, "w") as f:
-        json.dump({"pid": dead_pid, "version": "0.1.0"}, f)
-    py_daemon.set_pid_file_provider(lambda: stale_pid_file)
-    py_info = py_daemon.get_daemon_info()
-    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": stale_pid_file})
-    assert py_info is None, f"Expected stale PID py_info None, got {py_info}"
-    assert go_res.get("info") is None, f"Expected stale PID go_info None, got {go_res.get('info')}"
+        # 3. Dead PID file (stale PID)
+        stale_pid_file = os.path.join(tmp_d, "stale.pid")
+        dead_pid = 4194300
+        with open(stale_pid_file, "w") as f:
+            json.dump({"pid": dead_pid, "version": "0.1.0"}, f)
+        py_daemon.set_pid_file_provider(lambda: stale_pid_file)
+        py_info = py_daemon.get_daemon_info()
+        go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": stale_pid_file})
+        assert py_info is None, f"Expected stale PID py_info None, got {py_info}"
+        assert go_res.get("info") is None, f"Expected stale PID go_info None, got {go_res.get('info')}"
 
-    # 4. Malformed PID file
-    malformed_pid_file = os.path.join(tmp_d, "malformed.pid")
-    with open(malformed_pid_file, "w") as f:
-        f.write("{invalid json")
-    py_daemon.set_pid_file_provider(lambda: malformed_pid_file)
-    py_info = py_daemon.get_daemon_info()
-    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": malformed_pid_file})
-    assert py_info is None, f"Expected malformed py_info None"
-    assert go_res.get("info") is None, f"Expected malformed go_info None"
+        # 4. Malformed PID file
+        malformed_pid_file = os.path.join(tmp_d, "malformed.pid")
+        with open(malformed_pid_file, "w") as f:
+            f.write("{invalid json")
+        py_daemon.set_pid_file_provider(lambda: malformed_pid_file)
+        py_info = py_daemon.get_daemon_info()
+        go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": malformed_pid_file})
+        assert py_info is None, f"Expected malformed py_info None"
+        assert go_res.get("info") is None, f"Expected malformed go_info None"
 
-    # 5. Live PID file with current process PID
-    live_pid_file = os.path.join(tmp_d, "live.pid")
-    with open(live_pid_file, "w") as f:
-        json.dump({"pid": os.getpid(), "version": "0.1.0", "script_mtime": 1000}, f)
-    py_daemon.set_pid_file_provider(lambda: live_pid_file)
-    py_info = py_daemon.get_daemon_info()
-    go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": live_pid_file})
-    assert py_info is not None and py_info.get("pid") == os.getpid()
-    assert go_res.get("info") is not None and go_res["info"]["pid"] == os.getpid()
+        # 5. Live PID file with current process PID
+        live_pid_file = os.path.join(tmp_d, "live.pid")
+        with open(live_pid_file, "w") as f:
+            json.dump({"pid": os.getpid(), "version": "0.1.0", "script_mtime": 1000}, f)
+        py_daemon.set_pid_file_provider(lambda: live_pid_file)
+        py_info = py_daemon.get_daemon_info()
+        go_res = run_go_cmd("eval-daemon", {"action": "get_daemon_info", "path": live_pid_file})
+        assert py_info is not None and py_info.get("pid") == os.getpid()
+        assert go_res.get("info") is not None and go_res["info"]["pid"] == os.getpid()
 
-    # 6. Log rotation differential
-    log_py = os.path.join(tmp_d, "py.log")
-    log_go = os.path.join(tmp_d, "go.log")
-    with open(log_py, "w") as f:
-        f.write("test log data line 1\nline 2\n")
-    with open(log_go, "w") as f:
-        f.write("test log data line 1\nline 2\n")
+        # 6. Log rotation differential
+        log_py = os.path.join(tmp_d, "py.log")
+        log_go = os.path.join(tmp_d, "go.log")
+        with open(log_py, "w") as f:
+            f.write("test log data line 1\nline 2\n")
+        with open(log_go, "w") as f:
+            f.write("test log data line 1\nline 2\n")
 
-    py_rot = py_daemon.rotate_log_if_needed(log_py, force=True, backup_count=2)
-    go_res = run_go_cmd("eval-daemon", {"action": "rotate_log", "path": log_go, "backup_count": 2, "force": True})
-    assert py_rot is True
-    assert go_res.get("rotated") is True
-    assert os.path.getsize(log_py) == 0
-    assert os.path.getsize(log_go) == 0
-    assert os.path.exists(log_py + ".1") and os.path.exists(log_go + ".1")
-    assert os.path.getsize(log_py + ".1") == os.path.getsize(log_go + ".1")
+        py_rot = py_daemon.rotate_log_if_needed(log_py, force=True, backup_count=2)
+        go_res = run_go_cmd("eval-daemon", {"action": "rotate_log", "path": log_go, "backup_count": 2, "force": True})
+        assert py_rot is True
+        assert go_res.get("rotated") is True
+        assert os.path.getsize(log_py) == 0
+        assert os.path.getsize(log_go) == 0
+        assert os.path.exists(log_py + ".1") and os.path.exists(log_go + ".1")
+        assert os.path.getsize(log_py + ".1") == os.path.getsize(log_go + ".1")
 
-    # 7. Clear log differential
-    py_daemon.clear_log(log_py, backup_count=2)
-    go_res = run_go_cmd("eval-daemon", {"action": "clear_log", "path": log_go, "backup_count": 2})
-    assert not os.path.exists(log_py + ".1")
-    assert not os.path.exists(log_go + ".1")
-    assert os.path.getsize(log_py) == 0
-    assert os.path.getsize(log_go) == 0
+        # 7. Clear log differential
+        py_daemon.clear_log(log_py, backup_count=2)
+        go_res = run_go_cmd("eval-daemon", {"action": "clear_log", "path": log_go, "backup_count": 2})
+        assert not os.path.exists(log_py + ".1")
+        assert not os.path.exists(log_go + ".1")
+        assert os.path.getsize(log_py) == 0
+        assert os.path.getsize(log_go) == 0
 
     print("  ✓ Daemon formatting, PID parsing, stale detection, log rotation, and log clear passed with 100% parity.")
 
@@ -586,45 +589,40 @@ def test_differential_cli():
         args = c["args"]
         expected_rc = c["exit_code"]
 
-        tmp_py = tempfile.mkdtemp(prefix=f"diff_cli_py_{name}_")
-        tmp_go = tempfile.mkdtemp(prefix=f"diff_cli_go_{name}_")
+        with tempfile.TemporaryDirectory(prefix=f"diff_cli_py_{name}_") as tmp_py, \
+             tempfile.TemporaryDirectory(prefix=f"diff_cli_go_{name}_") as tmp_go:
+            env_py = os.environ.copy()
+            env_py["HOME"] = tmp_py
+            env_py["AGY_TEST_MODE"] = "1"
+            env_py["AGY_GEMINI_DIR"] = os.path.join(tmp_py, ".gemini")
 
-        env_py = os.environ.copy()
-        env_py["HOME"] = tmp_py
-        env_py["AGY_TEST_MODE"] = "1"
-        env_py["AGY_GEMINI_DIR"] = os.path.join(tmp_py, ".gemini")
+            env_go = os.environ.copy()
+            env_go["HOME"] = tmp_go
+            env_go["AGY_TEST_MODE"] = "1"
+            env_go["AGY_GEMINI_DIR"] = os.path.join(tmp_go, ".gemini")
 
-        env_go = os.environ.copy()
-        env_go["HOME"] = tmp_go
-        env_go["AGY_TEST_MODE"] = "1"
-        env_go["AGY_GEMINI_DIR"] = os.path.join(tmp_go, ".gemini")
+            p_py = subprocess.run(["python3", py_bin] + args, env=env_py, capture_output=True, text=True)
+            p_go = subprocess.run([GO_BIN] + args, env=env_go, capture_output=True, text=True)
 
-        p_py = subprocess.run(["python3", py_bin] + args, env=env_py, capture_output=True, text=True)
-        p_go = subprocess.run([GO_BIN] + args, env=env_go, capture_output=True, text=True)
+            assert p_py.returncode == expected_rc, f"[{name}] Python exit code {p_py.returncode} != expected {expected_rc}"
+            assert p_go.returncode == expected_rc, f"[{name}] Go exit code {p_go.returncode} != expected {expected_rc}"
 
-        assert p_py.returncode == expected_rc, f"[{name}] Python exit code {p_py.returncode} != expected {expected_rc}"
-        assert p_go.returncode == expected_rc, f"[{name}] Go exit code {p_go.returncode} != expected {expected_rc}"
+            if not c.get("exempt_py_parity", False):
+                for pat in c.get("stdout_contains", []):
+                    assert pat in p_py.stdout, f"[{name}] Python stdout missing {pat!r}\nGot: {p_py.stdout}"
 
-        if not c.get("exempt_py_parity", False):
             for pat in c.get("stdout_contains", []):
-                assert pat in p_py.stdout, f"[{name}] Python stdout missing {pat!r}\nGot: {p_py.stdout}"
+                assert pat in p_go.stdout, f"[{name}] Go stdout missing {pat!r}\nGot: {p_go.stdout}"
 
-        for pat in c.get("stdout_contains", []):
-            assert pat in p_go.stdout, f"[{name}] Go stdout missing {pat!r}\nGot: {p_go.stdout}"
+            for pat in c.get("stdout_contains_go", []):
+                assert pat in p_go.stdout, f"[{name}] Go stdout missing {pat!r}\nGot: {p_go.stdout}"
 
-        for pat in c.get("stdout_contains_go", []):
-            assert pat in p_go.stdout, f"[{name}] Go stdout missing {pat!r}\nGot: {p_go.stdout}"
+            for pat in c.get("stdout_not_contains_go", []):
+                assert pat not in p_go.stdout, f"[{name}] Go stdout unexpectedly contained {pat!r}\nGot: {p_go.stdout}"
 
-        for pat in c.get("stdout_not_contains_go", []):
-            assert pat not in p_go.stdout, f"[{name}] Go stdout unexpectedly contained {pat!r}\nGot: {p_go.stdout}"
-
-        for pat in c.get("stderr_contains", []):
-            assert pat in p_py.stderr, f"[{name}] Python stderr missing {pat!r}\nGot: {p_py.stderr}"
-            assert pat in p_go.stderr, f"[{name}] Go stderr missing {pat!r}\nGot: {p_go.stderr}"
-
-        import shutil
-        shutil.rmtree(tmp_py, ignore_errors=True)
-        shutil.rmtree(tmp_go, ignore_errors=True)
+            for pat in c.get("stderr_contains", []):
+                assert pat in p_py.stderr, f"[{name}] Python stderr missing {pat!r}\nGot: {p_py.stderr}"
+                assert pat in p_go.stderr, f"[{name}] Go stderr missing {pat!r}\nGot: {p_go.stderr}"
 
     print(f"  ✓ All {len(cases)} CLI golden test cases passed with exact exit-code and semantic parity.")
 
@@ -634,31 +632,31 @@ def test_differential_conversation():
     from agy_pool import cli as py_cli
     from agy_pool import config as py_config
 
-    tmp_dir = tempfile.mkdtemp(prefix="diff_conv_")
-    db_dir = os.path.join(tmp_dir, ".gemini", "antigravity-cli")
-    os.makedirs(db_dir, exist_ok=True)
-    db_path = os.path.join(db_dir, "conversation_summaries.db")
-
-    proj1 = os.path.join(tmp_dir, "workspaces", "project1")
-    proj1_deep = os.path.join(proj1, "src", "backend")
-    proj2 = os.path.join(tmp_dir, "workspaces", "project2")
-    os.makedirs(proj1_deep, exist_ok=True)
-    os.makedirs(proj2, exist_ok=True)
-
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, workspace_uris TEXT, last_modified_time INTEGER)")
-        conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
-                     ("c1_old", "Project 1 Base", json.dumps([f"file://{proj1}"]), 1000))
-        conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
-                     ("c2_proj2", "Project 2 Session", json.dumps([f"file://{proj2}"]), 2000))
-        conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
-                     ("c3_deep", "Project 1 Deep", json.dumps([f"file://{proj1_deep}"]), 3000))
-
-    # Test Python selection
     orig_cli_dir = py_config.AGY_CLI_DIR
-    py_config.AGY_CLI_DIR = db_dir
-
     try:
+        with tempfile.TemporaryDirectory(prefix="diff_conv_") as tmp_dir:
+            db_dir = os.path.join(tmp_dir, ".gemini", "antigravity-cli")
+        os.makedirs(db_dir, exist_ok=True)
+        db_path = os.path.join(db_dir, "conversation_summaries.db")
+
+        proj1 = os.path.join(tmp_dir, "workspaces", "project1")
+        proj1_deep = os.path.join(proj1, "src", "backend")
+        proj2 = os.path.join(tmp_dir, "workspaces", "project2")
+        os.makedirs(proj1_deep, exist_ok=True)
+        os.makedirs(proj2, exist_ok=True)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, workspace_uris TEXT, last_modified_time INTEGER)")
+            conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                         ("c1_old", "Project 1 Base", json.dumps([f"file://{proj1}"]), 1000))
+            conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                         ("c2_proj2", "Project 2 Session", json.dumps([f"file://{proj2}"]), 2000))
+            conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                         ("c3_deep", "Project 1 Deep", json.dumps([f"file://{proj1_deep}"]), 3000))
+
+        # Test Python selection
+        py_config.AGY_CLI_DIR = db_dir
+
         # 1. Inside proj1_deep
         cid_py, title_py, dir_py = py_cli.find_latest_conversation_for_dir(proj1_deep)
         assert cid_py == "c3_deep"
@@ -709,167 +707,159 @@ def test_differential_conversation():
 
     finally:
         py_config.AGY_CLI_DIR = orig_cli_dir
-        import shutil
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     print("  ✓ Conversation discovery and -c argument resolution passed with zero-tolerance parity.")
 
 def test_differential_wrappers():
     print("Testing differential wrapper execution (run vs raw)...")
-    tmp_dir = tempfile.mkdtemp(prefix="diff_wrap_")
-    py_bin = os.path.join(REPO_ROOT, "bin", "agy-pool")
+    with tempfile.TemporaryDirectory(prefix="diff_wrap_") as tmp_dir:
+        py_bin = os.path.join(REPO_ROOT, "bin", "agy-pool")
 
-    mock_agy = os.path.join(tmp_dir, "mock_agy.sh")
-    with open(mock_agy, "w") as f:
-        f.write("#!/bin/sh\n")
-        f.write("echo \"AGY_CALLED: $@\"\n")
-        f.write("echo \"URL_VAR: ${CLOUD_CODE_URL:-NONE}\"\n")
-    os.chmod(mock_agy, 0o755)
+        mock_agy = os.path.join(tmp_dir, "mock_agy.sh")
+        with open(mock_agy, "w") as f:
+            f.write("#!/bin/sh\n")
+            f.write("echo \"AGY_CALLED: $@\"\n")
+            f.write("echo \"URL_VAR: ${CLOUD_CODE_URL:-NONE}\"\n")
+        os.chmod(mock_agy, 0o755)
 
-    env = os.environ.copy()
-    env["HOME"] = tmp_dir
-    env["AGY_TEST_MODE"] = "1"
-    env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
-    env["AGY_BIN"] = mock_agy
+        env = os.environ.copy()
+        env["HOME"] = tmp_dir
+        env["AGY_TEST_MODE"] = "1"
+        env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
+        env["AGY_BIN"] = mock_agy
 
-    # 1. agy-pool run
-    p_py_run = subprocess.run(["python3", py_bin, "run", "--hello", "world space"],
-                              env=env, capture_output=True, text=True)
-    p_go_run = subprocess.run([GO_BIN, "run", "--hello", "world space"],
-                              env=env, capture_output=True, text=True)
+        # 1. agy-pool run
+        p_py_run = subprocess.run(["python3", py_bin, "run", "--hello", "world space"],
+                                  env=env, capture_output=True, text=True)
+        p_go_run = subprocess.run([GO_BIN, "run", "--hello", "world space"],
+                                  env=env, capture_output=True, text=True)
 
-    assert p_py_run.returncode == 0
-    assert p_go_run.returncode == 0
-    assert "AGY_CALLED: --hello world space" in p_py_run.stdout
-    assert "AGY_CALLED: --hello world space" in p_go_run.stdout
-    assert "URL_VAR: http://127.0.0.1:8899" in p_py_run.stdout
-    assert "URL_VAR: http://127.0.0.1:8899" in p_go_run.stdout
+        assert p_py_run.returncode == 0
+        assert p_go_run.returncode == 0
+        assert "AGY_CALLED: --hello world space" in p_py_run.stdout
+        assert "AGY_CALLED: --hello world space" in p_go_run.stdout
+        assert "URL_VAR: http://127.0.0.1:8899" in p_py_run.stdout
+        assert "URL_VAR: http://127.0.0.1:8899" in p_go_run.stdout
 
-    # 2. agy-pool raw
-    p_py_raw = subprocess.run(["python3", py_bin, "raw", "--hello", "world space"],
-                              env=env, capture_output=True, text=True)
-    p_go_raw = subprocess.run([GO_BIN, "raw", "--hello", "world space"],
-                              env=env, capture_output=True, text=True)
+        # 2. agy-pool raw
+        p_py_raw = subprocess.run(["python3", py_bin, "raw", "--hello", "world space"],
+                                  env=env, capture_output=True, text=True)
+        p_go_raw = subprocess.run([GO_BIN, "raw", "--hello", "world space"],
+                                  env=env, capture_output=True, text=True)
 
-    assert p_py_raw.returncode == 0
-    assert p_go_raw.returncode == 0
-    assert "AGY_CALLED: --hello world space" in p_py_raw.stdout
-    assert "AGY_CALLED: --hello world space" in p_go_raw.stdout
-    assert "URL_VAR: NONE" in p_py_raw.stdout
-    assert "URL_VAR: NONE" in p_go_raw.stdout
+        assert p_py_raw.returncode == 0
+        assert p_go_raw.returncode == 0
+        assert "AGY_CALLED: --hello world space" in p_py_raw.stdout
+        assert "AGY_CALLED: --hello world space" in p_go_raw.stdout
+        assert "URL_VAR: NONE" in p_py_raw.stdout
+        assert "URL_VAR: NONE" in p_go_raw.stdout
 
-    # 3. Canonical collision test: agy-pool run -c cfg -D data -- -c foo -D bar --future-option
-    cfg_file = os.path.join(tmp_dir, "test_config.json")
-    with open(cfg_file, "w") as f:
-        f.write('{"version": 1, "server": {"listen": "127.0.0.1", "port": 8899}, "scheduler": {"strategy": "max_quota"}, "native_agy": {"binary": null}, "logging": {"max_size_bytes": 5242880, "backup_count": 1}}')
-    data_dir = os.path.join(tmp_dir, "test_data")
+        # 3. Canonical collision test: agy-pool run -c cfg -D data -- -c foo -D bar --future-option
+        cfg_file = os.path.join(tmp_dir, "test_config.json")
+        with open(cfg_file, "w") as f:
+            f.write('{"version": 1, "server": {"listen": "127.0.0.1", "port": 8899}, "scheduler": {"strategy": "max_quota"}, "native_agy": {"binary": null}, "logging": {"max_size_bytes": 5242880, "backup_count": 1}}')
+        data_dir = os.path.join(tmp_dir, "test_data")
 
-    p_go_collision = subprocess.run([
-        GO_BIN, "run",
-        "-c", cfg_file,
-        "-D", data_dir,
-        "--",
-        "-c", "foo",
-        "-D", "bar",
-        "--future-option"
-    ], env=env, capture_output=True, text=True)
+        p_go_collision = subprocess.run([
+            GO_BIN, "run",
+            "-c", cfg_file,
+            "-D", data_dir,
+            "--",
+            "-c", "foo",
+            "-D", "bar",
+            "--future-option"
+        ], env=env, capture_output=True, text=True)
 
-    assert p_go_collision.returncode == 0, f"collision test failed: {p_go_collision.stderr}"
-    assert "AGY_CALLED: -c foo -D bar --future-option" in p_go_collision.stdout, f"got stdout: {p_go_collision.stdout}"
+        assert p_go_collision.returncode == 0, f"collision test failed: {p_go_collision.stderr}"
+        assert "AGY_CALLED: -c foo -D bar --future-option" in p_go_collision.stdout, f"got stdout: {p_go_collision.stdout}"
 
-    # 4. Top-level rejection: -c and -D must NOT be global options
-    p_go_toplevel_c = subprocess.run([GO_BIN, "-c", cfg_file, "list"], env=env, capture_output=True, text=True)
-    assert p_go_toplevel_c.returncode == 2, f"expected code 2 for top-level -c, got {p_go_toplevel_c.returncode}"
-    p_go_toplevel_d = subprocess.run([GO_BIN, "-D", data_dir, "list"], env=env, capture_output=True, text=True)
-    assert p_go_toplevel_d.returncode == 2, f"expected code 2 for top-level -D, got {p_go_toplevel_d.returncode}"
-
-    import shutil
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+        # 4. Top-level rejection: -c and -D must NOT be global options
+        p_go_toplevel_c = subprocess.run([GO_BIN, "-c", cfg_file, "list"], env=env, capture_output=True, text=True)
+        assert p_go_toplevel_c.returncode == 2, f"expected code 2 for top-level -c, got {p_go_toplevel_c.returncode}"
+        p_go_toplevel_d = subprocess.run([GO_BIN, "-D", data_dir, "list"], env=env, capture_output=True, text=True)
+        assert p_go_toplevel_d.returncode == 2, f"expected code 2 for top-level -D, got {p_go_toplevel_d.returncode}"
     print("  ✓ Wrapper argument, -c/-D scoping, -- delimiter, and environment passthrough passed with 100% parity.")
 
 def test_differential_installer_and_migration():
     print("Testing differential installer lifecycle and migration...")
-    import shutil
-    tmp_dir = tempfile.mkdtemp(prefix="agy_installer_diff_")
-    env = os.environ.copy()
-    env["HOME"] = tmp_dir
-    env["AGY_TEST_MODE"] = "1"
-    env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
+    with tempfile.TemporaryDirectory(prefix="agy_installer_diff_") as tmp_dir:
+        env = os.environ.copy()
+        env["HOME"] = tmp_dir
+        env["AGY_TEST_MODE"] = "1"
+        env["AGY_GEMINI_DIR"] = os.path.join(tmp_dir, ".gemini")
 
-    # 1. Precondition failure when native agy is missing
-    target_bin = os.path.join(tmp_dir, "bin")
-    p_fail = subprocess.run([
-        GO_BIN, "install",
-        "--target", target_bin,
-        "--native-agy", os.path.join(tmp_dir, "nonexistent"),
-        "--skip-rc"
-    ], env=env, capture_output=True, text=True)
-    assert p_fail.returncode == 1, f"expected code 1, got {p_fail.returncode}"
-    assert "Native agy was not found" in p_fail.stderr
+        # 1. Precondition failure when native agy is missing
+        target_bin = os.path.join(tmp_dir, "bin")
+        p_fail = subprocess.run([
+            GO_BIN, "install",
+            "--target", target_bin,
+            "--native-agy", os.path.join(tmp_dir, "nonexistent"),
+            "--skip-rc"
+        ], env=env, capture_output=True, text=True)
+        assert p_fail.returncode == 1, f"expected code 1, got {p_fail.returncode}"
+        assert "Native agy was not found" in p_fail.stderr
 
-    # 2. Mock native agy
-    real_bin = os.path.join(tmp_dir, "real_bin")
-    os.makedirs(real_bin, exist_ok=True)
-    mock_agy = os.path.join(real_bin, "agy")
-    with open(mock_agy, "w") as f:
-        f.write("#!/bin/sh\necho 'mock native agy'\n")
-    os.chmod(mock_agy, 0o755)
+        # 2. Mock native agy
+        real_bin = os.path.join(tmp_dir, "real_bin")
+        os.makedirs(real_bin, exist_ok=True)
+        mock_agy = os.path.join(real_bin, "agy")
+        with open(mock_agy, "w") as f:
+            f.write("#!/bin/sh\necho 'mock native agy'\n")
+        os.chmod(mock_agy, 0o755)
 
-    cfg_dir = os.path.join(tmp_dir, "cfg")
-    data_dir = os.path.join(tmp_dir, "data")
+        cfg_dir = os.path.join(tmp_dir, "cfg")
+        data_dir = os.path.join(tmp_dir, "data")
 
-    # 3. Successful user install
-    p_install = subprocess.run([
-        GO_BIN, "install",
-        "--user",
-        "--target", target_bin,
-        "--native-agy", mock_agy,
-        "--config-dir", cfg_dir,
-        "--data-dir", data_dir,
-        "--skip-rc"
-    ], env=env, capture_output=True, text=True)
-    assert p_install.returncode == 0, f"install failed: {p_install.stderr}"
-    assert "Successfully installed agy-pool" in p_install.stdout
+        # 3. Successful user install
+        p_install = subprocess.run([
+            GO_BIN, "install",
+            "--user",
+            "--target", target_bin,
+            "--native-agy", mock_agy,
+            "--config-dir", cfg_dir,
+            "--data-dir", data_dir,
+            "--skip-rc"
+        ], env=env, capture_output=True, text=True)
+        assert p_install.returncode == 0, f"install failed: {p_install.stderr}"
+        assert "Successfully installed agy-pool" in p_install.stdout
 
-    # Verify shim content
-    shim_path = os.path.join(target_bin, "agy")
-    assert os.path.exists(shim_path)
-    with open(shim_path, "r") as f:
-        content = f.read()
-    assert "agy-pool run" in content
+        # Verify shim content
+        shim_path = os.path.join(target_bin, "agy")
+        assert os.path.exists(shim_path)
+        with open(shim_path, "r") as f:
+            content = f.read()
+        assert "agy-pool run" in content
 
-    # Verify config and data
-    assert os.path.exists(os.path.join(cfg_dir, "config.json"))
-    assert os.path.isdir(os.path.join(data_dir, "locks"))
+        # Verify config and data
+        assert os.path.exists(os.path.join(cfg_dir, "config.json"))
+        assert os.path.isdir(os.path.join(data_dir, "locks"))
 
-    # 4. Uninstall leaves native agy and data untouched
-    p_uninstall = subprocess.run([
-        GO_BIN, "uninstall",
-        "--target", target_bin
-    ], env=env, capture_output=True, text=True)
-    assert p_uninstall.returncode == 0, f"uninstall failed: {p_uninstall.stderr}"
-    assert not os.path.exists(shim_path), "shim was not removed"
-    assert os.path.exists(mock_agy), "native agy was deleted!"
-    assert os.path.exists(os.path.join(cfg_dir, "config.json")), "config was deleted!"
+        # 4. Uninstall leaves native agy and data untouched
+        p_uninstall = subprocess.run([
+            GO_BIN, "uninstall",
+            "--target", target_bin
+        ], env=env, capture_output=True, text=True)
+        assert p_uninstall.returncode == 0, f"uninstall failed: {p_uninstall.stderr}"
+        assert not os.path.exists(shim_path), "shim was not removed"
+        assert os.path.exists(mock_agy), "native agy was deleted!"
+        assert os.path.exists(os.path.join(cfg_dir, "config.json")), "config was deleted!"
 
-    # 5. Test migrate-legacy command
-    legacy_file = os.path.join(tmp_dir, "legacy_pool.json")
-    with open(legacy_file, "w") as f:
-        f.write(json.dumps({
-            "version": 1,
-            "strategy": "max_quota",
-            "accounts": [{"id": "acc_1", "email": "migrated@example.com", "access_token": "tok1"}]
-        }))
-    target_data = os.path.join(tmp_dir, "migrated_data")
-    p_mig = subprocess.run([
-        GO_BIN, "migrate-legacy",
-        "-s", legacy_file,
-        "-D", target_data
-    ], env=env, capture_output=True, text=True)
-    assert p_mig.returncode == 0, f"migration failed: {p_mig.stderr}"
-    assert os.path.exists(os.path.join(target_data, "accounts.json"))
-
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+        # 5. Test migrate-legacy command
+        legacy_file = os.path.join(tmp_dir, "legacy_pool.json")
+        with open(legacy_file, "w") as f:
+            f.write(json.dumps({
+                "version": 1,
+                "strategy": "max_quota",
+                "accounts": [{"id": "acc_1", "email": "migrated@example.com", "access_token": "tok1"}]
+            }))
+        target_data = os.path.join(tmp_dir, "migrated_data")
+        p_mig = subprocess.run([
+            GO_BIN, "migrate-legacy",
+            "-s", legacy_file,
+            "-D", target_data
+        ], env=env, capture_output=True, text=True)
+        assert p_mig.returncode == 0, f"migration failed: {p_mig.stderr}"
+        assert os.path.exists(os.path.join(target_data, "accounts.json"))
     print("  ✓ Installer lifecycle, native-agy protection, and legacy migration passed with 100% parity.")
 
 def main():

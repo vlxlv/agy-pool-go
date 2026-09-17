@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
@@ -13,10 +14,7 @@ import (
 
 func setupInstallerTestEnv(t *testing.T) (string, func()) {
 	t.Helper()
-	tempDir, err := os.MkdirTemp("", "agy_inst_test_*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
+	tempDir := t.TempDir()
 
 	stateDir := filepath.Join(tempDir, ".gemini")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
@@ -44,13 +42,24 @@ func setupInstallerTestEnv(t *testing.T) (string, func()) {
 		t.Fatalf("ConfigureStateDir failed: %v", err)
 	}
 
+	var once sync.Once
 	cleanup := func() {
-		resetRoots()
-		resetSandbox()
-		_ = config.ConfigureStateDir(origState)
-		config.SetTestMode(origTestMode)
-		_ = os.RemoveAll(tempDir)
+		once.Do(func() {
+			resetRoots()
+			resetSandbox()
+			if origState != "" {
+				if _, err := os.Stat(origState); err == nil {
+					_ = config.ConfigureStateDir(origState)
+				} else {
+					config.ResetDataDir()
+				}
+			} else {
+				config.ResetDataDir()
+			}
+			config.SetTestMode(origTestMode)
+		})
 	}
+	t.Cleanup(cleanup)
 
 	return tempDir, cleanup
 }

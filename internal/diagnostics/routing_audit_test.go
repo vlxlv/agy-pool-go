@@ -449,6 +449,7 @@ func TestTemporalAudit_A_HealthySelectionRemainsPassAfterStateDegrades(t *testin
 	// State in storage is later degraded to Reserve
 	tmpDir := t.TempDir()
 	_ = config.ConfigureDataDir(tmpDir)
+	t.Cleanup(config.ResetDataDir)
 	now := float64(time.Now().Unix())
 	degradedAcc := makeTestAccount("acc_work", "Work", floatPtr(0.05), floatPtr(0.05), now) // Reserve
 	_ = storage.SavePool(&storage.Pool{
@@ -486,6 +487,7 @@ func TestTemporalAudit_B_ReserveViolationRemainsViolationAfterStateChanges(t *te
 	// Later, state changes in storage so Backup is no longer healthy (all depleted)
 	tmpDir := t.TempDir()
 	_ = config.ConfigureDataDir(tmpDir)
+	t.Cleanup(config.ResetDataDir)
 	now := float64(time.Now().Unix())
 	depletedAcc1 := makeTestAccount("acc_work", "Work", floatPtr(0.0), floatPtr(0.0), now)
 	depletedAcc2 := makeTestAccount("acc_backup", "Backup", floatPtr(0.0), floatPtr(0.0), now)

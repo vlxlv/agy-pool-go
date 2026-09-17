@@ -28,6 +28,7 @@ func TestCLI_Status_MultiInstance(t *testing.T) {
 	tmpDir := t.TempDir()
 	cleanup := config.SetSyntheticSandboxRoot(tmpDir)
 	defer cleanup()
+	defer config.ResetDataDir()
 
 	portA := getFreePort(t)
 	portB := getFreePort(t)
@@ -110,6 +111,7 @@ func TestCLI_Stop_CrossInstanceRejection(t *testing.T) {
 	tmpDir := t.TempDir()
 	cleanup := config.SetSyntheticSandboxRoot(tmpDir)
 	defer cleanup()
+	defer config.ResetDataDir()
 
 	port := getFreePort(t)
 	dataDir := filepath.Join(tmpDir, "cli-stop-data")

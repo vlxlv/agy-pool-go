@@ -56,6 +56,9 @@ func TestRestartDaemon_Sequencing(t *testing.T) {
 
 	t.Setenv("AGY_HELPER_RESTART", "1")
 	t.Setenv("AGY_TEST_PID_FILE", pidFile)
+	t.Cleanup(func() {
+		_ = StopDaemon(pidFile, port, 3*time.Second)
+	})
 
 	res1, err := StartDaemon(opts)
 	if err != nil {
@@ -141,6 +144,9 @@ func TestConcurrentStart_Protection(t *testing.T) {
 
 	t.Setenv("AGY_HELPER_CONCURRENT", "1")
 	t.Setenv("AGY_TEST_PID_FILE", pidFile)
+	t.Cleanup(func() {
+		_ = StopDaemon(pidFile, port, 3*time.Second)
+	})
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex

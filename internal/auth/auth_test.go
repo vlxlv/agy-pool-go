@@ -142,6 +142,7 @@ func setupIsolatedTestDir(t *testing.T) string {
 	if err := config.ConfigureStateDir(tmp); err != nil {
 		t.Fatalf("failed to configure state dir: %v", err)
 	}
+	t.Cleanup(config.ResetDataDir)
 	return tmp
 }
 

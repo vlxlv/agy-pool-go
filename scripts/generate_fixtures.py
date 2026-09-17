@@ -10,6 +10,8 @@ import os
 import sys
 import json
 import tempfile
+import atexit
+import shutil
 
 # Ensure Python modules from reference repository are loadable
 def find_python_repo():
@@ -30,6 +32,7 @@ if REPO_ROOT not in sys.path:
 # Run under isolated test mode
 os.environ["AGY_TEST_MODE"] = "1"
 temp_dir = tempfile.mkdtemp(prefix="agy_fixture_gen_")
+atexit.register(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
 os.environ["AGY_GEMINI_DIR"] = os.path.join(temp_dir, ".gemini")
 
 from agy_pool import config

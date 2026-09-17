@@ -34,6 +34,7 @@ func setupIsolatedTestDir(t *testing.T) string {
 	config.SetNativeAgyDir(nativeDir)
 	t.Cleanup(func() {
 		config.SetNativeAgyDir("")
+		config.ResetDataDir()
 	})
 	return dataDir
 }
@@ -486,6 +487,10 @@ func TestNativeAgyEnvironmentIndependence(t *testing.T) {
 	nativeDir1 := filepath.Join(tmp1, "native")
 	_ = os.MkdirAll(dataDir1, 0o700)
 	_ = os.MkdirAll(nativeDir1, 0o700)
+	t.Cleanup(func() {
+		config.SetNativeAgyDir("")
+		config.ResetDataDir()
+	})
 	if err := config.ConfigureStateDir(dataDir1); err != nil {
 		t.Fatalf("failed to configure state dir: %v", err)
 	}
@@ -551,8 +556,6 @@ func TestNativeAgyEnvironmentIndependence(t *testing.T) {
 	if m1["auth_method"] != m2["auth_method"] {
 		t.Fatalf("mismatched auth_method between environments")
 	}
-
-	config.SetNativeAgyDir("")
 }
 
 func TestHomeOverrideRegression(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,10 +18,7 @@ import (
 
 func setupDoctorTestEnv(t *testing.T) (string, func()) {
 	t.Helper()
-	tempDir, err := os.MkdirTemp("", "agy_doc_test_*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
+	tempDir := t.TempDir()
 
 	stateDir := filepath.Join(tempDir, ".gemini")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
@@ -36,20 +34,31 @@ func setupDoctorTestEnv(t *testing.T) (string, func()) {
 		t.Fatalf("ConfigureStateDir failed: %v", err)
 	}
 
+	var once sync.Once
 	cleanup := func() {
-		_ = config.ConfigureStateDir(origState)
-		config.SetTestMode(origTestMode)
-		if origGeminiDir != "" {
-			os.Setenv("AGY_GEMINI_DIR", origGeminiDir)
-		} else {
-			os.Unsetenv("AGY_GEMINI_DIR")
-		}
-		SetAgyBinaryFinder(nil)
-		SetAgyVersionProvider(nil)
-		SetBackendHostProvider(nil)
-		SetTLSProber(nil)
-		_ = os.RemoveAll(tempDir)
+		once.Do(func() {
+			if origState != "" {
+				if _, err := os.Stat(origState); err == nil {
+					_ = config.ConfigureStateDir(origState)
+				} else {
+					config.ResetDataDir()
+				}
+			} else {
+				config.ResetDataDir()
+			}
+			config.SetTestMode(origTestMode)
+			if origGeminiDir != "" {
+				os.Setenv("AGY_GEMINI_DIR", origGeminiDir)
+			} else {
+				os.Unsetenv("AGY_GEMINI_DIR")
+			}
+			SetAgyBinaryFinder(nil)
+			SetAgyVersionProvider(nil)
+			SetBackendHostProvider(nil)
+			SetTLSProber(nil)
+		})
 	}
+	t.Cleanup(cleanup)
 
 	return tempDir, cleanup
 }

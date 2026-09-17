@@ -99,14 +99,21 @@ func TestMultiInstance_ForegroundIsolation(t *testing.T) {
 	})
 
 	ctxSrvA, cancelA := context.WithCancel(context.Background())
-	defer cancelA()
 	ctxSrvB, cancelB := context.WithCancel(context.Background())
-	defer cancelB()
+	doneA := make(chan struct{})
+	doneB := make(chan struct{})
+	t.Cleanup(func() {
+		cancelA()
+		cancelB()
+		<-doneA
+		<-doneB
+	})
 
 	readyA := make(chan struct{})
 	readyB := make(chan struct{})
 
 	go func() {
+		defer close(doneA)
 		_ = RunForeground(ctxSrvA, ServerOptions{
 			Port:           portA,
 			Instance:       ctxA,
@@ -117,6 +124,7 @@ func TestMultiInstance_ForegroundIsolation(t *testing.T) {
 	}()
 
 	go func() {
+		defer close(doneB)
 		_ = RunForeground(ctxSrvB, ServerOptions{
 			Port:           portB,
 			Instance:       ctxB,

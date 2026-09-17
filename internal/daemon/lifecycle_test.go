@@ -30,8 +30,10 @@ func TestRunForeground_LifecycleAndGracefulShutdown(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	serverDone := make(chan struct{})
 	serverErrChan := make(chan error, 1)
 	go func() {
+		defer close(serverDone)
 		serverErrChan <- RunForeground(ctx, ServerOptions{
 			Port:                 0,
 			EphemeralPort:        true,
@@ -43,6 +45,10 @@ func TestRunForeground_LifecycleAndGracefulShutdown(t *testing.T) {
 			DisableSignals:       true,
 		})
 	}()
+	t.Cleanup(func() {
+		cancel()
+		<-serverDone
+	})
 
 	// Wait for server to bind and be ready
 	select {
@@ -138,12 +144,17 @@ func TestIsDaemonOutdated(t *testing.T) {
 
 	// Start a dummy HTTP listener on ephemeral port
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	serverDone := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		<-serverDone
+	})
 
 	boundPortChan := make(chan int, 1)
 	readyChan := make(chan struct{})
 
 	go func() {
+		defer close(serverDone)
 		_ = RunForeground(ctx, ServerOptions{
 			Port:           0,
 			EphemeralPort:  true,
@@ -185,8 +196,6 @@ func TestIsDaemonOutdated(t *testing.T) {
 			t.Fatalf("expected daemon with older script_mtime to be marked outdated")
 		}
 	}
-
-	cancel()
 }
 
 func TestStopDaemon_Scenarios(t *testing.T) {
@@ -325,6 +334,7 @@ func TestDaemon_StartsQuotaRefresher(t *testing.T) {
 	if err := config.ConfigureStateDir(tmpDir); err != nil {
 		t.Fatalf("failed to configure state dir: %v", err)
 	}
+	t.Cleanup(config.ResetDataDir)
 
 	// Seed pool with a stale account
 	oldTime := time.Now().Unix() - 500
@@ -355,12 +365,17 @@ func TestDaemon_StartsQuotaRefresher(t *testing.T) {
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	serverDone := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		<-serverDone
+	})
 
 	pidFile := filepath.Join(tmpDir, "server.pid")
 	readyChan := make(chan struct{})
 
 	go func() {
+		defer close(serverDone)
 		_ = RunForeground(ctx, ServerOptions{
 			Port:                 0,
 			EphemeralPort:        true,
