@@ -32,6 +32,9 @@ var (
 	NowFunc                       = time.Now
 	LogWriter           io.Writer = os.Stderr
 	logMu               sync.Mutex
+
+	// AuditObserver is an optional hook invoked on physical generation dispatch attempts.
+	AuditObserver func(accountName string, status int, attempt int, failoverReason string, path string)
 )
 
 // Hop-by-hop headers per RFC 7230 matching Python proxy.
@@ -356,8 +359,10 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	committer := NewResponseCommitter(w)
 
 	var lastError error
+	attempt := 0
 	for _, acc := range candidates {
-		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA)
+		attempt++
+		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt)
 		if outcome.Err != nil {
 			lastError = outcome.Err
 		}
@@ -392,10 +397,19 @@ func (h *Handler) dispatchAccount(
 	isSSE bool,
 	acc *storage.Account,
 	clientUA string,
+	attempt int,
 ) DispatchOutcome {
+	dispName := accounts.DisplayAccountName(acc)
+	notifyAudit := func(status int, reason string) {
+		if isGeneration && AuditObserver != nil {
+			AuditObserver(dispName, status, attempt, reason, path)
+		}
+	}
+
 	at, err := doRefreshToken(acc)
 	if err != nil {
 		logMessage("PROXY WARN", fmt.Sprintf("Token refresh failed for %s: %v. Switching to next account...", accounts.DisplayAccountName(acc), err))
+		notifyAudit(401, "TokenRefreshFailed")
 		RecordAuthError(acc)
 		return DispatchOutcome{
 			Action: ActionFailoverNext,
@@ -446,6 +460,7 @@ func (h *Handler) dispatchAccount(
 		pathBase := filepathBase(path)
 		dispName := accounts.DisplayAccountName(acc)
 		logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: %v", r.Method, pathBase, dispName, err))
+		notifyAudit(502, "AmbiguousTransportFailure")
 
 		// Ambiguous transport failure: DO NOT REPLAY!
 		if IsTimeoutError(err) {
@@ -463,7 +478,7 @@ func (h *Handler) dispatchAccount(
 
 	statusCode := resp.StatusCode
 	pathBase := filepathBase(path)
-	dispName := accounts.DisplayAccountName(acc)
+	dispName = accounts.DisplayAccountName(acc)
 
 	if statusCode >= 400 {
 		errBody, _ := io.ReadAll(resp.Body)
@@ -474,6 +489,7 @@ func (h *Handler) dispatchAccount(
 		if auth.IsValidationError(statusCode, errBody) {
 			RecordValidationError(acc, errBody)
 			logMessage("FAILOVER", fmt.Sprintf("Account %s requires account verification! Auto-switching to next account...", dispName))
+			notifyAudit(statusCode, "ValidationError")
 			return DispatchOutcome{
 				Action: ActionFailoverNext,
 				Reason: "ExplicitRetryableUpstreamResponse:ValidationError",
@@ -484,6 +500,7 @@ func (h *Handler) dispatchAccount(
 		if quota.IsQuotaError(statusCode, errBody) {
 			delay := RecordQuotaError(acc, resp.Header)
 			logMessage("FAILOVER", fmt.Sprintf("Account %s hit rate limit/quota error! Cooldown %ds. Auto-switching to next account...", dispName, delay))
+			notifyAudit(statusCode, "QuotaExhausted")
 			return DispatchOutcome{
 				Action: ActionFailoverNext,
 				Reason: "ExplicitRetryableUpstreamResponse:QuotaExhausted",
@@ -494,6 +511,7 @@ func (h *Handler) dispatchAccount(
 		if auth.IsAuthError(statusCode, errBody) {
 			RecordAuthError(acc)
 			logMessage("FAILOVER", fmt.Sprintf("Account %s auth/permission failure! Auto-switching to next account...", dispName))
+			notifyAudit(statusCode, "AuthFailure")
 			return DispatchOutcome{
 				Action: ActionFailoverNext,
 				Reason: "ExplicitRetryableUpstreamResponse:AuthFailure",
@@ -501,6 +519,7 @@ func (h *Handler) dispatchAccount(
 		}
 
 		// Ordinary upstream error (400, 404, 500, etc.): Forward directly, DO NOT REPLAY!
+		notifyAudit(statusCode, "NonRetryableError")
 		SendBuffered(committer, statusCode, resp.Header, errBody)
 		return DispatchOutcome{
 			Action: ActionTerminal,
@@ -509,6 +528,7 @@ func (h *Handler) dispatchAccount(
 	}
 
 	// 2xx response
+	notifyAudit(statusCode, "")
 	logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d)", r.Method, pathBase, dispName, statusCode))
 
 	respContentType := strings.ToLower(resp.Header.Get("Content-Type"))

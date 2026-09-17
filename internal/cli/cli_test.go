@@ -1467,3 +1467,52 @@ func TestRunAgyDirect_ResolvesManagedNativeBinary(t *testing.T) {
 		}
 	}
 }
+
+func TestAuditRoutingCLI(t *testing.T) {
+	// 1. Help flag
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"audit-routing", "-h"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on audit-routing -h, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "usage: agy-pool audit-routing") {
+		t.Fatalf("expected usage message, got:\n%s", stdout.String())
+	}
+
+	// 2. Alias monitor-routing
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"monitor-routing", "-h"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on monitor-routing -h, got %d", code)
+	}
+
+	// 3. Invalid flag
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"audit-routing", "--unknown-flag"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2 on unknown flag, got %d", code)
+	}
+
+	// 4. Invalid duration
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"audit-routing", "--duration", "not-a-duration"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2 on invalid duration, got %d", code)
+	}
+
+	// 5. Short duration run
+	tmpDir := t.TempDir()
+	_ = config.ConfigureDataDir(tmpDir)
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"audit-routing", "--duration", "50ms"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on duration run, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "Summary") {
+		t.Fatalf("expected output to contain Summary, got:\n%s", stdout.String())
+	}
+}

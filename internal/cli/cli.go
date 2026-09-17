@@ -154,15 +154,17 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return handleRepair(args[1:], stdout, stderr)
 	case "uninstall":
 		return handleUninstall(args[1:], stdout, stderr)
+	case "audit-routing", "monitor-routing":
+		return handleAuditRouting(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,run} ...\n")
+		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,audit-routing,monitor-routing,start,stop,restart,status,version,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
 		return 2
 	}
 }
 
 func printHelp(out io.Writer) {
-	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,run} ...\n\n")
+	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,audit-routing,monitor-routing,start,stop,restart,status,version,run} ...\n\n")
 	fmt.Fprintf(out, "Antigravity Multi-Account Pool & Load Balancer for Termux & Linux\n\n")
 	fmt.Fprintf(out, "Examples:\n")
 	fmt.Fprintf(out, "  agy-pool login            Add/login a new Google account\n")
@@ -172,6 +174,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "  agy-pool strategy         View or change load balancing strategy\n")
 	fmt.Fprintf(out, "  agy-pool rename 1 \"Work\"  Set friendly label for an account\n")
 	fmt.Fprintf(out, "  agy-pool doctor           Run comprehensive system diagnostic check\n")
+	fmt.Fprintf(out, "  agy-pool audit-routing    Audit real max_quota routing and reserve headroom\n")
 	fmt.Fprintf(out, "  agy-pool switch auto      Switch active account to the one with highest quota\n")
 	fmt.Fprintf(out, "  agy-pool export           Export accounts pool to a backup JSON file\n")
 	fmt.Fprintf(out, "  agy-pool import file.json Restore accounts pool from a backup file\n")
@@ -847,6 +850,62 @@ func handleLogs(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+func handleAuditRouting(args []string, stdout, stderr io.Writer) int {
+	opts := diagnostics.AuditOptions{}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			fmt.Fprintf(stdout, "usage: agy-pool audit-routing [--duration DURATION] [--json] [--report PATH]\n\n")
+			fmt.Fprintf(stdout, "Audit real max_quota routing behavior and headroom protection in real time.\n\n")
+			fmt.Fprintf(stdout, "Options:\n")
+			fmt.Fprintf(stdout, "  --duration DURATION, -d DURATION  Run for a fixed duration (e.g. 30s, 10m, 1h)\n")
+			fmt.Fprintf(stdout, "  --json                            Emit machine-readable JSONL events\n")
+			fmt.Fprintf(stdout, "  --report PATH                     Write report summary to file\n")
+			return 0
+		case arg == "--duration" || arg == "-d":
+			if i+1 < len(args) {
+				d, err := time.ParseDuration(args[i+1])
+				if err != nil {
+					fmt.Fprintf(stderr, "%s[Error] Invalid duration %q: %v%s\n", clrRed, args[i+1], err, clrReset)
+					return 2
+				}
+				opts.Duration = d
+				i++
+			} else {
+				fmt.Fprintf(stderr, "agy-pool audit-routing: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+		case strings.HasPrefix(arg, "--duration="):
+			dStr := strings.TrimPrefix(arg, "--duration=")
+			d, err := time.ParseDuration(dStr)
+			if err != nil {
+				fmt.Fprintf(stderr, "%s[Error] Invalid duration %q: %v%s\n", clrRed, dStr, err, clrReset)
+				return 2
+			}
+			opts.Duration = d
+		case arg == "--json":
+			opts.JSONMode = true
+		case arg == "--report":
+			if i+1 < len(args) {
+				opts.ReportPath = args[i+1]
+				i++
+			} else {
+				fmt.Fprintf(stderr, "agy-pool audit-routing: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+		case strings.HasPrefix(arg, "--report="):
+			opts.ReportPath = strings.TrimPrefix(arg, "--report=")
+		default:
+			fmt.Fprintf(stderr, "agy-pool audit-routing: error: unrecognized argument: %s\n", arg)
+			return 2
+		}
+	}
+
+	return diagnostics.RunAuditRouting(nil, opts, stdout, stderr)
 }
 
 // ParseInstanceFlags parses -c/--config, -D/--directory, and -p/--port flags.
