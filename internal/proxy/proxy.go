@@ -250,19 +250,20 @@ func FilterResponseHeaders(headers http.Header) http.Header {
 
 // SendBuffered writes a buffered HTTP response with Content-Length and Connection: close.
 func SendBuffered(w http.ResponseWriter, status int, headers http.Header, body []byte) {
+	committer := NewResponseCommitter(w)
+
 	filtered := FilterResponseHeaders(headers)
 	for k, vv := range filtered {
 		for _, v := range vv {
-			w.Header().Add(k, v)
+			committer.Header().Add(k, v)
 		}
 	}
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.Header().Set("Connection", "close")
-	w.WriteHeader(status)
-	_, _ = w.Write(body)
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
+	committer.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	committer.Header().Set("Connection", "close")
+	committer.WriteHeader(status)
+	_, _ = committer.Write(body)
+	committer.MarkBody()
+	committer.Flush()
 }
 
 // Handler implements the HTTP proxy handler matching Python SmartProxyHandler.
@@ -352,128 +353,204 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		clientUA = GetUserAgent()
 	}
 
+	committer := NewResponseCommitter(w)
+
 	var lastError error
 	for _, acc := range candidates {
-		at, err := doRefreshToken(acc)
-		if err != nil {
-			lastError = err
-			logMessage("PROXY WARN", fmt.Sprintf("Token refresh failed for %s: %v. Switching to next account...", accounts.DisplayAccountName(acc), err))
-			RecordAuthError(acc)
+		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA)
+		if outcome.Err != nil {
+			lastError = outcome.Err
+		}
+
+		// Structural invariant: once committed, never advance to another account.
+		if committer.IsCommitted() {
+			return
+		}
+
+		// Only ActionFailoverNext may advance to another account.
+		if outcome.Action == ActionFailoverNext {
 			continue
 		}
 
-		targetURL := GetBackendURL() + path
-		reqHeaders := FilterRequestHeaders(r, at, clientUA)
-
-		var reqBody io.Reader
-		if r.Method == "POST" && len(body) == 0 {
-			reqHeaders.Set("Content-Length", "0")
-			reqBody = bytes.NewReader([]byte{})
-		} else if len(body) > 0 {
-			reqBody = bytes.NewReader(body)
-		}
-
-		upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, reqBody)
-		if err != nil {
-			lastError = err
-			break
-		}
-		upstreamReq.Header = reqHeaders
-
-		// CRITICAL AUDIT: Ensure req.GetBody is nil so net/http cannot automatically rewind/retry POST
-		upstreamReq.GetBody = nil
-		if isGeneration {
-			upstreamReq.Close = true
-		}
-
-		client := GetClient(isGeneration)
-		resp, err := client.Do(upstreamReq)
-
-		if err != nil {
-			lastError = err
-
-			// Check client disconnect
-			if errors.Is(r.Context().Err(), context.Canceled) {
-				return
-			}
-
-			logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: %v", r.Method, filepathBase(path), accounts.DisplayAccountName(acc), err))
-
-			// Ambiguous transport failure: DO NOT REPLAY!
-			if IsTimeoutError(err) {
-				http.Error(w, "Upstream request failed", http.StatusGatewayTimeout)
-			} else {
-				http.Error(w, "Upstream request failed", http.StatusBadGateway)
-			}
-			return
-		}
-
-		// Read response body or stream
-		statusCode := resp.StatusCode
-		pathBase := filepathBase(path)
-		dispName := accounts.DisplayAccountName(acc)
-
-		if statusCode >= 400 {
-			errBody, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-
-			logMessage("PROXY ERROR", fmt.Sprintf("%s %s -> %s HTTP %d", r.Method, pathBase, dispName, statusCode))
-
-			// Failover on Google Security Validation Required
-			if auth.IsValidationError(statusCode, errBody) {
-				RecordValidationError(acc, errBody)
-				logMessage("FAILOVER", fmt.Sprintf("Account %s requires account verification! Auto-switching to next account...", dispName))
-				continue
-			}
-
-			// Failover on 429 or 403 quota exhaustion
-			if quota.IsQuotaError(statusCode, errBody) {
-				delay := RecordQuotaError(acc, resp.Header)
-				logMessage("FAILOVER", fmt.Sprintf("Account %s hit rate limit/quota error! Cooldown %ds. Auto-switching to next account...", dispName, delay))
-				continue
-			}
-
-			// Failover on 401 or recognized auth failure
-			if auth.IsAuthError(statusCode, errBody) {
-				RecordAuthError(acc)
-				logMessage("FAILOVER", fmt.Sprintf("Account %s auth/permission failure! Auto-switching to next account...", dispName))
-				continue
-			}
-
-			// Ordinary upstream error (400, 404, 500, etc.): Forward directly, DO NOT REPLAY!
-			SendBuffered(w, statusCode, resp.Header, errBody)
-			return
-		}
-
-		// 2xx response
-		logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d)", r.Method, pathBase, dispName, statusCode))
-
-		respContentType := strings.ToLower(resp.Header.Get("Content-Type"))
-		isStream := isSSE || strings.Contains(respContentType, "text/event-stream")
-
-		if isStream {
-			RecordSuccess(acc, isGeneration)
-			SendStream(w, statusCode, resp.Header, resp.Body)
-			_ = resp.Body.Close()
-			return
-		}
-
-		respBody, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if readErr != nil {
-			logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: read error: %v", r.Method, pathBase, dispName, readErr))
-			http.Error(w, "Upstream request failed", http.StatusBadGateway)
-			return
-		}
-
-		RecordSuccess(acc, isGeneration)
-		SendBuffered(w, statusCode, resp.Header, respBody)
+		// Any other outcome is terminal.
 		return
 	}
 
 	// All accounts exhausted
-	logMessage("ALL EXHAUSTED", fmt.Sprintf("%s %s failed across all accounts: %v", r.Method, filepathBase(path), lastError))
-	http.Error(w, fmt.Sprintf("All accounts in pool exhausted or unavailable: %v", lastError), http.StatusServiceUnavailable)
+	if !committer.IsCommitted() {
+		logMessage("ALL EXHAUSTED", fmt.Sprintf("%s %s failed across all accounts: %v", r.Method, filepathBase(path), lastError))
+		http.Error(committer, fmt.Sprintf("All accounts in pool exhausted or unavailable: %v", lastError), http.StatusServiceUnavailable)
+	}
+}
+
+func (h *Handler) dispatchAccount(
+	committer *ResponseCommitter,
+	r *http.Request,
+	path string,
+	body []byte,
+	isGeneration bool,
+	isSSE bool,
+	acc *storage.Account,
+	clientUA string,
+) DispatchOutcome {
+	at, err := doRefreshToken(acc)
+	if err != nil {
+		logMessage("PROXY WARN", fmt.Sprintf("Token refresh failed for %s: %v. Switching to next account...", accounts.DisplayAccountName(acc), err))
+		RecordAuthError(acc)
+		return DispatchOutcome{
+			Action: ActionFailoverNext,
+			Reason: "TokenRefreshFailed",
+			Err:    err,
+		}
+	}
+
+	targetURL := GetBackendURL() + path
+	reqHeaders := FilterRequestHeaders(r, at, clientUA)
+
+	var reqBody io.Reader
+	if r.Method == "POST" && len(body) == 0 {
+		reqHeaders.Set("Content-Length", "0")
+		reqBody = bytes.NewReader([]byte{})
+	} else if len(body) > 0 {
+		reqBody = bytes.NewReader(body)
+	}
+
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, reqBody)
+	if err != nil {
+		return DispatchOutcome{
+			Action: ActionTerminal,
+			Reason: "RequestCreationFailed",
+			Err:    err,
+		}
+	}
+	upstreamReq.Header = reqHeaders
+
+	// CRITICAL AUDIT: Ensure req.GetBody is nil so net/http cannot automatically rewind/retry POST
+	upstreamReq.GetBody = nil
+	if isGeneration {
+		upstreamReq.Close = true
+	}
+
+	client := GetClient(isGeneration)
+	resp, err := client.Do(upstreamReq)
+	if err != nil {
+		// Check client disconnect
+		if errors.Is(r.Context().Err(), context.Canceled) {
+			return DispatchOutcome{
+				Action: ActionTerminal,
+				Reason: "ClientDisconnected",
+				Err:    ErrClientDisconnected,
+			}
+		}
+
+		pathBase := filepathBase(path)
+		dispName := accounts.DisplayAccountName(acc)
+		logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: %v", r.Method, pathBase, dispName, err))
+
+		// Ambiguous transport failure: DO NOT REPLAY!
+		if IsTimeoutError(err) {
+			http.Error(committer, "Upstream request failed", http.StatusGatewayTimeout)
+		} else {
+			http.Error(committer, "Upstream request failed", http.StatusBadGateway)
+		}
+		return DispatchOutcome{
+			Action: ActionTerminal,
+			Reason: "AmbiguousTransportFailure",
+			Err:    ErrAmbiguousTransport,
+		}
+	}
+	defer resp.Body.Close()
+
+	statusCode := resp.StatusCode
+	pathBase := filepathBase(path)
+	dispName := accounts.DisplayAccountName(acc)
+
+	if statusCode >= 400 {
+		errBody, _ := io.ReadAll(resp.Body)
+
+		logMessage("PROXY ERROR", fmt.Sprintf("%s %s -> %s HTTP %d", r.Method, pathBase, dispName, statusCode))
+
+		// Failover on Google Security Validation Required
+		if auth.IsValidationError(statusCode, errBody) {
+			RecordValidationError(acc, errBody)
+			logMessage("FAILOVER", fmt.Sprintf("Account %s requires account verification! Auto-switching to next account...", dispName))
+			return DispatchOutcome{
+				Action: ActionFailoverNext,
+				Reason: "ExplicitRetryableUpstreamResponse:ValidationError",
+			}
+		}
+
+		// Failover on 429 or 403 quota exhaustion
+		if quota.IsQuotaError(statusCode, errBody) {
+			delay := RecordQuotaError(acc, resp.Header)
+			logMessage("FAILOVER", fmt.Sprintf("Account %s hit rate limit/quota error! Cooldown %ds. Auto-switching to next account...", dispName, delay))
+			return DispatchOutcome{
+				Action: ActionFailoverNext,
+				Reason: "ExplicitRetryableUpstreamResponse:QuotaExhausted",
+			}
+		}
+
+		// Failover on 401 or recognized auth failure
+		if auth.IsAuthError(statusCode, errBody) {
+			RecordAuthError(acc)
+			logMessage("FAILOVER", fmt.Sprintf("Account %s auth/permission failure! Auto-switching to next account...", dispName))
+			return DispatchOutcome{
+				Action: ActionFailoverNext,
+				Reason: "ExplicitRetryableUpstreamResponse:AuthFailure",
+			}
+		}
+
+		// Ordinary upstream error (400, 404, 500, etc.): Forward directly, DO NOT REPLAY!
+		SendBuffered(committer, statusCode, resp.Header, errBody)
+		return DispatchOutcome{
+			Action: ActionTerminal,
+			Reason: "ExplicitNonRetryableUpstreamResponse",
+		}
+	}
+
+	// 2xx response
+	logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d)", r.Method, pathBase, dispName, statusCode))
+
+	respContentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	isStream := isSSE || strings.Contains(respContentType, "text/event-stream")
+
+	if isStream {
+		RecordSuccess(acc, isGeneration)
+		streamErr := SendStream(committer, statusCode, resp.Header, resp.Body)
+		if streamErr != nil {
+			return DispatchOutcome{
+				Action: ActionTerminal,
+				Reason: "CommittedStreamTruncated",
+				Err:    streamErr,
+			}
+		}
+		return DispatchOutcome{
+			Action: ActionTerminal,
+			Reason: "CommittedStreamSuccess",
+		}
+	}
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: read error: %v", r.Method, pathBase, dispName, readErr))
+		if IsTimeoutError(readErr) {
+			http.Error(committer, "Upstream request failed", http.StatusGatewayTimeout)
+		} else {
+			http.Error(committer, "Upstream request failed", http.StatusBadGateway)
+		}
+		return DispatchOutcome{
+			Action: ActionTerminal,
+			Reason: "AmbiguousTransportFailure:BodyReadError",
+			Err:    readErr,
+		}
+	}
+
+	RecordSuccess(acc, isGeneration)
+	SendBuffered(committer, statusCode, resp.Header, respBody)
+	return DispatchOutcome{
+		Action: ActionTerminal,
+		Reason: "TerminalSuccess",
+	}
 }
 
 func filepathBase(path string) string {

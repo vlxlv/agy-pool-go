@@ -9,21 +9,21 @@ import (
 
 // SendStream streams upstream response chunks with Transfer-Encoding: chunked.
 // Once headers are written downstream, the stream is committed and cannot be replayed.
-func SendStream(w http.ResponseWriter, status int, headers http.Header, response io.Reader) {
+// If an error occurs after commitment, SendStream returns ErrCommittedStream or ErrClientDisconnected.
+func SendStream(w http.ResponseWriter, status int, headers http.Header, response io.Reader) error {
+	committer := NewResponseCommitter(w)
+
 	filtered := FilterResponseHeaders(headers)
 	for k, vv := range filtered {
 		for _, v := range vv {
-			w.Header().Add(k, v)
+			committer.Header().Add(k, v)
 		}
 	}
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("Connection", "close")
-	w.WriteHeader(status)
-
-	flusher, hasFlusher := w.(http.Flusher)
-	if hasFlusher {
-		flusher.Flush()
-	}
+	committer.Header().Set("Transfer-Encoding", "chunked")
+	committer.Header().Set("Connection", "close")
+	committer.WriteHeader(status)
+	committer.MarkStream()
+	committer.Flush()
 
 	var expectedLen *int64
 	if clStr := headers.Get("Content-Length"); clStr != "" {
@@ -38,17 +38,16 @@ func SendStream(w http.ResponseWriter, status int, headers http.Header, response
 		n, err := response.Read(buf)
 		if n > 0 {
 			sent += int64(n)
-			if _, wErr := w.Write(buf[:n]); wErr != nil {
+			if _, wErr := committer.Write(buf[:n]); wErr != nil {
 				// Downstream client disconnected
-				return
+				return ErrClientDisconnected
 			}
-			if hasFlusher {
-				flusher.Flush()
-			}
+			committer.Flush()
 		}
 		if err != nil {
 			if err != io.EOF {
 				logMessage("STREAM TRUNCATED", err.Error())
+				return fmt.Errorf("%w: %v", ErrCommittedStream, err)
 			}
 			break
 		}
@@ -56,5 +55,7 @@ func SendStream(w http.ResponseWriter, status int, headers http.Header, response
 
 	if expectedLen != nil && sent != *expectedLen {
 		logMessage("STREAM TRUNCATED", fmt.Sprintf("expected %d bytes, sent %d", *expectedLen, sent))
+		return fmt.Errorf("%w: expected %d bytes, sent %d", ErrCommittedStream, *expectedLen, sent)
 	}
+	return nil
 }
