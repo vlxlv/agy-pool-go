@@ -245,11 +245,23 @@ func TestListAccounts_EmptyAndPopulated(t *testing.T) {
 	if !strings.Contains(out, "Personal") {
 		t.Errorf("expected account name Personal, got: %s", out)
 	}
-	if !strings.Contains(out, "Hits: 42") {
-		t.Errorf("expected Hits: 42, got: %s", out)
+	if !strings.Contains(out, "* Active") {
+		t.Errorf("expected * Active status, got: %s", out)
 	}
-	if !strings.Contains(out, "[* Active]") {
-		t.Errorf("expected [* Active] badge, got: %s", out)
+	if !strings.Contains(out, "42") {
+		t.Errorf("expected 42 hits, got: %s", out)
+	}
+
+	// Also verify quota command renders the full visual dashboard
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"quota"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on quota, got %d", code)
+	}
+	qOut := stdout.String()
+	if !strings.Contains(qOut, "Personal") || !strings.Contains(qOut, "Hits: 42") || !strings.Contains(qOut, "[* Active]") {
+		t.Errorf("expected dashboard cards in quota output, got: %s", qOut)
 	}
 
 	// 3. Target not found -> exit 0 matching Python
@@ -936,5 +948,217 @@ func TestRunAgyWithLB_ArgumentPreservation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStatusCmd_NoQuotaBarsAndDashboard(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	frac := 0.85
+	acc1 := &storage.Account{
+		ID:           "acc_1",
+		Email:        "secret1@example.com",
+		Name:         "MainAccount",
+		Status:       "ready",
+		RequestCount: 15,
+		CreatedAt:    &now,
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: &frac,
+			Gemini5H:          &storage.QuotaWindow{Fraction: &frac},
+			GeminiWeekly:      &storage.QuotaWindow{Fraction: &frac},
+		},
+	}
+	activeID := "acc_1"
+	pool := &storage.Pool{
+		Version:         1,
+		ActiveAccountID: &activeID,
+		Strategy:        config.StrategyMaxQuota,
+		Accounts:        []*storage.Account{acc1},
+	}
+	_ = storage.SavePool(pool)
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"status"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on status, got %d", code)
+	}
+	out := stdout.String()
+
+	// Must contain status summary fields
+	for _, expected := range []string{
+		"Gateway Proxy is",
+		"Listen :",
+		"State  :",
+		"Pool   : 1 account(s) (Active: MainAccount) | Strategy: max_quota",
+		"Status : 1 Ready, 0 Cooldown, 0 Exhausted, 0 Restricted",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("status output missing expected string %q\nGot: %s", expected, out)
+		}
+	}
+
+	// Must NOT contain quota progress bars or account cards
+	for _, prohibited := range []string{
+		"Gemini 5-Hour:",
+		"Gemini Weekly:",
+		"Quota age:",
+		"Hits:",
+		"Antigravity Multi-Account Pool",
+		"CLI Base Token",
+		"In Rotation Pool",
+		"[━━━━",
+		"[░░░░",
+	} {
+		if strings.Contains(out, prohibited) {
+			t.Errorf("status output must not contain full dashboard element %q\nGot: %s", prohibited, out)
+		}
+	}
+}
+
+func TestListCmd_CompactAndPrivacy(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	frac := 0.90
+	acc1 := &storage.Account{
+		ID:           "acc_1",
+		Email:        "confidential-user@example.com",
+		Name:         "WorkDev",
+		Status:       "ready",
+		RequestCount: 123,
+		CreatedAt:    &now,
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: &frac,
+			Gemini5H:          &storage.QuotaWindow{Fraction: &frac},
+			GeminiWeekly:      &storage.QuotaWindow{Fraction: &frac},
+		},
+	}
+	acc2 := &storage.Account{
+		ID:           "acc_2",
+		Email:        "private-test@gmail.com",
+		Status:       "ready", // No name -> should be Account 2
+		RequestCount: 45,
+		CreatedAt:    &now,
+	}
+	activeID := "acc_1"
+	pool := &storage.Pool{
+		Version:         1,
+		ActiveAccountID: &activeID,
+		Strategy:        config.StrategyMaxQuota,
+		Accounts:        []*storage.Account{acc1, acc2},
+	}
+	_ = storage.SavePool(pool)
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"list"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on list, got %d", code)
+	}
+	out := stdout.String()
+
+	// Table headers and columns
+	if !strings.Contains(out, "#") || !strings.Contains(out, "ACCOUNT ID") || !strings.Contains(out, "STATUS") {
+		t.Errorf("list output missing table headers\nGot: %s", out)
+	}
+	if !strings.Contains(out, "acc_1") || !strings.Contains(out, "WorkDev") {
+		t.Errorf("list output missing acc_1 or WorkDev\nGot: %s", out)
+	}
+	if !strings.Contains(out, "acc_2") || !strings.Contains(out, "Account 2") {
+		t.Errorf("list output missing acc_2 or Account 2 fallback\nGot: %s", out)
+	}
+
+	// PRIVACY: Never expose full email addresses
+	for _, email := range []string{
+		"confidential-user@example.com",
+		"private-test@gmail.com",
+		"@example.com",
+		"@gmail.com",
+	} {
+		if strings.Contains(out, email) {
+			t.Errorf("list output violates privacy by leaking email %q\nGot: %s", email, out)
+		}
+	}
+
+	// Compact: should NOT contain progress bar cards
+	if strings.Contains(out, "Gemini 5-Hour:") || strings.Contains(out, "[━━━━") {
+		t.Errorf("list output should be compact without progress bar cards\nGot: %s", out)
+	}
+}
+
+func TestQuotaCmd_ContainsProgressBars(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	frac := 0.70
+	acc := &storage.Account{
+		ID:           "acc_1",
+		Name:         "QuotaTest",
+		Status:       "ready",
+		RequestCount: 88,
+		CreatedAt:    &now,
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: &frac,
+			Gemini5H:          &storage.QuotaWindow{Fraction: &frac},
+			GeminiWeekly:      &storage.QuotaWindow{Fraction: &frac},
+		},
+	}
+	activeID := "acc_1"
+	pool := &storage.Pool{
+		Version:         1,
+		ActiveAccountID: &activeID,
+		Strategy:        config.StrategyMaxQuota,
+		Accounts:        []*storage.Account{acc},
+	}
+	_ = storage.SavePool(pool)
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"quota"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on quota, got %d", code)
+	}
+	out := stdout.String()
+
+	// Must contain full quota dashboard elements
+	for _, expected := range []string{
+		"Antigravity Multi-Account Pool",
+		"QuotaTest",
+		"Hits: 88",
+		"Gemini 5-Hour:",
+		"Gemini Weekly:",
+		"70.0%",
+		"━",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("quota output missing expected dashboard element %q\nGot: %s", expected, out)
+		}
+	}
+
+	// Target filtering
+	stdout.Reset()
+	code = Main([]string{"quota", "1"}, nil, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "QuotaTest") {
+		t.Errorf("quota target filtering failed\nGot: %s", stdout.String())
+	}
+}
+
+func TestDoctorCmd_BehaviorUnchanged(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"doctor"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on doctor, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Antigravity System Doctor") {
+		t.Errorf("doctor output missing header, got: %s", out)
+	}
+	if !strings.Contains(out, "Native Binary:") {
+		t.Errorf("doctor output missing Native Binary check, got: %s", out)
 	}
 }

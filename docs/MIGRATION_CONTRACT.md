@@ -718,8 +718,9 @@ To prevent infinite loops where the wrapper executes itself:
 | Command | Aliases | Arguments | Exit Code | Network Used | Description |
 |---|---|---|---|---|---|
 | `--version` | `version` | None | 0 | No | Print version string |
-| `list` | `ls`, `quota` | `[target]` | 0 | No | Display account table and quota bars |
-| `status` | None | None | 0 | No | Show gateway process status + account list |
+| `list` | `ls` | `[target]` | 0 | No | Display compact account inventory table without forced quota refresh |
+| `quota` | None | `[target]` | 0 | No | Display per-account visual quota cards, progress bars, and reset countdowns |
+| `status` | None | None | 0 | No | Show gateway process, configuration, and runtime status (compact, local-only, no quota bars) |
 | `doctor` | `check`, `health` | None | 0 (warn), 1 (fail) | Yes (TLS check) | Run system health diagnostics |
 | `strategy` | `strat` | `[name]` | 0 (ok), 1 (invalid) | No | View or set load balancing strategy |
 | `rename` | None | `<target> <name>` | 0 (ok), 1 (err) | No | Update friendly display name |
@@ -735,6 +736,8 @@ To prevent infinite loops where the wrapper executes itself:
 | `restart` | None | None | 0 (ok), 1 (err) | No | Restart background gateway daemon |
 | `logs` | `log` | `[-n] [-f] [--clear] [--rotate]`| 0 | No | View, tail, clear, or rotate logs |
 | `run` | None | `[args...]` | Propagated | Indirect | Wrap and execute native `agy` |
+
+> **Note on CLI Command Separation**: In Go `agy-pool-go`, command responsibilities between `status`, `list`, and `quota` are intentionally decoupled from the legacy Python behavior to eliminate redundant output, avoid blocking network calls during status inspection, and preserve user privacy. `status` provides a local gateway and pool health summary without progress bars; `list` prints a fast, compact tabular account inventory (strictly protecting user identity); and `quota` provides the dedicated visual dashboard with progress bars and reset countdowns.
 
 ---
 

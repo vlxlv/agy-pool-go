@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
@@ -60,8 +61,7 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if len(args) == 0 {
-		ListAccounts("", stdout, stderr)
-		return 0
+		return ListCmd(stdout, stderr)
 	}
 
 	cmd := args[0]
@@ -89,13 +89,10 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "import-current":
 		_, _ = accounts.ImportCurrent()
 		return 0
-	case "list", "ls", "quota":
-		target := ""
-		if len(args) > 1 {
-			target = args[1]
-		}
-		ListAccounts(target, stdout, stderr)
-		return 0
+	case "list", "ls":
+		return ListCmd(stdout, stderr, args[1:]...)
+	case "quota":
+		return QuotaCmd(stdout, stderr, args[1:]...)
 	case "strategy", "strat":
 		target := ""
 		if len(args) > 1 {
@@ -167,7 +164,9 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "Antigravity Multi-Account Pool & Load Balancer for Termux & Linux\n\n")
 	fmt.Fprintf(out, "Examples:\n")
 	fmt.Fprintf(out, "  agy-pool login            Add/login a new Google account\n")
-	fmt.Fprintf(out, "  agy-pool list             Refresh and show cached account quotas\n")
+	fmt.Fprintf(out, "  agy-pool list             List accounts in rotation pool (compact)\n")
+	fmt.Fprintf(out, "  agy-pool quota            Display per-account quota progress bars and reset countdowns\n")
+	fmt.Fprintf(out, "  agy-pool status           Show gateway process and runtime summary\n")
 	fmt.Fprintf(out, "  agy-pool strategy         View or change load balancing strategy\n")
 	fmt.Fprintf(out, "  agy-pool rename 1 \"Work\"  Set friendly label for an account\n")
 	fmt.Fprintf(out, "  agy-pool doctor           Run comprehensive system diagnostic check\n")
@@ -939,9 +938,29 @@ func RestartDaemonCmd(stdout, stderr io.Writer, args ...string) int {
 	return 0
 }
 
-// StatusCmd checks daemon status and displays account dashboard.
-func StatusCmd(stdout, stderr io.Writer, args ...string) int {
-	ctx, rem, err := resolveContextForCmd(args)
+func formatLastUsed(ts *int64, now int64) string {
+	if ts == nil || *ts <= 0 {
+		return "never"
+	}
+	diff := now - *ts
+	if diff < 0 {
+		return "just now"
+	}
+	if diff < 60 {
+		return fmt.Sprintf("%ds ago", diff)
+	}
+	if diff < 3600 {
+		return fmt.Sprintf("%dm ago", diff/60)
+	}
+	if diff < 86400 {
+		return fmt.Sprintf("%dh ago", diff/3600)
+	}
+	return fmt.Sprintf("%dd ago", diff/86400)
+}
+
+// ListCmd renders a compact account inventory without forced quota refresh.
+func ListCmd(stdout, stderr io.Writer, args ...string) int {
+	_, rem, err := resolveContextForCmd(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
 		return 1
@@ -950,6 +969,131 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 	target := ""
 	if len(rem) > 0 {
 		target = rem[0]
+	}
+
+	pool, err := storage.LoadPool()
+	if err != nil || pool == nil || len(pool.Accounts) == 0 {
+		fmt.Fprintf(stdout, "\n%sNo accounts in pool yet.%s\n", clrYellow, clrReset)
+		fmt.Fprintf(stdout, "Run %sagy-pool login%s or %sagy-pool import-current%s to add accounts.\n\n",
+			clrBold, clrReset, clrBold, clrReset)
+		return 0
+	}
+
+	accList := pool.Accounts
+	if target != "" {
+		if idx, err := strconv.Atoi(target); err == nil {
+			if idx >= 1 && idx <= len(accList) {
+				accList = []*storage.Account{accList[idx-1]}
+			} else {
+				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
+				return 0
+			}
+		} else {
+			var found *storage.Account
+			for _, a := range accList {
+				if a != nil && (a.ID == target || a.Email == target || a.Name == target) {
+					found = a
+					break
+				}
+			}
+			if found != nil {
+				accList = []*storage.Account{found}
+			} else {
+				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
+				return 0
+			}
+		}
+	}
+
+	nowTS := time.Now().Unix()
+	activeID := ""
+	if pool.ActiveAccountID != nil {
+		activeID = *pool.ActiveAccountID
+	}
+
+	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "#\tACCOUNT ID\tNAME\tSTATUS\tHITS\t5H QUOTA\tWEEKLY QUOTA\tLAST USED")
+
+	for i, a := range accList {
+		if a == nil {
+			continue
+		}
+		isActive := (a.ID == activeID)
+		q5Frac, gwFrac := quota.DisplayQuotaFractions(a.LastQuota)
+		isCooling := a.RateLimitedUntil != nil && *a.RateLimitedUntil > float64(nowTS)
+		isExhausted := (q5Frac != nil && *q5Frac <= config.DepletedThreshold) ||
+			(gwFrac != nil && *gwFrac <= config.DepletedThreshold)
+
+		statusStr := "Ready"
+		if a.Status == "validation_required" {
+			statusStr = "⚠ Verify Required"
+		} else if a.Status == "auth_error" {
+			statusStr = "✖ Auth Error"
+		} else if isCooling {
+			if isActive {
+				statusStr = "* Active (Cooldown)"
+			} else {
+				statusStr = "Cooldown"
+			}
+		} else if isExhausted {
+			if isActive {
+				statusStr = "* Active (Exhausted)"
+			} else {
+				statusStr = "Exhausted"
+			}
+		} else if isActive {
+			statusStr = "* Active"
+		}
+
+		hits := a.GetHits()
+		q5Str := "N/A"
+		if q5Frac != nil {
+			q5Str = fmt.Sprintf("%.1f%%", *q5Frac*100)
+		}
+		gwStr := "N/A"
+		if gwFrac != nil {
+			gwStr = fmt.Sprintf("%.1f%%", *gwFrac*100)
+		}
+		lastUsedStr := formatLastUsed(a.LastUsedAt, nowTS)
+		dispName := accounts.DisplayAccountName(a)
+
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			i+1, a.ID, dispName, statusStr, hits, q5Str, gwStr, lastUsedStr)
+	}
+	w.Flush()
+
+	strat := pool.Strategy
+	if strat == "" {
+		strat = config.StrategyMaxQuota
+	}
+	fmt.Fprintf(stdout, "\nStrategy: %s | Active Account: %s | Total: %d account(s)\n",
+		strat, activeID, len(pool.Accounts))
+	return 0
+}
+
+// QuotaCmd renders the dedicated full quota dashboard with progress bars and reset countdowns.
+func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
+	_, rem, err := resolveContextForCmd(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+
+	target := ""
+	if len(rem) > 0 {
+		target = rem[0]
+	}
+
+	ListAccounts(target, stdout, stderr)
+	return 0
+}
+
+// StatusCmd checks daemon status and displays gateway and runtime summary only.
+func StatusCmd(stdout, stderr io.Writer, args ...string) int {
+	ctx, _, err := resolveContextForCmd(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
+		return 1
 	}
 
 	status, info, msg := daemon.CheckInstanceStatus(ctx)
@@ -989,7 +1133,67 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 		fmt.Fprintf(stdout, "%s○ Gateway Proxy is STOPPED (%s)%s\n", clrYellow, msg, clrReset)
 	}
 
-	ListAccounts(target, stdout, stderr)
+	// Runtime, configuration, and storage paths
+	fmt.Fprintf(stdout, "  • Listen : http://%s:%d\n", ctx.ListenHost, ctx.ListenPort)
+	if ctx.ConfigPath != "" {
+		fmt.Fprintf(stdout, "  • Config : %s\n", ctx.ConfigPath)
+	}
+	dbPath := filepath.Join(ctx.DataDir, "state.db")
+	fmt.Fprintf(stdout, "  • State  : %s (SQLite schema v%s)\n", dbPath, storage.StateDBSchemaVersion)
+
+	pool, err := storage.LoadPool()
+	if err != nil || pool == nil {
+		fmt.Fprintf(stdout, "  • Pool   : (unavailable: %v)\n", err)
+		return 0
+	}
+
+	totalAccounts := len(pool.Accounts)
+	strat := pool.Strategy
+	if strat == "" {
+		strat = config.StrategyMaxQuota
+	}
+
+	if totalAccounts == 0 {
+		fmt.Fprintf(stdout, "  • Pool   : 0 accounts (empty) | Strategy: %s\n", strat)
+		return 0
+	}
+
+	nowTS := time.Now().Unix()
+	readyCnt, cooldownCnt, exhaustedCnt, restrictedCnt := 0, 0, 0, 0
+	activeName := "none"
+
+	for _, a := range pool.Accounts {
+		if a == nil {
+			continue
+		}
+		if pool.ActiveAccountID != nil && a.ID == *pool.ActiveAccountID {
+			activeName = accounts.DisplayAccountName(a)
+		}
+
+		q5Frac, gwFrac := quota.DisplayQuotaFractions(a.LastQuota)
+		remFraction := 1.0
+		if q5Frac != nil {
+			remFraction = *q5Frac
+		}
+		if gwFrac != nil && *gwFrac < remFraction {
+			remFraction = *gwFrac
+		}
+
+		if a.Status == "validation_required" || a.Status == "auth_error" {
+			restrictedCnt++
+		} else if a.RateLimitedUntil != nil && *a.RateLimitedUntil > float64(nowTS) {
+			cooldownCnt++
+		} else if remFraction <= config.DepletedThreshold {
+			exhaustedCnt++
+		} else {
+			readyCnt++
+		}
+	}
+
+	fmt.Fprintf(stdout, "  • Pool   : %d account(s) (Active: %s) | Strategy: %s\n", totalAccounts, activeName, strat)
+	fmt.Fprintf(stdout, "  • Status : %d Ready, %d Cooldown, %d Exhausted, %d Restricted\n",
+		readyCnt, cooldownCnt, exhaustedCnt, restrictedCnt)
+
 	return 0
 }
 

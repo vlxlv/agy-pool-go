@@ -605,9 +605,18 @@ def test_differential_cli():
         assert p_py.returncode == expected_rc, f"[{name}] Python exit code {p_py.returncode} != expected {expected_rc}"
         assert p_go.returncode == expected_rc, f"[{name}] Go exit code {p_go.returncode} != expected {expected_rc}"
 
+        if not c.get("exempt_py_parity", False):
+            for pat in c.get("stdout_contains", []):
+                assert pat in p_py.stdout, f"[{name}] Python stdout missing {pat!r}\nGot: {p_py.stdout}"
+
         for pat in c.get("stdout_contains", []):
-            assert pat in p_py.stdout, f"[{name}] Python stdout missing {pat!r}\nGot: {p_py.stdout}"
             assert pat in p_go.stdout, f"[{name}] Go stdout missing {pat!r}\nGot: {p_go.stdout}"
+
+        for pat in c.get("stdout_contains_go", []):
+            assert pat in p_go.stdout, f"[{name}] Go stdout missing {pat!r}\nGot: {p_go.stdout}"
+
+        for pat in c.get("stdout_not_contains_go", []):
+            assert pat not in p_go.stdout, f"[{name}] Go stdout unexpectedly contained {pat!r}\nGot: {p_go.stdout}"
 
         for pat in c.get("stderr_contains", []):
             assert pat in p_py.stderr, f"[{name}] Python stderr missing {pat!r}\nGot: {p_py.stderr}"

@@ -33,6 +33,47 @@
     "stderr_contains": []
   },
   {
+    "name": "doctor_check",
+    "args": [
+      "doctor"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "Antigravity System Doctor"
+    ],
+    "stderr_contains": []
+  },
+  {
+    "name": "status_summary",
+    "args": [
+      "status"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "Gateway Proxy is"
+    ],
+    "stdout_contains_go": [
+      "Listen :",
+      "State  :"
+    ],
+    "stdout_not_contains_go": [
+      "Gemini 5-Hour:"
+    ],
+    "exempt_py_parity": true,
+    "stderr_contains": []
+  },
+  {
+    "name": "quota_empty",
+    "args": [
+      "quota"
+    ],
+    "exit_code": 0,
+    "stdout_contains": [
+      "No accounts in pool yet."
+    ],
+    "stderr_contains": []
+  },
+  {
     "name": "strategy_view",
     "args": [
       "strategy"
