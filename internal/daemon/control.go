@@ -116,7 +116,11 @@ func StopDaemon(pidFile string, port int, timeout time.Duration) error {
 		pidFile = PIDFileProvider()
 	}
 	dataDir := filepath.Dir(pidFile)
-	ctx, err := ResolveInstanceContext(dataDir, "", port, "")
+	configPath := ""
+	if info := GetDaemonInfo(pidFile); info != nil {
+		configPath = info.ConfigPath
+	}
+	ctx, err := ResolveInstanceContext(dataDir, configPath, port, "")
 	if err != nil {
 		return err
 	}

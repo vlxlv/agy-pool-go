@@ -840,3 +840,101 @@ func TestInstallAndUninstall_InvalidArgs(t *testing.T) {
 		t.Errorf("expected usage in help output, got: %s", stdout.String())
 	}
 }
+
+func TestDaemonRun_RemovedFromCLI(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	var stdout, stderr bytes.Buffer
+
+	// 1. Calling "daemon-run" directly must fail with invalid choice (code 2)
+	code := Main([]string{"daemon-run"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected code 2 when invoking removed daemon-run, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid choice: 'daemon-run'") {
+		t.Fatalf("expected 'invalid choice: 'daemon-run'' in stderr, got: %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "daemon-run,") {
+		t.Fatalf("usage list in error output should not contain 'daemon-run': %s", stderr.String())
+	}
+
+	// 2. Help output must not mention daemon-run
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"--help"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected code 0 for --help, got %d", code)
+	}
+	if strings.Contains(stdout.String(), "daemon-run") {
+		t.Fatalf("help text must not mention 'daemon-run', got: %s", stdout.String())
+	}
+}
+
+func TestRunAgyWithLB_ArgumentPreservation(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "data")
+	cfgFile := filepath.Join(tmpDir, "config.json")
+	_ = os.WriteFile(cfgFile, []byte(`{"version":1,"server":{"listen":"127.0.0.1","port":9999}}`), 0o600)
+
+	// Mock native agy binary
+	fakeAgy := filepath.Join(tmpDir, "agy")
+	_ = os.WriteFile(fakeAgy, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	diagnostics.SetAgyBinaryFinder(func() string {
+		return fakeAgy
+	})
+
+	testCases := []struct {
+		name         string
+		args         []string
+		expectedArgs []string
+	}{
+		{
+			name:         "flag -c",
+			args:         []string{"run", "-c", cfgFile, "-D", dataDir, "--", "-c"},
+			expectedArgs: []string{fakeAgy, "-c"},
+		},
+		{
+			name:         "conversation flag",
+			args:         []string{"run", "-c", cfgFile, "-D", dataDir, "--", "--conversation=conv-1234"},
+			expectedArgs: []string{fakeAgy, "--conversation=conv-1234"},
+		},
+		{
+			name:         "prompt flag",
+			args:         []string{"run", "-c", cfgFile, "-D", dataDir, "--", "-p", "hello"},
+			expectedArgs: []string{fakeAgy, "-p", "hello"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedBinary string
+			var capturedArgv []string
+			ExecHandler = func(binary string, argv []string, env []string) error {
+				capturedBinary = binary
+				capturedArgv = argv
+				return nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := Main(tc.args, nil, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("expected code 0, got %d (stderr: %s)", code, stderr.String())
+			}
+			if capturedBinary != fakeAgy {
+				t.Fatalf("expected exec binary %q, got %q", fakeAgy, capturedBinary)
+			}
+			if len(capturedArgv) != len(tc.expectedArgs) {
+				t.Fatalf("expected argv %v, got %v", tc.expectedArgs, capturedArgv)
+			}
+			for i := range tc.expectedArgs {
+				if capturedArgv[i] != tc.expectedArgs[i] {
+					t.Fatalf("argv[%d] mismatch: expected %q, got %q", i, tc.expectedArgs[i], capturedArgv[i])
+				}
+			}
+		})
+	}
+}

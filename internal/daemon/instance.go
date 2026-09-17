@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
@@ -183,6 +184,14 @@ func ResolveInstanceContext(dataDir string, configPath string, port int, listenH
 	}
 
 	if port <= 0 {
+		if pStr := os.Getenv(EnvDaemonPort); pStr != "" {
+			if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+				port = p
+			}
+		}
+	}
+
+	if port <= 0 {
 		port = DefaultPortProvider()
 	}
 	if listenHost == "" {
@@ -216,7 +225,7 @@ func isProcessOwnedByDataDir(pid int, dataDir string) bool {
 	environPath := fmt.Sprintf("/proc/%d/environ", pid)
 	if data, err := os.ReadFile(environPath); err == nil {
 		env := string(data)
-		if strings.Contains(env, "AGY_DATA_DIR="+dataDir) || strings.Contains(env, "AGY_GEMINI_DIR="+dataDir) {
+		if strings.Contains(env, "AGY_DATA_DIR="+dataDir) {
 			return true
 		}
 	}

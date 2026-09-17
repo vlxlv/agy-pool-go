@@ -55,6 +55,10 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		stdin = os.Stdin
 	}
 
+	if os.Getenv(daemon.EnvDaemonChild) == "1" {
+		return runDaemonChild(stderr)
+	}
+
 	if len(args) == 0 {
 		ListAccounts("", stdout, stderr)
 		return 0
@@ -145,8 +149,6 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return RestartDaemonCmd(stdout, stderr, args[1:]...)
 	case "status":
 		return StatusCmd(stdout, stderr, args[1:]...)
-	case "daemon-run":
-		return handleDaemonRun(args[1:], stdout, stderr)
 	case "migrate-legacy":
 		return handleMigrateLegacy(args[1:], stdout, stderr)
 	case "install":
@@ -154,14 +156,14 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "uninstall":
 		return handleUninstall(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,daemon-run,run} ...\n")
+		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
 		return 2
 	}
 }
 
 func printHelp(out io.Writer) {
-	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,daemon-run,run} ...\n\n")
+	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,run} ...\n\n")
 	fmt.Fprintf(out, "Antigravity Multi-Account Pool & Load Balancer for Termux & Linux\n\n")
 	fmt.Fprintf(out, "Examples:\n")
 	fmt.Fprintf(out, "  agy-pool login            Add/login a new Google account\n")
@@ -849,18 +851,29 @@ func resolveContextForCmd(args []string) (*daemon.InstanceContext, []string, err
 	return ctx, rem, nil
 }
 
-func handleDaemonRun(args []string, stdout, stderr io.Writer) int {
-	ctx, _, err := resolveContextForCmd(args)
+func runDaemonChild(stderr io.Writer) int {
+	dataDir := os.Getenv("AGY_DATA_DIR")
+	configFile := os.Getenv("AGY_CONFIG_FILE")
+	ctx, err := daemon.ResolveInstanceContext(dataDir, configFile, 0, "")
 	if err != nil {
-		fmt.Fprintf(stderr, "daemon-run error: %v\n", err)
+		fmt.Fprintf(stderr, "daemon child error: %v\n", err)
 		return 1
 	}
+	_ = config.ConfigureDataDir(ctx.DataDir)
+
+	pidFile := os.Getenv("AGY_TEST_PID_FILE")
+	if pidFile == "" {
+		pidFile = ctx.PIDFile()
+	}
+
 	err = daemon.RunForeground(context.Background(), daemon.ServerOptions{
 		Port:     ctx.ListenPort,
+		PIDFile:  pidFile,
+		LogFile:  ctx.LogFile(),
 		Instance: ctx,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "daemon-run error: %v\n", err)
+		fmt.Fprintf(stderr, "daemon child error: %v\n", err)
 		return 1
 	}
 	return 0

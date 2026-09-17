@@ -213,6 +213,9 @@ func TestHelperProcess_BackgroundDaemonSpawnAndStop(t *testing.T) {
 	if os.Getenv("AGY_HELPER_PROCESS") == "1" {
 		// Helper child process mode
 		port := 0
+		if pStr := os.Getenv(EnvDaemonPort); pStr != "" {
+			_, _ = fmt.Sscanf(pStr, "%d", &port)
+		}
 		for i, arg := range os.Args {
 			if arg == "--port" && i+1 < len(os.Args) {
 				_, _ = fmt.Sscanf(os.Args[i+1], "%d", &port)

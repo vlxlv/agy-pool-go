@@ -735,7 +735,6 @@ To prevent infinite loops where the wrapper executes itself:
 | `restart` | None | None | 0 (ok), 1 (err) | No | Restart background gateway daemon |
 | `logs` | `log` | `[-n] [-f] [--clear] [--rotate]`| 0 | No | View, tail, clear, or rotate logs |
 | `run` | None | `[args...]` | Propagated | Indirect | Wrap and execute native `agy` |
-| `daemon-run` | None | None | 0 (on exit) | Yes (proxy) | Internal foreground daemon worker |
 
 ---
 

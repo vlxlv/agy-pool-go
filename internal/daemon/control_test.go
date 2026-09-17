@@ -14,6 +14,9 @@ import (
 func TestRestartDaemon_Sequencing(t *testing.T) {
 	if os.Getenv("AGY_HELPER_RESTART") == "1" {
 		port := 0
+		if pStr := os.Getenv(EnvDaemonPort); pStr != "" {
+			_, _ = fmt.Sscanf(pStr, "%d", &port)
+		}
 		for i, arg := range os.Args {
 			if arg == "--port" && i+1 < len(os.Args) {
 				_, _ = fmt.Sscanf(os.Args[i+1], "%d", &port)
@@ -96,6 +99,9 @@ func TestRestartDaemon_Sequencing(t *testing.T) {
 func TestConcurrentStart_Protection(t *testing.T) {
 	if os.Getenv("AGY_HELPER_CONCURRENT") == "1" {
 		port := 0
+		if pStr := os.Getenv(EnvDaemonPort); pStr != "" {
+			_, _ = fmt.Sscanf(pStr, "%d", &port)
+		}
 		for i, arg := range os.Args {
 			if arg == "--port" && i+1 < len(os.Args) {
 				_, _ = fmt.Sscanf(os.Args[i+1], "%d", &port)

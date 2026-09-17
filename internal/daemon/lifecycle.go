@@ -14,6 +14,11 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/config"
 )
 
+const (
+	EnvDaemonChild = "AGY_POOL_DAEMON_CHILD"
+	EnvDaemonPort  = "AGY_POOL_DAEMON_PORT"
+)
+
 // LaunchOptions configures starting the background proxy daemon.
 type LaunchOptions struct {
 	Port           int
@@ -115,27 +120,21 @@ func StartInstance(ctx *InstanceContext, opts LaunchOptions) (*StartResult, erro
 	var args []string
 	if len(opts.CustomArgs) > 0 {
 		args = append(args, opts.CustomArgs...)
-	} else {
-		args = append(args, "-D", ctx.DataDir)
-		if ctx.ConfigPath != "" {
-			args = append(args, "-c", ctx.ConfigPath)
-		}
-	}
-	args = append(args, "daemon-run")
-	if ctx.ListenPort > 0 {
-		args = append(args, "--port", strconv.Itoa(ctx.ListenPort))
 	}
 
 	cmd := exec.Command(entrypoint, args...)
 	cmd.Stdout = logFD
 	cmd.Stderr = logFD
 
-	// Environment: propagate state directory and config file
+	// Environment: propagate state directory, config file, port, and daemon child marker
 	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, EnvDaemonChild+"=1")
 	cmd.Env = append(cmd.Env, "AGY_DATA_DIR="+ctx.DataDir)
-	cmd.Env = append(cmd.Env, "AGY_GEMINI_DIR="+ctx.DataDir)
 	if ctx.ConfigPath != "" {
 		cmd.Env = append(cmd.Env, "AGY_CONFIG_FILE="+ctx.ConfigPath)
+	}
+	if ctx.ListenPort > 0 {
+		cmd.Env = append(cmd.Env, EnvDaemonPort+"="+strconv.Itoa(ctx.ListenPort))
 	}
 	if opts.PIDFile != "" {
 		cmd.Env = append(cmd.Env, "AGY_TEST_PID_FILE="+opts.PIDFile)
