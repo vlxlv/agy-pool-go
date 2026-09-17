@@ -3,8 +3,11 @@ package cli
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -980,7 +983,7 @@ func TestStatusCmd_NoQuotaBarsAndDashboard(t *testing.T) {
 	_ = storage.SavePool(pool)
 
 	var stdout, stderr bytes.Buffer
-	code := Main([]string{"status"}, nil, &stdout, &stderr)
+	code := Main([]string{"status", "-p", "19999"}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit 0 on status, got %d", code)
 	}
@@ -988,11 +991,12 @@ func TestStatusCmd_NoQuotaBarsAndDashboard(t *testing.T) {
 
 	// Must contain status summary fields
 	for _, expected := range []string{
-		"Gateway Proxy is",
-		"Listen :",
-		"State  :",
-		"Pool   : 1 account(s) (Active: MainAccount) | Strategy: max_quota",
-		"Status : 1 Ready, 0 Cooldown, 0 Exhausted, 0 Restricted",
+		"Gateway :",
+		"STOPPED",
+		"State   :",
+		"Pool    : 1 accounts | Active: MainAccount | 1 Ready | 0 Cooldown | 0 Restricted",
+		"Strategy: max_quota",
+		"Stopped",
 	} {
 		if !strings.Contains(out, expected) {
 			t.Errorf("status output missing expected string %q\nGot: %s", expected, out)
@@ -1014,6 +1018,197 @@ func TestStatusCmd_NoQuotaBarsAndDashboard(t *testing.T) {
 		if strings.Contains(out, prohibited) {
 			t.Errorf("status output must not contain full dashboard element %q\nGot: %s", prohibited, out)
 		}
+	}
+}
+
+func TestStatusCmd_RunningDaemonWithRuntimeStats(t *testing.T) {
+	tmpDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	// Start a local listener to simulate running daemon port
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen failed: %v", err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	ctx, err := daemon.ResolveInstanceContext(tmpDir, "", port, "")
+	if err != nil {
+		t.Fatalf("ResolveInstanceContext failed: %v", err)
+	}
+
+	// Write PID file
+	currentPID := os.Getpid()
+	pidInfo := daemon.DaemonInfo{
+		PID:        currentPID,
+		Port:       port,
+		DataDir:    ctx.DataDir,
+		Version:    ctx.Version,
+		ListenHost: ctx.ListenHost,
+		Listen:     ctx.ListenHost,
+		ConfigPath: ctx.ConfigPath,
+		ConfigHash: ctx.ConfigHash,
+	}
+	if err := daemon.WritePIDFile(ctx.PIDFile(), pidInfo); err != nil {
+		t.Fatalf("WritePIDFile failed: %v", err)
+	}
+
+	// Write runtime stats with deterministic values
+	startedAt := time.Now().Add(-1*time.Hour - 27*time.Minute).Truncate(time.Second)
+	stats := daemon.RuntimeStats{
+		PID:        currentPID,
+		StartedAt:  startedAt,
+		UpdatedAt:  time.Now(),
+		Goroutines: 18,
+		AllocBytes: uint64(124 * 1024 * 1024 / 10),
+		HeapBytes:  uint64(187 * 1024 * 1024 / 10),
+		SysBytes:   uint64(312 * 1024 * 1024 / 10),
+		NumGC:      42,
+		GoVersion:  "go1.26.7",
+	}
+	if err := daemon.WriteRuntimeStats(ctx.RuntimeFile(), stats); err != nil {
+		t.Fatalf("WriteRuntimeStats failed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"status", "-p", strconv.Itoa(port), "-D", tmpDir}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on status, got %d. stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	// Assert required lines from visual shape
+	for _, expected := range []string{
+		"Gateway :",
+		"RUNNING",
+		fmt.Sprintf("PID %d", currentPID),
+		fmt.Sprintf("127.0.0.1:%d", port),
+		"Uptime  : 1h 27m",
+		"Runtime : Go 1.26.7 | Goroutines: 18",
+		"Memory  : Alloc 12.4 MiB | Heap 18.7 MiB | Sys 31.2 MiB",
+		"GC      : 42 cycles",
+		"State   :",
+		"Pool    : 0 accounts (empty)",
+		"Strategy: max_quota",
+		"Healthy",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("status running output missing %q\nGot:\n%s", expected, out)
+		}
+	}
+}
+
+func TestStatusCmd_RunningDaemonStatsFromDaemonNotCLI(t *testing.T) {
+	tmpDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen failed: %v", err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	ctx, err := daemon.ResolveInstanceContext(tmpDir, "", port, "")
+	if err != nil {
+		t.Fatalf("ResolveInstanceContext failed: %v", err)
+	}
+
+	currentPID := os.Getpid()
+	pidInfo := daemon.DaemonInfo{
+		PID:        currentPID,
+		Port:       port,
+		DataDir:    ctx.DataDir,
+		Version:    ctx.Version,
+		ListenHost: ctx.ListenHost,
+		Listen:     ctx.ListenHost,
+		ConfigPath: ctx.ConfigPath,
+		ConfigHash: ctx.ConfigHash,
+	}
+	if err := daemon.WritePIDFile(ctx.PIDFile(), pidInfo); err != nil {
+		t.Fatalf("WritePIDFile failed: %v", err)
+	}
+
+	// Mock specific distinct metrics in daemon snapshot
+	stats := daemon.RuntimeStats{
+		PID:        currentPID,
+		StartedAt:  time.Now().Add(-37 * time.Second),
+		UpdatedAt:  time.Now(),
+		Goroutines: 999, // Highly distinct number to prove it doesn't read CLI process goroutines
+		AllocBytes: uint64(50.0 * 1024 * 1024),
+		HeapBytes:  uint64(60.0 * 1024 * 1024),
+		SysBytes:   uint64(80.0 * 1024 * 1024),
+		NumGC:      777,
+		GoVersion:  "go1.99.9",
+	}
+	if err := daemon.WriteRuntimeStats(ctx.RuntimeFile(), stats); err != nil {
+		t.Fatalf("WriteRuntimeStats failed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"status", "-p", strconv.Itoa(port), "-D", tmpDir}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	out := stdout.String()
+
+	// Proves metrics came from daemon runtime snapshot, not CLI process
+	if !strings.Contains(out, "Goroutines: 999") {
+		t.Errorf("status must use daemon goroutine count (999)\nGot:\n%s", out)
+	}
+	if !strings.Contains(out, "GC      : 777 cycles") {
+		t.Errorf("status must use daemon GC count (777)\nGot:\n%s", out)
+	}
+	if !strings.Contains(out, "Go 1.99.9") {
+		t.Errorf("status must use daemon Go version\nGot:\n%s", out)
+	}
+	if !strings.Contains(out, "Uptime  : 37s") {
+		t.Errorf("status must use daemon uptime (37s)\nGot:\n%s", out)
+	}
+}
+
+func TestStatusCmd_RunningDaemonStatsUnavailable(t *testing.T) {
+	tmpDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen failed: %v", err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	ctx, err := daemon.ResolveInstanceContext(tmpDir, "", port, "")
+	if err != nil {
+		t.Fatalf("ResolveInstanceContext failed: %v", err)
+	}
+
+	currentPID := os.Getpid()
+	pidInfo := daemon.DaemonInfo{
+		PID:        currentPID,
+		Port:       port,
+		DataDir:    ctx.DataDir,
+		Version:    ctx.Version,
+		ListenHost: ctx.ListenHost,
+		Listen:     ctx.ListenHost,
+		ConfigPath: ctx.ConfigPath,
+		ConfigHash: ctx.ConfigHash,
+	}
+	if err := daemon.WritePIDFile(ctx.PIDFile(), pidInfo); err != nil {
+		t.Fatalf("WritePIDFile failed: %v", err)
+	}
+	// DO NOT write runtime stats file -> should report metrics unavailable gracefully
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"status", "-p", strconv.Itoa(port), "-D", tmpDir}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	out := stdout.String()
+
+	if !strings.Contains(out, "Runtime : (metrics unavailable)") {
+		t.Errorf("expected metrics unavailable message\nGot:\n%s", out)
 	}
 }
 

@@ -1096,54 +1096,64 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 		return 1
 	}
 
+	fmt.Fprintf(stdout, "agy-pool v%s\n\n", config.Version)
+
 	status, info, msg := daemon.CheckInstanceStatus(ctx)
 	switch status {
 	case daemon.StatusRunningSameInstance:
-		verNote := ""
-		if info != nil && info.Version != "" {
-			verNote = fmt.Sprintf(" [v%s]", info.Version)
-		}
-		fmt.Fprintf(stdout, "%s✓ Gateway Proxy is RUNNING (PID: %d%s) on http://%s:%d%s\n",
-			clrGreen, info.PID, verNote, ctx.ListenHost, ctx.ListenPort, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sRUNNING%s  PID %d  %s:%d\n",
+			clrGreen, clrReset, info.PID, ctx.ListenHost, ctx.ListenPort)
 	case daemon.StatusOutdatedBinary:
-		verNote := ""
-		if info != nil && info.Version != "" {
-			verNote = fmt.Sprintf(" [v%s]", info.Version)
-		}
-		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy is RUNNING (PID: %d%s, Outdated Code). Run 'agy-pool restart' to reload.%s\n",
-			clrYellow, info.PID, verNote, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sRUNNING (Outdated Code)%s  PID %d  %s:%d\n",
+			clrYellow, clrReset, info.PID, ctx.ListenHost, ctx.ListenPort)
 	case daemon.StatusConfigMismatch:
-		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy has CONFIG MISMATCH: %s. Run 'agy-pool restart' to reload.%s\n",
-			clrYellow, msg, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sCONFIG MISMATCH%s (%s)\n", clrYellow, clrReset, msg)
 	case daemon.StatusPortOccupiedForeign:
-		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy is STOPPED, but port %d is OCCUPIED by another process or instance.%s\n",
-			clrYellow, ctx.ListenPort, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sPORT OCCUPIED%s (port %d is occupied by another process)\n", clrYellow, clrReset, ctx.ListenPort)
 	case daemon.StatusForeignInstance:
-		fmt.Fprintf(stdout, "%s⚠ PID file points to a FOREIGN instance: %s%s\n",
-			clrYellow, msg, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sFOREIGN INSTANCE%s (%s)\n", clrYellow, clrReset, msg)
 	case daemon.StatusStalePID:
 		_ = os.Remove(ctx.PIDFile())
-		fmt.Fprintf(stdout, "%s○ Gateway Proxy is STOPPED (stale PID file cleaned)%s\n", clrYellow, clrReset)
+		_ = os.Remove(ctx.RuntimeFile())
+		fmt.Fprintf(stdout, "Gateway : %sSTOPPED%s (stale PID file cleaned)\n", clrYellow, clrReset)
 	case daemon.StatusLegacyPID:
-		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy has LEGACY unverified PID file (PID: %d)%s\n",
-			clrYellow, info.PID, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sLEGACY PID%s (PID: %d)\n", clrYellow, clrReset, info.PID)
 	case daemon.StatusStopped:
-		fmt.Fprintf(stdout, "%s○ Gateway Proxy is STOPPED%s\n", clrYellow, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sSTOPPED%s\n", clrYellow, clrReset)
 	default:
-		fmt.Fprintf(stdout, "%s○ Gateway Proxy is STOPPED (%s)%s\n", clrYellow, msg, clrReset)
+		fmt.Fprintf(stdout, "Gateway : %sSTOPPED%s (%s)\n", clrYellow, clrReset, msg)
 	}
 
-	// Runtime, configuration, and storage paths
-	fmt.Fprintf(stdout, "  • Listen : http://%s:%d\n", ctx.ListenHost, ctx.ListenPort)
+	if status == daemon.StatusRunningSameInstance || status == daemon.StatusOutdatedBinary {
+		if info != nil && info.PID > 0 {
+			stats, err := ctx.GetRuntimeStats(info.PID)
+			if err == nil && stats != nil {
+				uptime := daemon.FormatUptime(time.Since(stats.StartedAt))
+				goVer := daemon.FormatGoVersion(stats.GoVersion)
+				allocStr := daemon.FormatMemoryBytes(stats.AllocBytes)
+				heapStr := daemon.FormatMemoryBytes(stats.HeapBytes)
+				sysStr := daemon.FormatMemoryBytes(stats.SysBytes)
+
+				fmt.Fprintf(stdout, "Uptime  : %s\n", uptime)
+				fmt.Fprintf(stdout, "Runtime : %s | Goroutines: %d\n", goVer, stats.Goroutines)
+				fmt.Fprintf(stdout, "Memory  : Alloc %s | Heap %s | Sys %s\n", allocStr, heapStr, sysStr)
+				fmt.Fprintf(stdout, "GC      : %d cycles\n", stats.NumGC)
+			} else {
+				fmt.Fprintf(stdout, "Runtime : (metrics unavailable)\n")
+			}
+		}
+	}
+
+	fmt.Fprintf(stdout, "\n")
 	if ctx.ConfigPath != "" {
-		fmt.Fprintf(stdout, "  • Config : %s\n", ctx.ConfigPath)
+		fmt.Fprintf(stdout, "Config  : %s\n", ctx.ConfigPath)
 	}
 	dbPath := filepath.Join(ctx.DataDir, "state.db")
-	fmt.Fprintf(stdout, "  • State  : %s (SQLite schema v%s)\n", dbPath, storage.StateDBSchemaVersion)
+	fmt.Fprintf(stdout, "State   : %s  (schema v%s)\n", dbPath, storage.StateDBSchemaVersion)
 
 	pool, err := storage.LoadPool()
 	if err != nil || pool == nil {
-		fmt.Fprintf(stdout, "  • Pool   : (unavailable: %v)\n", err)
+		fmt.Fprintf(stdout, "Pool    : (unavailable: %v)\n", err)
 		return 0
 	}
 
@@ -1151,11 +1161,6 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 	strat := pool.Strategy
 	if strat == "" {
 		strat = config.StrategyMaxQuota
-	}
-
-	if totalAccounts == 0 {
-		fmt.Fprintf(stdout, "  • Pool   : 0 accounts (empty) | Strategy: %s\n", strat)
-		return 0
 	}
 
 	nowTS := time.Now().Unix()
@@ -1190,9 +1195,26 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 		}
 	}
 
-	fmt.Fprintf(stdout, "  • Pool   : %d account(s) (Active: %s) | Strategy: %s\n", totalAccounts, activeName, strat)
-	fmt.Fprintf(stdout, "  • Status : %d Ready, %d Cooldown, %d Exhausted, %d Restricted\n",
-		readyCnt, cooldownCnt, exhaustedCnt, restrictedCnt)
+	if totalAccounts == 0 {
+		fmt.Fprintf(stdout, "Pool    : 0 accounts (empty)\n")
+	} else {
+		fmt.Fprintf(stdout, "Pool    : %d accounts | Active: %s | %d Ready | %d Cooldown | %d Restricted\n",
+			totalAccounts, activeName, readyCnt, cooldownCnt, restrictedCnt)
+	}
+	fmt.Fprintf(stdout, "Strategy: %s\n", strat)
+
+	fmt.Fprintf(stdout, "\n")
+	if status == daemon.StatusRunningSameInstance {
+		if restrictedCnt > 0 || cooldownCnt > 0 {
+			fmt.Fprintf(stdout, "%s⚠ Degraded (%d restricted, %d cooling)%s\n", clrYellow, restrictedCnt, cooldownCnt, clrReset)
+		} else {
+			fmt.Fprintf(stdout, "%s✓ Healthy%s\n", clrGreen, clrReset)
+		}
+	} else if status == daemon.StatusStopped {
+		fmt.Fprintf(stdout, "%s○ Stopped%s\n", clrYellow, clrReset)
+	} else {
+		fmt.Fprintf(stdout, "%s⚠ %s%s\n", clrYellow, msg, clrReset)
+	}
 
 	return 0
 }

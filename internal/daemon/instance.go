@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
 )
@@ -76,6 +77,39 @@ func (ctx *InstanceContext) LocksDir() string {
 // LockFile returns the canonical path to a lock file in the instance locks directory.
 func (ctx *InstanceContext) LockFile(name string) string {
 	return filepath.Join(ctx.DataDir, "locks", name)
+}
+
+// RuntimeFile returns the canonical path to the instance runtime stats snapshot file.
+func (ctx *InstanceContext) RuntimeFile() string {
+	return filepath.Join(ctx.DataDir, "agy-pool-runtime.json")
+}
+
+// GetRuntimeStats attempts to read runtime stats for an instance, validating expected PID and freshness.
+func (ctx *InstanceContext) GetRuntimeStats(expectedPID int) (*RuntimeStats, error) {
+	stats, err := ReadRuntimeStats(ctx.RuntimeFile())
+	if err == nil && stats != nil {
+		if expectedPID > 0 && stats.PID != expectedPID {
+			return nil, fmt.Errorf("%w: stats PID %d != expected %d", ErrRuntimeStatsMismatch, stats.PID, expectedPID)
+		}
+		if time.Since(stats.UpdatedAt) > StaleRuntimeThreshold {
+			return nil, fmt.Errorf("%w: last update %v ago", ErrRuntimeStatsStale, time.Since(stats.UpdatedAt))
+		}
+		return stats, nil
+	}
+
+	// Fallback to DaemonInfo in PID file if available
+	info, pErr := ReadPIDFile(ctx.PIDFile())
+	if pErr == nil && info != nil && info.Runtime != nil {
+		if expectedPID > 0 && info.Runtime.PID != expectedPID {
+			return nil, fmt.Errorf("%w: pid info stats PID %d != expected %d", ErrRuntimeStatsMismatch, info.Runtime.PID, expectedPID)
+		}
+		return info.Runtime, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	return nil, ErrRuntimeStatsNotFound
 }
 
 // CanonicalizeDir resolves symlinks, relative components, and user home directory for a directory path.

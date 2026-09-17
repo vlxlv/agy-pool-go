@@ -71,6 +71,19 @@ func TestRunForeground_LifecycleAndGracefulShutdown(t *testing.T) {
 		t.Fatalf("expected PID %d, got %d", os.Getpid(), info.PID)
 	}
 
+	// 2b. Verify runtime stats file was written
+	runtimeFile := filepath.Join(tmpDir, "agy-pool-runtime.json")
+	stats, err := ReadRuntimeStats(runtimeFile)
+	if err != nil {
+		t.Fatalf("ReadRuntimeStats failed: %v", err)
+	}
+	if stats.PID != os.Getpid() {
+		t.Fatalf("expected runtime stats PID %d, got %d", os.Getpid(), stats.PID)
+	}
+	if stats.Goroutines <= 0 || stats.AllocBytes == 0 {
+		t.Fatalf("expected valid runtime stats, got: %+v", stats)
+	}
+
 	// 3. Verify concurrent start on same PID file fails
 	concurrentErr := RunForeground(ctx, ServerOptions{
 		Port:           0,
@@ -100,9 +113,12 @@ func TestRunForeground_LifecycleAndGracefulShutdown(t *testing.T) {
 		t.Fatalf("expected port %d to no longer be listening", boundPort)
 	}
 
-	// 6. Verify PID file was cleaned up
+	// 6. Verify PID file and runtime stats file were cleaned up
 	if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected PID file to be removed on clean exit")
+	}
+	if _, err := os.Stat(runtimeFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected runtime stats file to be removed on clean exit")
 	}
 }
 

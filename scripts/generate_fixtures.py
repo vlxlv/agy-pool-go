@@ -398,9 +398,9 @@ def main():
             "name": "status_summary",
             "args": ["status"],
             "exit_code": 0,
-            "stdout_contains": ["Gateway Proxy is"],
-            "stdout_contains_go": ["Listen :", "State  :"],
-            "stdout_not_contains_go": ["Gemini 5-Hour:"],
+            "stdout_contains": ["Gateway :"],
+            "stdout_contains_go": ["State   :", "Strategy:"],
+            "stdout_not_contains_go": ["Gemini 5-Hour:", "Gemini Weekly:"],
             "exempt_py_parity": True,
             "stderr_contains": []
         },

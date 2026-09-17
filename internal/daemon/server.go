@@ -110,6 +110,9 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	}
 
 	currentPID := os.Getpid()
+	startTime := time.Now()
+	initialStats := CollectRuntimeStats(currentPID, startTime)
+
 	pidInfo := DaemonInfo{
 		PID:         currentPID,
 		Version:     ctxInst.Version,
@@ -120,12 +123,19 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 		ListenHost:  ctxInst.ListenHost,
 		Listen:      ctxInst.ListenHost,
 		Port:        actualPort,
+		Runtime:     &initialStats,
 	}
 	if err := WritePIDFile(pidFile, pidInfo); err != nil {
 		return fmt.Errorf("failed to write pid file: %w", err)
 	}
 	defer func() {
 		_, _ = RemovePIDFileIfOwned(pidFile, currentPID)
+	}()
+
+	runtimeFile := ctxInst.RuntimeFile()
+	_ = WriteRuntimeStats(runtimeFile, initialStats)
+	defer func() {
+		_ = os.Remove(runtimeFile)
 	}()
 
 	// 4. Setup signal handling if not disabled
@@ -171,6 +181,23 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 		}
 	}()
 
+	// 5b. Start periodic runtime stats updater
+	runtimeTickerDone := make(chan struct{})
+	go func() {
+		defer close(runtimeTickerDone)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-serverCtx.Done():
+				return
+			case <-ticker.C:
+				currentStats := CollectRuntimeStats(currentPID, startTime)
+				_ = WriteRuntimeStats(runtimeFile, currentStats)
+			}
+		}
+	}()
+
 	// 6. Create HTTP server
 	server := &http.Server{
 		Handler: handler,
@@ -204,6 +231,7 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 		defer shutdownCancel()
 		_ = server.Shutdown(shutdownCtx)
 		<-refresherDone
+		<-runtimeTickerDone
 		return nil
 	}
 }

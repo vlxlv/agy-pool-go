@@ -51,7 +51,7 @@ func TestCLI_Status_MultiInstance(t *testing.T) {
 	if codeA != 0 {
 		t.Fatalf("expected 0, got %d", codeA)
 	}
-	if !strings.Contains(outA.String(), "Gateway Proxy is STOPPED") {
+	if !strings.Contains(outA.String(), "Gateway :") || !strings.Contains(outA.String(), "STOPPED") {
 		t.Fatalf("expected STOPPED for A, got: %s", outA.String())
 	}
 
@@ -60,7 +60,7 @@ func TestCLI_Status_MultiInstance(t *testing.T) {
 	if codeB != 0 {
 		t.Fatalf("expected 0, got %d", codeB)
 	}
-	if !strings.Contains(outB.String(), "Gateway Proxy is STOPPED") {
+	if !strings.Contains(outB.String(), "Gateway :") || !strings.Contains(outB.String(), "STOPPED") {
 		t.Fatalf("expected STOPPED for B, got: %s", outB.String())
 	}
 
@@ -90,7 +90,7 @@ func TestCLI_Status_MultiInstance(t *testing.T) {
 	if codeA != 0 {
 		t.Fatalf("expected 0, got %d", codeA)
 	}
-	if !strings.Contains(outA.String(), "Gateway Proxy is RUNNING") {
+	if !strings.Contains(outA.String(), "Gateway :") || !strings.Contains(outA.String(), "RUNNING") {
 		t.Fatalf("expected RUNNING for A, got: %s", outA.String())
 	}
 
@@ -101,7 +101,7 @@ func TestCLI_Status_MultiInstance(t *testing.T) {
 	if codeB != 0 {
 		t.Fatalf("expected 0, got %d", codeB)
 	}
-	if !strings.Contains(outB.String(), "Gateway Proxy is STOPPED") {
+	if !strings.Contains(outB.String(), "Gateway :") || !strings.Contains(outB.String(), "STOPPED") {
 		t.Fatalf("expected STOPPED for B while A is running, got: %s", outB.String())
 	}
 }

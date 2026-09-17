@@ -2,3 +2,4 @@ bin/
 /agy-pool
 *.tmp
 *.bak
+dist/

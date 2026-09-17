@@ -737,7 +737,11 @@ To prevent infinite loops where the wrapper executes itself:
 | `logs` | `log` | `[-n] [-f] [--clear] [--rotate]`| 0 | No | View, tail, clear, or rotate logs |
 | `run` | None | `[args...]` | Propagated | Indirect | Wrap and execute native `agy` |
 
-> **Note on CLI Command Separation**: In Go `agy-pool-go`, command responsibilities between `status`, `list`, and `quota` are intentionally decoupled from the legacy Python behavior to eliminate redundant output, avoid blocking network calls during status inspection, and preserve user privacy. `status` provides a local gateway and pool health summary without progress bars; `list` prints a fast, compact tabular account inventory (strictly protecting user identity); and `quota` provides the dedicated visual dashboard with progress bars and reset countdowns.
+> **Note on CLI Command Separation & Runtime Statistics**: In Go `agy-pool-go`, command responsibilities between `status`, `list`, `quota`, and `doctor` are intentionally decoupled from legacy Python behavior:
+> - `status`: Compact gateway and runtime summary only. Reads lightweight runtime snapshot metadata (daemon uptime, goroutine count, Alloc/Heap/Sys memory, GC cycles, Go version) recorded by the running daemon process (without calling CLI runtime stats), and pool health summary without progress bars.
+> - `list` (`ls`): Fast tabular account inventory (ID, friendly name, status, hits, cached 5H/weekly quota, last used) without network calls and strictly protecting user privacy (never printing email addresses).
+> - `quota`: Dedicated full quota dashboard with 68-column cards, progress bars, percentages, and reset countdowns.
+> - `doctor`: Comprehensive diagnostic suite covering locks, TLS, binary integrity, and database health.
 
 ---
 

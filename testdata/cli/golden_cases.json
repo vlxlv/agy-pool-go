@@ -50,14 +50,15 @@
     ],
     "exit_code": 0,
     "stdout_contains": [
-      "Gateway Proxy is"
+      "Gateway :"
     ],
     "stdout_contains_go": [
-      "Listen :",
-      "State  :"
+      "State   :",
+      "Strategy:"
     ],
     "stdout_not_contains_go": [
-      "Gemini 5-Hour:"
+      "Gemini 5-Hour:",
+      "Gemini Weekly:"
     ],
     "exempt_py_parity": true,
     "stderr_contains": []

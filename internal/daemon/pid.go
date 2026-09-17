@@ -27,15 +27,16 @@ var (
 
 // DaemonInfo represents the metadata written to agy-pool.pid matching Python v0.1.0-beta.2 schema.
 type DaemonInfo struct {
-	PID         int    `json:"pid"`
-	Version     string `json:"version,omitempty"`
-	ScriptMtime int64  `json:"script_mtime,omitempty"`
-	ConfigPath  string `json:"config_path,omitempty"`
-	ConfigHash  string `json:"config_hash,omitempty"`
-	DataDir     string `json:"data_dir,omitempty"`
-	ListenHost  string `json:"listen_host,omitempty"`
-	Listen      string `json:"listen,omitempty"`
-	Port        int    `json:"port,omitempty"`
+	PID         int           `json:"pid"`
+	Version     string        `json:"version,omitempty"`
+	ScriptMtime int64         `json:"script_mtime,omitempty"`
+	ConfigPath  string        `json:"config_path,omitempty"`
+	ConfigHash  string        `json:"config_hash,omitempty"`
+	DataDir     string        `json:"data_dir,omitempty"`
+	ListenHost  string        `json:"listen_host,omitempty"`
+	Listen      string        `json:"listen,omitempty"`
+	Port        int           `json:"port,omitempty"`
+	Runtime     *RuntimeStats `json:"runtime,omitempty"`
 }
 
 var (
