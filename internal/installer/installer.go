@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
@@ -188,44 +189,107 @@ func Install(opts Options) error {
 		return fmt.Errorf("failed to create target directory %s: %w", targetDir, err)
 	}
 
-	// 2. Install agy-pool binary
-	dstPool := filepath.Join(targetDir, "agy-pool")
-	if opts.SourceBinary != "" {
-		if err := CopyFile(opts.SourceBinary, dstPool); err != nil {
-			return fmt.Errorf("failed to copy binary to %s: %w", dstPool, err)
+	// 2. Stage files in temporary files inside targetDir to prevent partial installs
+	pid := os.Getpid()
+	tmpPool := filepath.Join(targetDir, fmt.Sprintf(".agy-pool.tmp.%d", pid))
+	tmpAgy := filepath.Join(targetDir, fmt.Sprintf(".agy.tmp.%d", pid))
+	tmpRaw := filepath.Join(targetDir, fmt.Sprintf(".agy-raw.tmp.%d", pid))
+	tmpOrig := filepath.Join(targetDir, fmt.Sprintf(".agy-orig.tmp.%d", pid))
+
+	staged := []string{}
+	cleanupStaged := func() {
+		for _, s := range staged {
+			_ = os.Remove(s)
 		}
 	}
 
-	// 3. Install thin agy shim
+	dstPool := filepath.Join(targetDir, "agy-pool")
+	if opts.SourceBinary != "" {
+		if err := config.AssertSafeDestructivePath(tmpPool); err != nil {
+			return err
+		}
+		if err := CopyFile(opts.SourceBinary, tmpPool); err != nil {
+			cleanupStaged()
+			return fmt.Errorf("failed to stage binary to %s: %w", tmpPool, err)
+		}
+		staged = append(staged, tmpPool)
+	}
+
 	dstAgy := filepath.Join(targetDir, "agy")
-	if err := config.AssertSafeDestructivePath(dstAgy); err != nil {
+	if err := config.AssertSafeDestructivePath(tmpAgy); err != nil {
+		cleanupStaged()
 		return err
 	}
 	agyContent := UserAgyShimContent
 	if opts.IsSystem {
 		agyContent = SystemAgyShimContent
 	}
-	if err := os.WriteFile(dstAgy, []byte(agyContent), 0755); err != nil {
-		return fmt.Errorf("failed to write agy shim: %w", err)
+	if err := os.WriteFile(tmpAgy, []byte(agyContent), 0755); err != nil {
+		cleanupStaged()
+		return fmt.Errorf("failed to stage agy shim: %w", err)
 	}
+	staged = append(staged, tmpAgy)
 
-	// 4. Install thin agy-raw shim
 	dstRaw := filepath.Join(targetDir, "agy-raw")
-	if err := config.AssertSafeDestructivePath(dstRaw); err != nil {
+	if err := config.AssertSafeDestructivePath(tmpRaw); err != nil {
+		cleanupStaged()
 		return err
 	}
-	if err := os.WriteFile(dstRaw, []byte(AgyRawShimContent), 0755); err != nil {
-		return fmt.Errorf("failed to write agy-raw script: %w", err)
+	if err := os.WriteFile(tmpRaw, []byte(AgyRawShimContent), 0755); err != nil {
+		cleanupStaged()
+		return fmt.Errorf("failed to stage agy-raw script: %w", err)
 	}
+	staged = append(staged, tmpRaw)
 
-	// 5. Install agy-orig symlink
 	dstOrig := filepath.Join(targetDir, "agy-orig")
+	if err := config.AssertSafeDestructivePath(tmpOrig); err != nil {
+		cleanupStaged()
+		return err
+	}
+	_ = os.Remove(tmpOrig)
+	if err := os.Symlink("agy-raw", tmpOrig); err != nil {
+		if err := os.WriteFile(tmpOrig, []byte(AgyRawShimContent), 0755); err != nil {
+			cleanupStaged()
+			return fmt.Errorf("failed to stage agy-orig shim: %w", err)
+		}
+	}
+	staged = append(staged, tmpOrig)
+
+	// Atomically publish staged files into place
+	if opts.SourceBinary != "" {
+		if err := config.AssertSafeDestructivePath(dstPool); err != nil {
+			cleanupStaged()
+			return err
+		}
+		if err := os.Rename(tmpPool, dstPool); err != nil {
+			cleanupStaged()
+			return fmt.Errorf("failed to publish binary to %s: %w", dstPool, err)
+		}
+	}
+	if err := config.AssertSafeDestructivePath(dstAgy); err != nil {
+		cleanupStaged()
+		return err
+	}
+	if err := os.Rename(tmpAgy, dstAgy); err != nil {
+		cleanupStaged()
+		return fmt.Errorf("failed to publish agy shim to %s: %w", dstAgy, err)
+	}
+	if err := config.AssertSafeDestructivePath(dstRaw); err != nil {
+		cleanupStaged()
+		return err
+	}
+	if err := os.Rename(tmpRaw, dstRaw); err != nil {
+		cleanupStaged()
+		return fmt.Errorf("failed to publish agy-raw script to %s: %w", dstRaw, err)
+	}
 	if err := config.AssertSafeDestructivePath(dstOrig); err != nil {
+		cleanupStaged()
 		return err
 	}
 	_ = os.Remove(dstOrig)
-	if err := os.Symlink("agy-raw", dstOrig); err != nil {
-		_ = os.WriteFile(dstOrig, []byte(AgyRawShimContent), 0755)
+	if err := os.Rename(tmpOrig, dstOrig); err != nil {
+		cleanupStaged()
+		return fmt.Errorf("failed to publish agy-orig to %s: %w", dstOrig, err)
 	}
 
 	// 6. Initialize default config and data directory layout
@@ -390,6 +454,111 @@ func RemoveAlias(rcPath string) error {
 	return os.WriteFile(rcPath, cleaned, 0644)
 }
 
+// SafeRemoveOwnedEntry removes an agy-pool owned file or symlink with strict ownership verification
+// and no-follow TOCTOU hardening.
+func SafeRemoveOwnedEntry(dir string, name string, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
+	fullPath := filepath.Join(dir, name)
+	if err := config.AssertSafeDestructivePath(fullPath); err != nil {
+		return err
+	}
+
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer dirFile.Close()
+	dirFd := int(dirFile.Fd())
+
+	st, err := os.Lstat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	// 1. If symlink, ensure no-follow and verify ownership
+	if st.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(fullPath)
+		if err != nil {
+			return err
+		}
+		if name == "agy-orig" {
+			if target != "agy-raw" && !strings.HasSuffix(target, "/agy-raw") {
+				fmt.Fprintf(out, "Refusing to delete symlink %s: target is not agy-raw (points to %q)\n", fullPath, target)
+				return nil
+			}
+		} else {
+			if !strings.Contains(target, "agy-pool") && !strings.Contains(target, "agy-raw") {
+				fmt.Fprintf(out, "Refusing to delete symlink %s: unverified target %q\n", fullPath, target)
+				return nil
+			}
+		}
+		return syscall.Unlinkat(dirFd, name)
+	}
+
+	// 2. Reject non-regular files (directories, sockets, devices)
+	if !st.Mode().IsRegular() {
+		fmt.Fprintf(out, "Refusing to delete %s: not a regular file or symlink (mode: %v)\n", fullPath, st.Mode())
+		return nil
+	}
+
+	// 3. Regular file: open with O_NOFOLLOW to avoid symlink swap race
+	fd, err := syscall.Openat(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			fmt.Fprintf(out, "Refusing to delete %s: symlink race detected (O_NOFOLLOW failed)\n", fullPath)
+			return nil
+		}
+		return err
+	}
+	defer syscall.Close(fd)
+
+	var fdSt syscall.Stat_t
+	if err := syscall.Fstat(fd, &fdSt); err != nil {
+		return err
+	}
+	if sysSt, ok := st.Sys().(*syscall.Stat_t); ok {
+		if fdSt.Ino != sysSt.Ino || fdSt.Dev != sysSt.Dev {
+			fmt.Fprintf(out, "Refusing to delete %s: file replaced during validation (TOCTOU detected)\n", fullPath)
+			return nil
+		}
+	}
+
+	// 4. Validate ownership
+	if name == "agy-pool" {
+		nativeAgy := diagnostics.FindRealAgyBinary()
+		if nativeAgy != "" {
+			if nativeFi, err := os.Stat(nativeAgy); err == nil {
+				if sysSt, ok := nativeFi.Sys().(*syscall.Stat_t); ok {
+					if sysSt.Ino == fdSt.Ino && sysSt.Dev == fdSt.Dev {
+						fmt.Fprintf(out, "CRITICAL: Refusing to delete %s: hard-linked to native agy!\n", fullPath)
+						return nil
+					}
+				}
+			}
+		}
+	} else {
+		// Shims (agy, agy-raw, agy-orig): verify exact ownership marker
+		buf := make([]byte, 1024)
+		n, _ := syscall.Read(fd, buf)
+		header := string(buf[:n])
+		if !strings.Contains(header, ManagedShimMarker) && !strings.Contains(header, MarkerStart) {
+			fmt.Fprintf(out, "Refusing to delete unowned file %s: missing agy-pool ownership marker\n", fullPath)
+			return nil
+		}
+	}
+
+	// 5. Unlink verified regular file directly via parent dir fd
+	return syscall.Unlinkat(dirFd, name)
+}
+
 // Uninstall cleans up installed binaries, symlinks, and aliases while preserving user data.
 func Uninstall(opts Options) error {
 	roots := GetInstallerRoots()
@@ -420,25 +589,19 @@ func Uninstall(opts Options) error {
 		return err
 	}
 
-	// 1. Remove executables and symlinks from targetDir ONLY
-	for _, name := range []string{"agy-pool", "agy-raw", "agy-orig"} {
-		p := filepath.Join(targetDir, name)
-		if err := config.AssertSafeDestructivePath(p); err != nil {
-			return err
-		}
-		_ = os.Remove(p)
+	out := opts.Stdout
+	if out == nil {
+		out = io.Discard
 	}
 
-	// 2. Remove agy shim ONLY if it is an agy-pool shim (never delete native agy!)
-	agyPath := filepath.Join(targetDir, "agy")
-	if diagnostics.IsShimOrSelf(agyPath) {
-		if err := config.AssertSafeDestructivePath(agyPath); err != nil {
-			return err
+	// 1. Remove owned shims and binaries using SafeRemoveOwnedEntry
+	for _, name := range []string{"agy", "agy-raw", "agy-orig", "agy-pool"} {
+		if err := SafeRemoveOwnedEntry(targetDir, name, out); err != nil {
+			return fmt.Errorf("failed to safely remove %s: %w", name, err)
 		}
-		_ = os.Remove(agyPath)
 	}
 
-	// 3. Clean legacy shell rc files ONLY if explicitly requested
+	// 2. Clean legacy shell rc files ONLY if explicitly requested
 	if opts.CleanLegacyRC && home != "" {
 		for _, rc := range []string{filepath.Join(home, ".bashrc"), filepath.Join(home, ".zshrc")} {
 			if _, err := os.Stat(rc); err == nil {
