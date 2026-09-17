@@ -32,6 +32,9 @@ func resetProviders() {
 	LogRotator = nil
 	NowFunc = time.Now
 	LogWriter = io.Discard
+	HTTPClient = defaultHTTPClient
+	GenerationClient = defaultGenerationClient
+	RoundTripHook = nil
 }
 
 func TestHopByHopHeaders(t *testing.T) {
