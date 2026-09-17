@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 )
@@ -500,7 +502,7 @@ func SafeRemoveOwnedEntry(dir string, name string, out io.Writer) error {
 				return nil
 			}
 		}
-		return syscall.Unlinkat(dirFd, name)
+		return unix.Unlinkat(dirFd, name, 0)
 	}
 
 	// 2. Reject non-regular files (directories, sockets, devices)
@@ -510,22 +512,22 @@ func SafeRemoveOwnedEntry(dir string, name string, out io.Writer) error {
 	}
 
 	// 3. Regular file: open with O_NOFOLLOW to avoid symlink swap race
-	fd, err := syscall.Openat(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(dirFd, name, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
+		if errors.Is(err, unix.ELOOP) {
 			fmt.Fprintf(out, "Refusing to delete %s: symlink race detected (O_NOFOLLOW failed)\n", fullPath)
 			return nil
 		}
 		return err
 	}
-	defer syscall.Close(fd)
+	defer unix.Close(fd)
 
-	var fdSt syscall.Stat_t
-	if err := syscall.Fstat(fd, &fdSt); err != nil {
+	var fdSt unix.Stat_t
+	if err := unix.Fstat(fd, &fdSt); err != nil {
 		return err
 	}
 	if sysSt, ok := st.Sys().(*syscall.Stat_t); ok {
-		if fdSt.Ino != sysSt.Ino || fdSt.Dev != sysSt.Dev {
+		if uint64(fdSt.Ino) != uint64(sysSt.Ino) || uint64(fdSt.Dev) != uint64(sysSt.Dev) {
 			fmt.Fprintf(out, "Refusing to delete %s: file replaced during validation (TOCTOU detected)\n", fullPath)
 			return nil
 		}
@@ -537,7 +539,7 @@ func SafeRemoveOwnedEntry(dir string, name string, out io.Writer) error {
 		if nativeAgy != "" {
 			if nativeFi, err := os.Stat(nativeAgy); err == nil {
 				if sysSt, ok := nativeFi.Sys().(*syscall.Stat_t); ok {
-					if sysSt.Ino == fdSt.Ino && sysSt.Dev == fdSt.Dev {
+					if uint64(sysSt.Ino) == uint64(fdSt.Ino) && uint64(sysSt.Dev) == uint64(fdSt.Dev) {
 						fmt.Fprintf(out, "CRITICAL: Refusing to delete %s: hard-linked to native agy!\n", fullPath)
 						return nil
 					}
@@ -547,7 +549,7 @@ func SafeRemoveOwnedEntry(dir string, name string, out io.Writer) error {
 	} else {
 		// Shims (agy, agy-raw, agy-orig): verify exact ownership marker
 		buf := make([]byte, 1024)
-		n, _ := syscall.Read(fd, buf)
+		n, _ := unix.Read(fd, buf)
 		header := string(buf[:n])
 		if !strings.Contains(header, ManagedShimMarker) && !strings.Contains(header, MarkerStart) {
 			fmt.Fprintf(out, "Refusing to delete unowned file %s: missing agy-pool ownership marker\n", fullPath)
@@ -556,7 +558,7 @@ func SafeRemoveOwnedEntry(dir string, name string, out io.Writer) error {
 	}
 
 	// 5. Unlink verified regular file directly via parent dir fd
-	return syscall.Unlinkat(dirFd, name)
+	return unix.Unlinkat(dirFd, name, 0)
 }
 
 // Uninstall cleans up installed binaries, symlinks, and aliases while preserving user data.

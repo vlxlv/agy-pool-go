@@ -59,10 +59,27 @@ func TestCrypto_CrossLanguageRoundtrip(t *testing.T) {
 		t.Fatalf("Go self-roundtrip failed: got %q, want %q", decryptedGo, plaintext)
 	}
 
-	// Verify Python can decrypt Go's bundle if python3 is available
+	// Verify Python can decrypt Go's bundle if python3 and Python reference repo are available
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not found, skipping Python cross-check")
+	}
+
+	pyRepo := os.Getenv("PYTHON_REFERENCE")
+	if pyRepo == "" {
+		pyRepo = os.Getenv("AGY_PYTHON_ROOT")
+	}
+	if pyRepo == "" {
+		cand := "/home/codex/agy-pool"
+		if st, err := os.Stat(cand); err == nil && st.IsDir() {
+			pyRepo = cand
+		}
+	}
+	if pyRepo == "" {
+		t.Skip("Python reference repository not found, skipping live cross-check")
+	}
+	if st, err := os.Stat(pyRepo); err != nil || !st.IsDir() {
+		t.Skip("Python reference repository not found, skipping live cross-check")
 	}
 
 	bundleBytes, err := json.Marshal(bundle)
@@ -81,7 +98,7 @@ sys.stdout.write(plaintext.decode("utf-8"))
 `, string(bundleBytes), password)
 
 	// Set PYTHONPATH to repo root to find agy_pool
-	cmd.Env = append(os.Environ(), "PYTHONPATH=/home/codex/agy-pool")
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+pyRepo)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Python failed to decrypt Go bundle: %v, output: %s", err, string(out))

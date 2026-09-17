@@ -1,5 +1,25 @@
+# Binaries
 bin/
-/agy-pool
+dist/
+agy-pool
+agy-pool-*
+
+# Test and runtime databases
+*.db
+*.db-shm
+*.db-wal
+
+# Temporary and backup files
 *.tmp
 *.bak
-dist/
+*.swp
+*~
+
+# Runtime artifacts and logs
+*.log
+*.pid
+agy-pool-runtime.json
+
+# Coverage profiles
+*.out
+coverage.html
