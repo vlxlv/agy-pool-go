@@ -347,3 +347,27 @@ func TestNativeAgyResolverAndReadPathGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigExampleJsonValidation(t *testing.T) {
+	examplePath := filepath.Join("..", "..", "config.example.json")
+	cfg, err := LoadConfigFile(examplePath)
+	if err != nil {
+		t.Fatalf("failed to load and validate config.example.json: %v", err)
+	}
+
+	if cfg.Version != 1 {
+		t.Errorf("expected version 1, got %d", cfg.Version)
+	}
+	if cfg.Server.Listen != "127.0.0.1" || cfg.Server.Port != 8899 {
+		t.Errorf("unexpected server config: %+v", cfg.Server)
+	}
+	if cfg.Scheduler.Strategy != StrategyMaxQuota {
+		t.Errorf("unexpected scheduler strategy: %s", cfg.Scheduler.Strategy)
+	}
+	if cfg.NativeAgy.Binary != nil {
+		t.Errorf("expected native_agy.binary to be null, got %v", *cfg.NativeAgy.Binary)
+	}
+	if cfg.Logging.MaxSizeBytes != DefaultMaxLogBytes || cfg.Logging.BackupCount != DefaultBackupLogCount {
+		t.Errorf("unexpected logging config: %+v", cfg.Logging)
+	}
+}

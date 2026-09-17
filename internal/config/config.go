@@ -141,6 +141,7 @@ func GetRealHostUserHome() string {
 func SetSyntheticSandboxRoot(root string) func() {
 	syntheticSandboxMu.Lock()
 	orig := syntheticSandboxRoot
+	origEnv := os.Getenv("AGY_SANDBOX_DIR")
 	if root != "" {
 		abs, err := filepath.Abs(root)
 		if err == nil {
@@ -152,14 +153,21 @@ func SetSyntheticSandboxRoot(root string) func() {
 		} else {
 			syntheticSandboxRoot = filepath.Clean(root)
 		}
+		_ = os.Setenv("AGY_SANDBOX_DIR", syntheticSandboxRoot)
 	} else {
 		syntheticSandboxRoot = ""
+		_ = os.Unsetenv("AGY_SANDBOX_DIR")
 	}
 	syntheticSandboxMu.Unlock()
 
 	return func() {
 		syntheticSandboxMu.Lock()
 		syntheticSandboxRoot = orig
+		if origEnv != "" {
+			_ = os.Setenv("AGY_SANDBOX_DIR", origEnv)
+		} else {
+			_ = os.Unsetenv("AGY_SANDBOX_DIR")
+		}
 		syntheticSandboxMu.Unlock()
 	}
 }
@@ -168,7 +176,10 @@ func SetSyntheticSandboxRoot(root string) func() {
 func GetSyntheticSandboxRoot() string {
 	syntheticSandboxMu.RLock()
 	defer syntheticSandboxMu.RUnlock()
-	return syntheticSandboxRoot
+	if syntheticSandboxRoot != "" {
+		return syntheticSandboxRoot
+	}
+	return os.Getenv("AGY_SANDBOX_DIR")
 }
 
 func initForbiddenPaths() {

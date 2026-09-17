@@ -59,6 +59,75 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o di
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/agy-pool-darwin-arm64 ./cmd/agy-pool
 ```
 
+### Installation & Native `agy` Integration
+
+To install `agy-pool` and set up transparent integration with native Antigravity CLI:
+
+```bash
+# User-mode installation (recommended)
+./bin/agy-pool install
+
+# Or system-mode installation
+sudo ./bin/agy-pool install --system
+```
+
+#### Intended User Experience
+
+Once installed, **normal operation requires zero special flags, aliases, or manual environment exports**:
+
+```bash
+# Normal use: automatically routes through agy-pool quota load balancing
+agy -p "explain this code"
+agy -c
+agy --mode accept-edits --dangerously-skip-permissions
+```
+
+To bypass the pool and execute native Antigravity directly against upstream Google:
+
+```bash
+# Explicit bypass: routes directly to native Antigravity without agy-pool
+agy-raw -p "direct prompt"
+
+# Or using the agy-orig alias
+agy-orig -p "direct prompt"
+```
+
+#### Managed Installation Layout
+
+The installer establishes a deterministic, robust layout:
+
+| Path | Description |
+|------|-------------|
+| `~/.local/bin/agy-pool` | Go `agy-pool` binary |
+| `~/.local/bin/agy` | Thin POSIX managed shim (default entrypoint invoking `agy-pool run`) |
+| `~/.local/bin/agy-raw` | Managed shim executing direct native bypass via `agy-pool raw` |
+| `~/.local/bin/agy-orig` | Symlink alias to `agy-raw` |
+| `~/.local/libexec/agy-pool/agy-native` | Preserved real native Antigravity executable |
+| `~/.config/agy-pool/config.json` | Static configuration (see tracked [`config.example.json`](config.example.json)) |
+| `~/.local/share/agy-pool/state.db` | Authoritative dynamic account pool state database |
+
+The installer safely validates and preserves the native `agy` binary into `~/.local/libexec/agy-pool/agy-native` before publishing or updating the entrypoint shim. It never overwrites the only copy of native `agy`.
+
+#### Official `agy` Upgrades & Repair Workflow
+
+If an official Google Antigravity update overwrites `~/.local/bin/agy` with a new native ELF binary:
+
+1. Running `agy-pool doctor` will detect that `~/.local/bin/agy` is a native binary bypassing the pool.
+2. Re-running `agy-pool install` repairs the integration:
+   - Detects the new native binary at `~/.local/bin/agy`.
+   - Atomically updates `~/.local/libexec/agy-pool/agy-native` with the upgraded binary.
+   - Restores the managed shim at `~/.local/bin/agy`.
+
+#### Uninstallation
+
+To remove `agy-pool` integration:
+
+```bash
+agy-pool uninstall
+```
+
+Uninstall safely removes `agy-pool`-owned shims (`agy`, `agy-raw`, `agy-orig`), the `agy-pool` binary, and the managed native copy in `libexec/agy-pool`, while leaving any external native binaries completely untouched.
+
 ---
 
 ## Testing & Verification

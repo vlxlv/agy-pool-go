@@ -521,3 +521,125 @@ echo "native agy 2.5.0"
 		t.Fatalf("legitimate script was falsely rejected: %v", err)
 	}
 }
+
+func TestDiscovery_ManagedNativePrecedence(t *testing.T) {
+	tempDir, cleanup := setupDoctorTestEnv(t)
+	defer cleanup()
+
+	userDir := filepath.Join(tempDir, "user")
+	managedDir := filepath.Join(userDir, ".local", "libexec", "agy-pool")
+	_ = os.MkdirAll(managedDir, 0755)
+	managedAgy := filepath.Join(managedDir, "agy-native")
+	_ = os.WriteFile(managedAgy, []byte("#!/bin/sh\necho managed\n"), 0755)
+
+	pathDir := filepath.Join(tempDir, "path")
+	_ = os.MkdirAll(pathDir, 0755)
+	pathAgy := filepath.Join(pathDir, "agy")
+	_ = os.WriteFile(pathAgy, []byte("#!/bin/sh\necho path\n"), 0755)
+
+	t.Setenv("HOME", userDir)
+	t.Setenv("PATH", pathDir)
+
+	// 1. Managed native wins over PATH
+	p, src, err := ResolveNativeAgyBinary()
+	if err != nil || p != managedAgy || src != SourceManaged {
+		t.Fatalf("expected managed native to win: p=%q, src=%q, err=%v", p, src, err)
+	}
+
+	// 2. Config native_agy.binary wins over managed native
+	overrideDir := filepath.Join(tempDir, "override")
+	_ = os.MkdirAll(overrideDir, 0755)
+	configAgy := filepath.Join(overrideDir, "config-agy")
+	_ = os.WriteFile(configAgy, []byte("#!/bin/sh\necho config\n"), 0755)
+
+	origCfg := config.GetStaticConfig()
+	mockCfg := *origCfg
+	mockCfg.NativeAgy.Binary = &configAgy
+	config.SetStaticConfig(&mockCfg)
+	defer config.SetStaticConfig(origCfg)
+
+	p, src, err = ResolveNativeAgyBinary()
+	if err != nil || p != configAgy || src != SourceConfig {
+		t.Fatalf("expected config native_agy.binary to win over managed: p=%q, src=%q, err=%v", p, src, err)
+	}
+
+	// 3. AGY_BIN wins over config and managed native
+	overrideAgy := filepath.Join(overrideDir, "env-agy")
+	_ = os.WriteFile(overrideAgy, []byte("#!/bin/sh\necho env\n"), 0755)
+	t.Setenv("AGY_BIN", overrideAgy)
+
+	p, src, err = ResolveNativeAgyBinary()
+	if err != nil || p != overrideAgy || src != SourceEnvAgyBin {
+		t.Fatalf("expected AGY_BIN to win over all: p=%q, src=%q, err=%v", p, src, err)
+	}
+}
+
+func TestDoctor_NativeIntegrationDiagnostics(t *testing.T) {
+	tempDir, cleanup := setupDoctorTestEnv(t)
+	defer cleanup()
+
+	userDir := filepath.Join(tempDir, "user")
+	binDir := filepath.Join(userDir, ".local", "bin")
+	libexecDir := filepath.Join(userDir, ".local", "libexec", "agy-pool")
+	_ = os.MkdirAll(binDir, 0755)
+	_ = os.MkdirAll(libexecDir, 0755)
+
+	entryAgy := filepath.Join(binDir, "agy")
+	managedNative := filepath.Join(libexecDir, "agy-native")
+
+	emptyBin := filepath.Join(tempDir, "empty_bin")
+	_ = os.MkdirAll(emptyBin, 0755)
+	t.Setenv("PATH", emptyBin)
+	t.Setenv("HOME", userDir)
+	SetAgyEntrypointFinder(func() string { return entryAgy })
+	defer SetAgyEntrypointFinder(nil)
+	SetTLSProber(func(host string, timeout time.Duration) error { return nil })
+
+	// Case 1: Healthy layout - entrypoint is managed shim, managed native is valid
+	shimContent := "#!/bin/sh\n# agy-pool managed shim v1\nexec agy-pool run -- \"$@\"\n"
+	_ = os.WriteFile(entryAgy, []byte(shimContent), 0755)
+	_ = os.WriteFile(managedNative, []byte("#!/bin/sh\necho '1.2.3'\n"), 0755)
+
+	var buf bytes.Buffer
+	ok := RunDoctor(&buf)
+	if !ok {
+		t.Fatalf("expected doctor to succeed on healthy layout, got false. Output:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "managed shim ->") {
+		t.Errorf("expected healthy managed shim message, got:\n%s", buf.String())
+	}
+
+	// Case 2: Broken layout - entrypoint is a native binary bypassing agy-pool
+	_ = os.WriteFile(entryAgy, []byte("#!/bin/sh\necho 'native bypass binary'\n"), 0755)
+	buf.Reset()
+	ok = RunDoctor(&buf)
+	if ok {
+		t.Fatalf("expected doctor to fail when entrypoint is native binary bypassing agy-pool")
+	}
+	if !strings.Contains(buf.String(), "is a native binary bypassing agy-pool") {
+		t.Errorf("expected native binary bypass warning, got:\n%s", buf.String())
+	}
+
+	// Case 3: Broken layout - entrypoint is managed shim, but managed native is missing
+	_ = os.WriteFile(entryAgy, []byte(shimContent), 0755)
+	_ = os.Remove(managedNative)
+	buf.Reset()
+	ok = RunDoctor(&buf)
+	if ok {
+		t.Fatalf("expected doctor to fail when managed shim exists but native binary missing")
+	}
+	if !strings.Contains(buf.String(), "managed native agy is missing") && !strings.Contains(buf.String(), "no valid native agy can be resolved") {
+		t.Errorf("expected missing native agy warning, got:\n%s", buf.String())
+	}
+
+	// Case 4: Broken layout - managed native resolves to shim or self
+	_ = os.WriteFile(managedNative, []byte(shimContent), 0755)
+	buf.Reset()
+	ok = RunDoctor(&buf)
+	if ok {
+		t.Fatalf("expected doctor to fail when managed native resolves to shim/self")
+	}
+	if !strings.Contains(buf.String(), "resolves to shim/self") {
+		t.Errorf("expected shim/self warning, got:\n%s", buf.String())
+	}
+}

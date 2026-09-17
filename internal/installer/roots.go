@@ -14,6 +14,7 @@ type InstallerRoots struct {
 	BinDir     string
 	ConfigDir  string
 	DataDir    string
+	LibexecDir string
 	SystemRoot string
 }
 
@@ -58,6 +59,7 @@ func GetInstallerRoots() InstallerRoots {
 			BinDir:     filepath.Join(testHome, ".local", "bin"),
 			ConfigDir:  filepath.Join(testHome, ".config", "agy-pool"),
 			DataDir:    filepath.Join(testHome, ".local", "share", "agy-pool"),
+			LibexecDir: filepath.Join(testHome, ".local", "libexec", "agy-pool"),
 			SystemRoot: filepath.Join(sandbox, "test_system"),
 		}
 	}
@@ -71,6 +73,7 @@ func GetInstallerRoots() InstallerRoots {
 		BinDir:     filepath.Join(home, ".local", "bin"),
 		ConfigDir:  filepath.Join(home, ".config", "agy-pool"),
 		DataDir:    filepath.Join(home, ".local", "share", "agy-pool"),
+		LibexecDir: filepath.Join(home, ".local", "libexec", "agy-pool"),
 		SystemRoot: "",
 	}
 }

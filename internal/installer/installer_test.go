@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 )
 
 func setupInstallerTestEnv(t *testing.T) (string, func()) {
@@ -382,5 +383,192 @@ func TestUninstall_LegacyRCOptInCleanup(t *testing.T) {
 	expectedContent := surroundingPrefix + surroundingSuffix
 	if !bytes.Equal(cleanedBashrc, []byte(expectedContent)) {
 		t.Fatalf("expected exact byte-preserving cleanup.\nGot:\n%q\nExpected:\n%q", string(cleanedBashrc), expectedContent)
+	}
+}
+
+func TestInstall_NativePreservationBeforeShimPublication(t *testing.T) {
+	tempDir, cleanup := setupInstallerTestEnv(t)
+	defer cleanup()
+
+	fakeHome := filepath.Join(tempDir, "fakehome")
+	targetDir := filepath.Join(fakeHome, ".local", "bin")
+	libexecDir := filepath.Join(fakeHome, ".local", "libexec", "agy-pool")
+	_ = os.MkdirAll(targetDir, 0755)
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("PATH", targetDir)
+
+	// Target directory initially contains the real native agy ELF executable
+	initialTargetAgy := filepath.Join(targetDir, "agy")
+	nativeContent := "#!/bin/sh\necho 'real native agy v1.2.3'\n"
+	if err := os.WriteFile(initialTargetAgy, []byte(nativeContent), 0755); err != nil {
+		t.Fatalf("failed to write initial target agy: %v", err)
+	}
+
+	srcBin := filepath.Join(tempDir, "built-agy-pool")
+	_ = os.WriteFile(srcBin, []byte("#!/bin/sh\necho agy-pool\n"), 0755)
+
+	opts := Options{
+		SourceBinary: srcBin,
+		TargetDir:    targetDir,
+		HomeDir:      fakeHome,
+	}
+
+	// Install must discover target agy, preserve it to libexec, and then publish shim
+	if err := Install(opts); err != nil {
+		t.Fatalf("Install failed: %v", err)
+	}
+
+	// 1. Managed native binary exists and contains the exact original content
+	managedNative := filepath.Join(libexecDir, "agy-native")
+	preservedContent, err := os.ReadFile(managedNative)
+	if err != nil {
+		t.Fatalf("expected managed native at %s, got error: %v", managedNative, err)
+	}
+	if string(preservedContent) != nativeContent {
+		t.Fatalf("preserved native content mismatch.\nGot: %q\nExpected: %q", string(preservedContent), nativeContent)
+	}
+
+	// 2. Target agy is now the managed shim
+	shimBytes, err := os.ReadFile(initialTargetAgy)
+	if err != nil {
+		t.Fatalf("failed to read installed agy shim: %v", err)
+	}
+	if !strings.Contains(string(shimBytes), ManagedShimMarker) {
+		t.Errorf("installed agy is not a managed shim: %s", string(shimBytes))
+	}
+	if !strings.Contains(string(shimBytes), "agy-pool run") {
+		t.Errorf("installed agy shim does not invoke agy-pool run: %s", string(shimBytes))
+	}
+
+	// 3. Managed native path is resolvable by diagnostics resolver
+	resolved, src, err := diagnostics.ResolveNativeAgyBinary()
+	if err != nil {
+		t.Fatalf("failed to resolve native agy after install: %v", err)
+	}
+	if resolved != managedNative || src != diagnostics.SourceManaged {
+		t.Errorf("expected resolver to find managed native %q with source %q, got %q (%q)",
+			managedNative, diagnostics.SourceManaged, resolved, src)
+	}
+
+	// 4. agy shim is rejected as native candidate
+	if err := diagnostics.ValidateNativeCandidate(initialTargetAgy); err == nil {
+		t.Errorf("expected agy shim to be rejected by ValidateNativeCandidate, got nil")
+	}
+}
+
+func TestInstall_ReinstallAndOfficialUpgradeRefresh(t *testing.T) {
+	tempDir, cleanup := setupInstallerTestEnv(t)
+	defer cleanup()
+
+	fakeHome := filepath.Join(tempDir, "fakehome")
+	targetDir := filepath.Join(fakeHome, ".local", "bin")
+	libexecDir := filepath.Join(fakeHome, ".local", "libexec", "agy-pool")
+	_ = os.MkdirAll(targetDir, 0755)
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("PATH", targetDir)
+
+	targetAgy := filepath.Join(targetDir, "agy")
+	managedNative := filepath.Join(libexecDir, "agy-native")
+
+	// Phase 1: First install preserves native agy v1
+	v1Content := "#!/bin/sh\necho 'native agy v1'\n"
+	_ = os.WriteFile(targetAgy, []byte(v1Content), 0755)
+
+	srcBin := filepath.Join(tempDir, "built-agy-pool")
+	_ = os.WriteFile(srcBin, []byte("#!/bin/sh\necho agy-pool\n"), 0755)
+
+	opts := Options{
+		SourceBinary: srcBin,
+		TargetDir:    targetDir,
+		HomeDir:      fakeHome,
+	}
+
+	if err := Install(opts); err != nil {
+		t.Fatalf("Phase 1 Install failed: %v", err)
+	}
+
+	// Phase 2: Reinstall when agy is already shim retains existing managed native
+	if err := Install(opts); err != nil {
+		t.Fatalf("Phase 2 Reinstall failed: %v", err)
+	}
+	content, _ := os.ReadFile(managedNative)
+	if string(content) != v1Content {
+		t.Fatalf("reinstall corrupted managed native content: %s", string(content))
+	}
+
+	// Phase 3: Official agy installer overwrites targetDir/agy with new native ELF v2
+	v2Content := "#!/bin/sh\necho 'native agy v2 - upgraded by Google'\n"
+	_ = os.WriteFile(targetAgy, []byte(v2Content), 0755)
+
+	// agy-pool install should detect new native ELF, refresh managed native, and restore shim
+	if err := Install(opts); err != nil {
+		t.Fatalf("Phase 3 Install failed: %v", err)
+	}
+
+	refreshedContent, err := os.ReadFile(managedNative)
+	if err != nil {
+		t.Fatalf("failed to read refreshed managed native: %v", err)
+	}
+	if string(refreshedContent) != v2Content {
+		t.Fatalf("expected managed native to be refreshed to v2 content.\nGot: %q\nExpected: %q",
+			string(refreshedContent), v2Content)
+	}
+
+	restoredShim, _ := os.ReadFile(targetAgy)
+	if !strings.Contains(string(restoredShim), ManagedShimMarker) {
+		t.Fatalf("target agy was not restored to managed shim after official upgrade repair")
+	}
+}
+
+func TestUninstall_RemovesManagedNativeWithoutDeletingExternalBinary(t *testing.T) {
+	tempDir, cleanup := setupInstallerTestEnv(t)
+	defer cleanup()
+
+	fakeHome := filepath.Join(tempDir, "fakehome")
+	targetDir := filepath.Join(fakeHome, ".local", "bin")
+	libexecDir := filepath.Join(fakeHome, ".local", "libexec", "agy-pool")
+	_ = os.MkdirAll(targetDir, 0755)
+
+	// User has an external native agy binary in custom dir
+	externalDir := filepath.Join(tempDir, "external_bin")
+	_ = os.MkdirAll(externalDir, 0755)
+	externalAgy := filepath.Join(externalDir, "agy")
+	externalContent := "#!/bin/sh\necho 'external native agy'\n"
+	_ = os.WriteFile(externalAgy, []byte(externalContent), 0755)
+
+	opts := Options{
+		TargetDir:     targetDir,
+		HomeDir:       fakeHome,
+		NativeAgyPath: externalAgy,
+	}
+
+	if err := Install(opts); err != nil {
+		t.Fatalf("Install failed: %v", err)
+	}
+
+	managedNative := filepath.Join(libexecDir, "agy-native")
+	if _, err := os.Stat(managedNative); err != nil {
+		t.Fatalf("expected managed native at %s, got: %v", managedNative, err)
+	}
+
+	// Run Uninstall
+	if err := Uninstall(opts); err != nil {
+		t.Fatalf("Uninstall failed: %v", err)
+	}
+
+	// Managed native binary must be removed
+	if _, err := os.Stat(managedNative); !os.IsNotExist(err) {
+		t.Errorf("expected managed native %s to be removed on uninstall", managedNative)
+	}
+
+	// External native agy must remain completely untouched!
+	extData, err := os.ReadFile(externalAgy)
+	if err != nil {
+		t.Fatalf("CRITICAL DEFECT: external native agy was deleted or became unreadable: %v", err)
+	}
+	if string(extData) != externalContent {
+		t.Fatalf("CRITICAL DEFECT: external native agy was modified during uninstall")
 	}
 }

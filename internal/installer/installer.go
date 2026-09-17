@@ -83,6 +83,79 @@ func DetermineTargetDir(prefix, home string, isUsrLocalWritable func() bool) str
 	return roots.BinDir
 }
 
+// DetermineManagedNativePath returns the deterministic path for the preserved native agy binary.
+// In user mode: <home>/.local/libexec/agy-pool/agy-native (or derived from targetDir).
+// In system mode: /usr/local/libexec/agy-pool/agy-native (or roots.SystemRoot equivalent).
+func DetermineManagedNativePath(targetDir string, isSystem bool) string {
+	roots := GetInstallerRoots()
+	if isSystem {
+		if roots.SystemRoot != "" {
+			return filepath.Join(roots.SystemRoot, "usr", "local", "libexec", "agy-pool", "agy-native")
+		}
+		if targetDir != "" && filepath.Base(targetDir) == "bin" {
+			return filepath.Join(filepath.Dir(targetDir), "libexec", "agy-pool", "agy-native")
+		}
+		return "/usr/local/libexec/agy-pool/agy-native"
+	}
+	if targetDir != "" {
+		if filepath.Base(targetDir) == "bin" {
+			return filepath.Join(filepath.Dir(targetDir), "libexec", "agy-pool", "agy-native")
+		}
+		return filepath.Join(targetDir, "libexec", "agy-pool", "agy-native")
+	}
+	if roots.LibexecDir != "" {
+		return filepath.Join(roots.LibexecDir, "agy-native")
+	}
+	return filepath.Join(roots.UserHome, ".local", "libexec", "agy-pool", "agy-native")
+}
+
+// RemoveManagedNativeCopy safely removes the preserved native agy binary from libexec/agy-pool
+// with strict ownership and directory layout verification.
+func RemoveManagedNativeCopy(managedNative string, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
+	if managedNative == "" {
+		return nil
+	}
+	if err := config.AssertSafeDestructivePath(managedNative); err != nil {
+		return err
+	}
+
+	// Layout validation: must strictly be .../libexec/agy-pool/agy-native
+	if filepath.Base(managedNative) != "agy-native" {
+		return fmt.Errorf("refusing to remove non-native path %s", managedNative)
+	}
+	managedDir := filepath.Dir(managedNative)
+	if filepath.Base(managedDir) != "agy-pool" {
+		return fmt.Errorf("refusing to remove native copy outside agy-pool directory: %s", managedNative)
+	}
+	if filepath.Base(filepath.Dir(managedDir)) != "libexec" {
+		return fmt.Errorf("refusing to remove native copy outside libexec directory: %s", managedNative)
+	}
+
+	st, err := os.Lstat(managedNative)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	if st.Mode()&os.ModeSymlink == 0 && !st.Mode().IsRegular() {
+		return fmt.Errorf("refusing to remove irregular file %s", managedNative)
+	}
+
+	if err := os.Remove(managedNative); err != nil {
+		return fmt.Errorf("failed to remove managed native copy %s: %w", managedNative, err)
+	}
+	fmt.Fprintf(out, "Removed managed native binary: %s\n", managedNative)
+
+	// Clean up empty libexec/agy-pool directory if no files remain
+	_ = os.Remove(managedDir)
+	return nil
+}
+
 // AssertSafeInstallTarget guards against accidentally writing into forbidden host locations in tests.
 func AssertSafeInstallTarget(targetDir string) error {
 	return config.AssertSafeDestructivePath(targetDir)
@@ -129,21 +202,6 @@ func Install(opts Options) error {
 		out = io.Discard
 	}
 
-	// 1. Precondition: discover real native agy
-	nativeAgy := opts.NativeAgyPath
-	if nativeAgy != "" {
-		if err := diagnostics.ValidateNativeCandidate(nativeAgy); err != nil {
-			return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
-		}
-	} else {
-		var err error
-		nativeAgy, _, err = diagnostics.ResolveNativeAgyBinary()
-		if err != nil {
-			return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
-		}
-	}
-	fmt.Fprintf(out, "Found native agy: %s\n", nativeAgy)
-
 	roots := GetInstallerRoots()
 
 	prefix := opts.Prefix
@@ -182,6 +240,81 @@ func Install(opts Options) error {
 
 	if err := AssertSafeInstallTarget(targetDir); err != nil {
 		return err
+	}
+
+	managedNative := DetermineManagedNativePath(targetDir, opts.IsSystem)
+	if err := config.AssertSafeDestructivePath(managedNative); err != nil {
+		return err
+	}
+
+	// 1. Precondition: discover real native agy
+	var nativeAgy string
+	if opts.NativeAgyPath != "" {
+		if err := diagnostics.ValidateNativeCandidate(opts.NativeAgyPath); err != nil {
+			return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+		}
+		nativeAgy = opts.NativeAgyPath
+	} else {
+		targetAgy := filepath.Join(targetDir, "agy")
+		if err := diagnostics.ValidateNativeCandidate(targetAgy); err == nil {
+			nativeAgy = targetAgy
+		} else if err := diagnostics.ValidateNativeCandidate(managedNative); err == nil {
+			nativeAgy = managedNative
+		} else {
+			var err error
+			nativeAgy, _, err = diagnostics.ResolveNativeAgyBinary()
+			if err != nil {
+				return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+			}
+		}
+	}
+	if err := diagnostics.ValidateNativeCandidate(nativeAgy); err != nil {
+		return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+	}
+	fmt.Fprintf(out, "Found native agy: %s\n", nativeAgy)
+
+	// 2. Safely preserve native agy into managedNative before publishing shims
+	if nativeAgy != managedNative {
+		managedDir := filepath.Dir(managedNative)
+		if err := config.AssertSafeDestructivePath(managedDir); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(managedDir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", managedDir, err)
+		}
+		pid := os.Getpid()
+		tmpManaged := filepath.Join(managedDir, fmt.Sprintf(".agy-native.tmp.%d", pid))
+		if err := config.AssertSafeDestructivePath(tmpManaged); err != nil {
+			return err
+		}
+		if err := CopyFile(nativeAgy, tmpManaged); err != nil {
+			_ = os.Remove(tmpManaged)
+			return fmt.Errorf("failed to copy native agy to %s: %w", tmpManaged, err)
+		}
+		if err := diagnostics.ValidateNativeCandidate(tmpManaged); err != nil {
+			_ = os.Remove(tmpManaged)
+			return fmt.Errorf("preserved native agy candidate invalid: %w", err)
+		}
+		if err := os.Rename(tmpManaged, managedNative); err != nil {
+			_ = os.Remove(tmpManaged)
+			return fmt.Errorf("failed to place managed native agy %s: %w", managedNative, err)
+		}
+		if err := diagnostics.ValidateNativeCandidate(managedNative); err != nil {
+			return fmt.Errorf("managed native agy %s validation failed: %w", managedNative, err)
+		}
+		// Hardlink protection against target agy
+		if fiTarget, err := os.Stat(filepath.Join(targetDir, "agy")); err == nil {
+			if fiManaged, err := os.Stat(managedNative); err == nil {
+				if os.SameFile(fiTarget, fiManaged) {
+					return fmt.Errorf("CRITICAL: managed native %s is hard-linked to target agy; refusing to proceed", managedNative)
+				}
+			}
+		}
+		fmt.Fprintf(out, "Preserved native agy: %s\n", managedNative)
+	} else {
+		if err := diagnostics.ValidateNativeCandidate(managedNative); err != nil {
+			return fmt.Errorf("managed native agy %s validation failed: %w", managedNative, err)
+		}
 	}
 
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -371,6 +504,12 @@ func Install(opts Options) error {
 
 	// 8. New installs never modify shell startup / RC files; the installed shim is the sole integration.
 	return nil
+}
+
+// Repair restores agy-pool shims and refreshes the preserved native agy binary
+// when an official updater overwrote ~/.local/bin/agy with a native ELF.
+func Repair(opts Options) error {
+	return Install(opts)
 }
 
 // RemoveLegacyRCBlock excises the exact historical agy-pool marker block from data,
@@ -600,7 +739,13 @@ func Uninstall(opts Options) error {
 		}
 	}
 
-	// 2. Clean legacy shell rc files ONLY if explicitly requested
+	// 2. Remove managed native copy from libexec/agy-pool if present
+	managedNative := DetermineManagedNativePath(targetDir, opts.IsSystem)
+	if err := RemoveManagedNativeCopy(managedNative, out); err != nil {
+		return fmt.Errorf("failed to safely remove managed native binary: %w", err)
+	}
+
+	// 3. Clean legacy shell rc files ONLY if explicitly requested
 	if opts.CleanLegacyRC && home != "" {
 		for _, rc := range []string{filepath.Join(home, ".bashrc"), filepath.Join(home, ".zshrc")} {
 			if _, err := os.Stat(rc); err == nil {

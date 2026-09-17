@@ -150,6 +150,8 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return handleMigrateLegacy(args[1:], stdout, stderr)
 	case "install":
 		return handleInstall(args[1:], stdout, stderr)
+	case "repair":
+		return handleRepair(args[1:], stdout, stderr)
 	case "uninstall":
 		return handleUninstall(args[1:], stdout, stderr)
 	default:
@@ -639,6 +641,59 @@ func handleInstall(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s✓ Successfully installed agy-pool%s\n", clrGreen, clrReset)
+	return 0
+}
+
+func handleRepair(args []string, stdout, stderr io.Writer) int {
+	opts := installer.Options{
+		Stdout: stdout,
+		Stderr: stderr,
+	}
+	if exe, err := os.Executable(); err == nil {
+		opts.SourceBinary = exe
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			fmt.Fprintf(stdout, "usage: agy-pool repair [--user] [--system] [--prefix PREFIX] [--target DIR] [--bin-dir DIR]\n")
+			return 0
+		case arg == "--user":
+			opts.IsSystem = false
+		case arg == "--system":
+			opts.IsSystem = true
+		case arg == "--prefix":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool repair: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.Prefix = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--prefix="):
+			opts.Prefix = strings.TrimPrefix(arg, "--prefix=")
+		case arg == "--target" || arg == "--bin-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintf(stderr, "agy-pool repair: error: flag needs an argument: %s\n", arg)
+				return 2
+			}
+			opts.TargetDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--target="):
+			opts.TargetDir = strings.TrimPrefix(arg, "--target=")
+		case strings.HasPrefix(arg, "--bin-dir="):
+			opts.TargetDir = strings.TrimPrefix(arg, "--bin-dir=")
+		default:
+			fmt.Fprintf(stderr, "agy-pool repair: error: unrecognized argument: %s\n", arg)
+			return 2
+		}
+	}
+
+	if err := installer.Repair(opts); err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Repair failed: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s✓ Successfully repaired agy-pool integration%s\n", clrGreen, clrReset)
 	return 0
 }
 

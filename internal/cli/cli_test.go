@@ -1357,3 +1357,113 @@ func TestDoctorCmd_BehaviorUnchanged(t *testing.T) {
 		t.Errorf("doctor output missing Native Binary check, got: %s", out)
 	}
 }
+
+func TestRunAgyWithLB_ResolvesManagedNativeBinary(t *testing.T) {
+	tempDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	fakeHome := filepath.Join(tempDir, "user_home")
+	libexecDir := filepath.Join(fakeHome, ".local", "libexec", "agy-pool")
+	_ = os.MkdirAll(libexecDir, 0755)
+	managedAgy := filepath.Join(libexecDir, "agy-native")
+	_ = os.WriteFile(managedAgy, []byte("#!/bin/sh\nexit 0\n"), 0755)
+
+	t.Setenv("HOME", fakeHome)
+	diagnostics.SetAgyBinaryFinder(nil)
+
+	cfgFile := filepath.Join(fakeHome, "config.json")
+	dataDir := filepath.Join(fakeHome, "data")
+	_ = os.WriteFile(cfgFile, []byte(`{"version":1,"server":{"listen":"127.0.0.1","port":9876}}`), 0600)
+
+	var capturedBinary string
+	var capturedArgv []string
+	var capturedEnv []string
+	ExecHandler = func(binary string, argv []string, env []string) error {
+		capturedBinary = binary
+		capturedArgv = argv
+		capturedEnv = env
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"run", "-c", cfgFile, "-D", dataDir, "--", "--dangerously-skip-permissions", "-p", "hello"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	if capturedBinary != managedAgy {
+		t.Fatalf("expected exec binary %q, got %q", managedAgy, capturedBinary)
+	}
+
+	hasCloudCodeURL := false
+	for _, e := range capturedEnv {
+		if strings.HasPrefix(e, "CLOUD_CODE_URL=http://127.0.0.1:9876") {
+			hasCloudCodeURL = true
+			break
+		}
+	}
+	if !hasCloudCodeURL {
+		t.Errorf("expected CLOUD_CODE_URL to be injected in environment, got: %v", capturedEnv)
+	}
+
+	expectedArgs := []string{managedAgy, "--dangerously-skip-permissions", "-p", "hello"}
+	if len(capturedArgv) != len(expectedArgs) {
+		t.Fatalf("expected args %v, got %v", expectedArgs, capturedArgv)
+	}
+	for i := range expectedArgs {
+		if capturedArgv[i] != expectedArgs[i] {
+			t.Errorf("arg[%d] mismatch: expected %q, got %q", i, expectedArgs[i], capturedArgv[i])
+		}
+	}
+}
+
+func TestRunAgyDirect_ResolvesManagedNativeBinary(t *testing.T) {
+	tempDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	fakeHome := filepath.Join(tempDir, "user_home")
+	libexecDir := filepath.Join(fakeHome, ".local", "libexec", "agy-pool")
+	_ = os.MkdirAll(libexecDir, 0755)
+	managedAgy := filepath.Join(libexecDir, "agy-native")
+	_ = os.WriteFile(managedAgy, []byte("#!/bin/sh\nexit 0\n"), 0755)
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("CLOUD_CODE_URL", "http://127.0.0.1:9999")
+	diagnostics.SetAgyBinaryFinder(nil)
+
+	var capturedBinary string
+	var capturedArgv []string
+	var capturedEnv []string
+	ExecHandler = func(binary string, argv []string, env []string) error {
+		capturedBinary = binary
+		capturedArgv = argv
+		capturedEnv = env
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"raw", "--", "--mode", "accept-edits"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	if capturedBinary != managedAgy {
+		t.Fatalf("expected exec binary %q, got %q", managedAgy, capturedBinary)
+	}
+
+	for _, e := range capturedEnv {
+		if strings.HasPrefix(e, "CLOUD_CODE_URL=") {
+			t.Errorf("expected CLOUD_CODE_URL to be stripped in raw bypass, but found: %s", e)
+		}
+	}
+
+	expectedArgs := []string{managedAgy, "--mode", "accept-edits"}
+	if len(capturedArgv) != len(expectedArgs) {
+		t.Fatalf("expected args %v, got %v", expectedArgs, capturedArgv)
+	}
+	for i := range expectedArgs {
+		if capturedArgv[i] != expectedArgs[i] {
+			t.Errorf("arg[%d] mismatch: expected %q, got %q", i, expectedArgs[i], capturedArgv[i])
+		}
+	}
+}

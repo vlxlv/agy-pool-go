@@ -43,6 +43,7 @@ var (
 	agyVersionProvider  func() string
 	backendHostProvider func() string
 	tlsProber           func(host string, timeout time.Duration) error
+	agyEntrypointFinder func() string
 )
 
 // SetAgyBinaryFinder overrides binary discovery for testing.
@@ -50,6 +51,13 @@ func SetAgyBinaryFinder(fn func() string) {
 	hooksMu.Lock()
 	defer hooksMu.Unlock()
 	agyBinaryFinder = fn
+}
+
+// SetAgyEntrypointFinder overrides entrypoint discovery for testing.
+func SetAgyEntrypointFinder(fn func() string) {
+	hooksMu.Lock()
+	defer hooksMu.Unlock()
+	agyEntrypointFinder = fn
 }
 
 // SetAgyVersionProvider overrides version lookup for testing.
@@ -73,6 +81,27 @@ func SetTLSProber(fn func(host string, timeout time.Duration) error) {
 	tlsProber = fn
 }
 
+func getEffectiveUserHome() string {
+	home := os.Getenv("HOME")
+	if config.IsTestMode() {
+		// If in test mode and HOME is either unset or points to the real host home, use the synthetic sandbox
+		if home == "" || home == config.GetRealHostUserHome() {
+			if sandbox := config.GetSyntheticSandboxRoot(); sandbox != "" {
+				return filepath.Join(sandbox, "test_home")
+			}
+		}
+		if home != "" {
+			return home
+		}
+	}
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
+	}
+	return home
+}
+
 func getSelfPaths() map[string]bool {
 	paths := make(map[string]bool)
 
@@ -93,12 +122,7 @@ func getSelfPaths() map[string]bool {
 	}
 
 	// Common agy-pool locations
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := user.Current(); err == nil {
-			home = u.HomeDir
-		}
-	}
+	home := getEffectiveUserHome()
 	if home != "" {
 		p := filepath.Join(home, ".local", "bin", "agy-pool")
 		if realP, err := filepath.EvalSymlinks(p); err == nil {
@@ -233,11 +257,36 @@ var (
 const (
 	SourceEnvAgyBin = "AGY_BIN"
 	SourceConfig    = "config"
+	SourceManaged   = "managed native"
 	SourcePrefix    = "PREFIX"
 	SourceSystem    = "system path"
 	SourceUserLocal = "~/.local/bin"
 	SourcePathEnv   = "PATH"
 )
+
+func getManagedNativeCandidates() []string {
+	var managedCandidates []string
+	if explicitManaged := os.Getenv("AGY_MANAGED_NATIVE_PATH"); explicitManaged != "" {
+		managedCandidates = append(managedCandidates, explicitManaged)
+	}
+	if prefix := os.Getenv("PREFIX"); prefix != "" {
+		managedCandidates = append(managedCandidates, filepath.Join(prefix, "libexec", "agy-pool", "agy-native"))
+	}
+	if config.IsTestMode() {
+		if sandbox := config.GetSyntheticSandboxRoot(); sandbox != "" {
+			managedCandidates = append(managedCandidates,
+				filepath.Join(sandbox, "test_home", ".local", "libexec", "agy-pool", "agy-native"),
+				filepath.Join(sandbox, "test_system", "usr", "local", "libexec", "agy-pool", "agy-native"),
+			)
+		}
+	}
+	home := getEffectiveUserHome()
+	if home != "" {
+		managedCandidates = append(managedCandidates, filepath.Join(home, ".local", "libexec", "agy-pool", "agy-native"))
+	}
+	managedCandidates = append(managedCandidates, "/usr/local/libexec/agy-pool/agy-native")
+	return managedCandidates
+}
 
 // ResolveNativeAgyBinary resolves the native agy binary using the strict discovery precedence contract.
 func ResolveNativeAgyBinary() (string, string, error) {
@@ -270,6 +319,20 @@ func ResolveNativeAgyBinary() (string, string, error) {
 		}
 		clean, _ := filepath.Abs(cand)
 		return clean, SourceConfig, nil
+	}
+
+	// 3. Managed native binary (preserved by installer behind the managed shim)
+	for _, cand := range getManagedNativeCandidates() {
+		if cand == "" {
+			continue
+		}
+		clean, err := filepath.Abs(cand)
+		if err != nil {
+			clean = filepath.Clean(cand)
+		}
+		if err := ValidateNativeCandidate(clean); err == nil {
+			return clean, SourceManaged, nil
+		}
 	}
 
 	// Fallback discovery in documented order:
@@ -306,12 +369,7 @@ func ResolveNativeAgyBinary() (string, string, error) {
 	})
 
 	// 7. ~/.local/bin/agy
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := user.Current(); err == nil {
-			home = u.HomeDir
-		}
-	}
+	home := getEffectiveUserHome()
 	if home != "" {
 		fallbacks = append(fallbacks, fallbackCandidate{
 			path:   filepath.Join(home, ".local", "bin", "agy"),
@@ -450,6 +508,102 @@ func RunDoctor(out io.Writer) bool {
 		fmt.Fprintf(out, "    %s↳ Set AGY_BIN=/path/to/agy if installed in custom location.%s\n",
 			clrDim, clrReset)
 		warningsFound++
+	}
+
+	// 2b. Native Shim Integration
+	hooksMu.RLock()
+	finderHook := agyBinaryFinder
+	epHook := agyEntrypointFinder
+	hooksMu.RUnlock()
+
+	if finderHook != nil {
+		fmt.Fprintf(out, "  %s✓%s Native Integration: Mock integration active (%s)\n",
+			clrGreen, clrReset, realAgy)
+	} else {
+		home := getEffectiveUserHome()
+
+		var entrypoint string
+		if epHook != nil {
+			entrypoint = epHook()
+		} else if ep := os.Getenv("AGY_ENTRYPOINT_PATH"); ep != "" {
+			entrypoint = ep
+		} else {
+			if home != "" {
+				cand := filepath.Join(home, ".local", "bin", "agy")
+				if _, err := os.Lstat(cand); err == nil {
+					entrypoint = cand
+				}
+			}
+			if entrypoint == "" && config.IsTestMode() {
+				if sandbox := config.GetSyntheticSandboxRoot(); sandbox != "" {
+					cand := filepath.Join(sandbox, "test_home", ".local", "bin", "agy")
+					if _, err := os.Lstat(cand); err == nil {
+						entrypoint = cand
+					}
+				}
+			}
+			if entrypoint == "" && !config.IsTestMode() {
+				if p, err := exec.LookPath("agy"); err == nil {
+					entrypoint = p
+				}
+			}
+		}
+
+		if entrypoint == "" {
+			fmt.Fprintf(out, "  %s○%s Native Integration: No agy entrypoint found (run 'agy-pool install' to set up)\n",
+				clrBlue, clrReset)
+		} else {
+			if !IsShimOrSelf(entrypoint) {
+				fmt.Fprintf(out, "  %s✖%s Native Integration: %s is a native binary bypassing agy-pool\n",
+					clrRed, clrReset, entrypoint)
+				fmt.Fprintf(out, "    %s↳ Run 'agy-pool repair' (or 'agy-pool install') to restore the managed agy shim.%s\n",
+					clrDim, clrReset)
+				issuesFound++
+			} else {
+				var managedPath string
+				for _, cand := range getManagedNativeCandidates() {
+					if cand != "" {
+						if _, err := os.Lstat(cand); err == nil {
+							managedPath = cand
+							break
+						}
+					}
+				}
+
+				broken := false
+				if managedPath != "" {
+					if IsShimOrSelf(managedPath) {
+						fmt.Fprintf(out, "  %s✖%s Native Integration: Managed native %s resolves to shim/self\n",
+							clrRed, clrReset, managedPath)
+						issuesFound++
+						broken = true
+					} else if err := ValidateNativeCandidate(managedPath); err != nil {
+						fmt.Fprintf(out, "  %s✖%s Native Integration: Managed native %s is not executable or invalid: %v\n",
+							clrRed, clrReset, managedPath, err)
+						issuesFound++
+						broken = true
+					}
+				} else {
+					fmt.Fprintf(out, "  %s✖%s Native Integration: %s is a managed shim but managed native agy is missing\n",
+						clrRed, clrReset, entrypoint)
+					fmt.Fprintf(out, "    %s↳ Run 'agy-pool repair' (or 'agy-pool install') to restore managed native agy.%s\n",
+						clrDim, clrReset)
+					issuesFound++
+					broken = true
+				}
+
+				if err != nil {
+					fmt.Fprintf(out, "  %s✖%s Native Integration: %s is a managed shim but no valid native agy can be resolved\n",
+						clrRed, clrReset, entrypoint)
+					fmt.Fprintf(out, "    %s↳ Run 'agy-pool repair' (or 'agy-pool install') or verify native agy installation.%s\n",
+						clrDim, clrReset)
+					issuesFound++
+				} else if !broken {
+					fmt.Fprintf(out, "  %s✓%s Native Integration: %s (managed shim -> %s)\n",
+						clrGreen, clrReset, entrypoint, realAgy)
+				}
+			}
+		}
 	}
 
 	// 3. Gateway Proxy Daemon
