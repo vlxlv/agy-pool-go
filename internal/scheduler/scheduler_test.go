@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -586,38 +587,47 @@ func TestMaxQuota_ReserveHeadroom_RealObservedSnapshot(t *testing.T) {
 	}
 }
 
-// Test legacy fraction handling
+// Legacy fractions have no window identity, so only depletion applies to them.
 func TestMaxQuota_ReserveHeadroom_LegacyFraction(t *testing.T) {
 	now := 1789560000.0
+	for _, source := range []string{"remaining_fraction", "quota"} {
+		t.Run(source, func(t *testing.T) {
+			for _, fraction := range []float64{0.005, 0.006, 0.08, 0.10, 0.12, 0.15, 0.50} {
+				legacy := &storage.Account{
+					ID:        "legacy",
+					LastQuota: &storage.QuotaState{UpdatedAt: int64Ptr(int64(now - 10))},
+				}
+				if source == "remaining_fraction" {
+					legacy.LastQuota.RemainingFraction = floatPtr(fraction)
+				} else {
+					legacy.Quota = floatPtr(fraction)
+				}
+				if IsReserveCandidate(legacy, now) {
+					t.Fatalf("legacy %g has no identified window and must not be Reserve", fraction)
+				}
+				capacity := quota.ComputeCapacityState(legacy, now)
+				depleted := fraction <= config.DepletedThreshold
+				if capacity.KnownWindowCount != 1 || capacity.IsDepleted != depleted {
+					t.Fatalf("legacy %g lost existing capacity semantics: %+v", fraction, capacity)
+				}
 
-	// Legacy fraction 0.12 <= 0.15 -> Reserve
-	legacyRes := &storage.Account{
-		ID:     "legacy_res",
-		Status: "active",
-		LastQuota: &storage.QuotaState{
-			RemainingFraction: floatPtr(0.12),
-			UpdatedAt:         int64Ptr(int64(now - 10)),
-		},
-	}
-	if !IsReserveCandidate(legacyRes, now) {
-		t.Fatalf("legacy 0.12 should be Reserve")
-	}
-
-	// Legacy fraction 0.50 > 0.15 -> Healthy
-	legacyHealthy := &storage.Account{
-		ID:     "legacy_healthy",
-		Status: "active",
-		LastQuota: &storage.QuotaState{
-			RemainingFraction: floatPtr(0.50),
-			UpdatedAt:         int64Ptr(int64(now - 10)),
-		},
-	}
-	if IsReserveCandidate(legacyHealthy, now) {
-		t.Fatalf("legacy 0.50 should be Healthy")
+				reserve := makeAccountWithWindows("reserve", floatPtr(0.12), floatPtr(0.80), now)
+				ordered := OrderCandidates([]*storage.Account{reserve, legacy}, config.StrategyMaxQuota, nil, now)
+				wantFirst := legacy
+				if depleted {
+					wantFirst = reserve
+				}
+				if len(ordered) != 2 || ordered[0] != wantFirst {
+					t.Fatalf("legacy %g: expected %s first, got %v", fraction, wantFirst.ID, ordered)
+				}
+			}
+		})
 	}
 
-	ordered := OrderCandidates([]*storage.Account{legacyRes, legacyHealthy}, config.StrategyMaxQuota, nil, now)
-	if ordered[0].ID != "legacy_healthy" || ordered[1].ID != "legacy_res" {
-		t.Fatalf("expected [legacy_healthy, legacy_res], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	// The same fraction has different reserve meaning in identified windows.
+	fiveHour := makeAccountWithWindows("5h", floatPtr(0.12), nil, now)
+	weekly := makeAccountWithWindows("weekly", nil, floatPtr(0.12), now)
+	if !IsReserveCandidate(fiveHour, now) || IsReserveCandidate(weekly, now) {
+		t.Fatal("12% must be Reserve for explicit 5H, but Healthy for explicit Weekly")
 	}
 }

@@ -25,6 +25,8 @@ func IsReserveCandidate(acc *storage.Account, now float64) bool {
 }
 
 // IsReserveCapacity reports whether a computed CapacityState qualifies as reserve.
+// Legacy fractions have no window identity; they retain existing capacity ranking
+// and depletion behavior without applying a window-specific reserve floor.
 func IsReserveCapacity(capState quota.CapacityState) bool {
 	if capState.IsDepleted {
 		return false
@@ -33,9 +35,6 @@ func IsReserveCapacity(capState quota.CapacityState) bool {
 		return true
 	}
 	if capState.Q7Known && capState.Q7 != nil && *capState.Q7 <= WeeklyReserveFloor {
-		return true
-	}
-	if capState.LegacyFractionKnown && capState.Q5 != nil && *capState.Q5 <= FiveHourReserveFloor {
 		return true
 	}
 	return false
