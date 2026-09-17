@@ -27,7 +27,7 @@ var (
 	BackendURLProvider  func() string
 	UserAgentProvider   func() string
 	TokenRefresher      func(account *storage.Account) (string, error)
-	QuotaRefresher      func(account *storage.Account)
+	QuotaRefresher      func(account *storage.Account) = quota.ScheduleQuotaRefreshSimple
 	LogRotator          func()
 	NowFunc                       = time.Now
 	LogWriter           io.Writer = os.Stderr

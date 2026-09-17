@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
 func TestRunForeground_LifecycleAndGracefulShutdown(t *testing.T) {
@@ -315,5 +316,74 @@ func TestHelperProcess_BackgroundDaemonSpawnAndStop(t *testing.T) {
 	}
 	if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected PID file to be unlinked after StopDaemon")
+	}
+}
+
+// TestDaemon_StartsQuotaRefresher verifies that daemon startup activates the background quota refresher.
+func TestDaemon_StartsQuotaRefresher(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+
+	// Seed pool with a stale account
+	oldTime := time.Now().Unix() - 500
+	frac := 0.5
+	acc := &storage.Account{
+		ID:    "acc-stale-refresh",
+		Email: "stale@example.com",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:  &storage.QuotaWindow{Fraction: &frac},
+			UpdatedAt: &oldTime,
+		},
+	}
+	if err := storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}}); err != nil {
+		t.Fatalf("failed to save pool: %v", err)
+	}
+
+	// Set a mock QuotaRefresher to observe invocations
+	refreshed := make(chan string, 1)
+	origRefresher := QuotaRefresher
+	QuotaRefresher = func(a *storage.Account) {
+		select {
+		case refreshed <- a.ID:
+		default:
+		}
+	}
+	defer func() {
+		QuotaRefresher = origRefresher
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pidFile := filepath.Join(tmpDir, "server.pid")
+	readyChan := make(chan struct{})
+
+	go func() {
+		_ = RunForeground(ctx, ServerOptions{
+			Port:                 0,
+			EphemeralPort:        true,
+			PIDFile:              pidFile,
+			ReadyChan:            readyChan,
+			QuotaRefreshInterval: 20 * time.Millisecond,
+			DisableSignals:       true,
+		})
+	}()
+
+	select {
+	case <-readyChan:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for server ready")
+	}
+
+	// Verify QuotaRefresher is invoked for the stale account
+	select {
+	case id := <-refreshed:
+		if id != "acc-stale-refresh" {
+			t.Errorf("expected refresh for acc-stale-refresh, got %s", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for background QuotaRefresher to be called by daemon")
 	}
 }

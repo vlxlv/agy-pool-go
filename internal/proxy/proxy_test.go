@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -28,7 +29,7 @@ func resetProviders() {
 	BackendURLProvider = nil
 	UserAgentProvider = nil
 	TokenRefresher = nil
-	QuotaRefresher = nil
+	QuotaRefresher = quota.ScheduleQuotaRefreshSimple
 	LogRotator = nil
 	NowFunc = time.Now
 	LogWriter = io.Discard
@@ -246,5 +247,88 @@ func TestBufferedResponseSuccessAndCounters(t *testing.T) {
 	}
 	if updatedAcc.LastUsedAt == nil || *updatedAcc.LastUsedAt <= 0 {
 		t.Fatal("last_used_at should be set for generation")
+	}
+}
+
+func TestProxy_GenerationTriggersAsyncQuotaRefreshForStaleCandidate(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"candidates": [{"output": "generated text"}]}`))
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	BackendHostProvider = func() string { return u.Host }
+	BackendURLProvider = func() string { return upstream.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) {
+		return "test-token", nil
+	}
+
+	refreshed := make(chan string, 1)
+	QuotaRefresher = func(account *storage.Account) {
+		select {
+		case refreshed <- account.ID:
+		default:
+		}
+	}
+
+	staleTime := time.Now().Unix() - 600
+	acc := &storage.Account{
+		ID:    "acc-stale",
+		Email: "stale@example.com",
+		LastQuota: &storage.QuotaState{
+			UpdatedAt: &staleTime,
+		},
+	}
+	pool := &storage.Pool{
+		Accounts:        []*storage.Account{acc},
+		ActiveAccountID: &acc.ID,
+	}
+	_ = storage.SavePool(pool)
+
+	handler := NewHandler()
+
+	// 1. Non-generation request should NOT trigger QuotaRefresher
+	nonGenReq := httptest.NewRequest("GET", "/v1internal:models", nil)
+	wNonGen := httptest.NewRecorder()
+	handler.ServeHTTP(wNonGen, nonGenReq)
+	select {
+	case id := <-refreshed:
+		t.Fatalf("unexpected QuotaRefresher call for non-generation request: %s", id)
+	case <-time.After(50 * time.Millisecond):
+		// OK
+	}
+
+	// 2. Generation request for stale candidate SHOULD trigger QuotaRefresher
+	genReq := httptest.NewRequest("POST", "/v1/models/gemini:generateContent", strings.NewReader(`{}`))
+	wGen := httptest.NewRecorder()
+	handler.ServeHTTP(wGen, genReq)
+
+	select {
+	case id := <-refreshed:
+		if id != "acc-stale" {
+			t.Fatalf("expected QuotaRefresher for acc-stale, got %s", id)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for QuotaRefresher call on stale candidate generation")
+	}
+
+	// 3. Generation request for fresh candidate should NOT trigger QuotaRefresher
+	freshTime := time.Now().Unix() - 10
+	acc.LastQuota.UpdatedAt = &freshTime
+	_ = storage.SavePool(pool)
+
+	wFresh := httptest.NewRecorder()
+	handler.ServeHTTP(wFresh, genReq)
+	select {
+	case id := <-refreshed:
+		t.Fatalf("unexpected QuotaRefresher call for fresh candidate: %s", id)
+	case <-time.After(50 * time.Millisecond):
+		// OK
 	}
 }
