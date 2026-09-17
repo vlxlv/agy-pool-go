@@ -48,6 +48,11 @@ func TestInstallerIsolation_UserModeHermeticRoots(t *testing.T) {
 	if !strings.HasPrefix(roots.DataDir, tempDir) {
 		t.Fatalf("roots.DataDir %q is not inside tempDir %q", roots.DataDir, tempDir)
 	}
+	// Check whether real host entrypoint exists before test
+	realHome := config.GetRealHostUserHome()
+	realLocalBinAgyPool := filepath.Join(realHome, ".local", "bin", "agy-pool")
+	_, errRealBefore := os.Lstat(realLocalBinAgyPool)
+	realExistedBefore := errRealBefore == nil
 
 	// 1. User install uses temp bin/config/data roots when flags omitted
 	err := Install(Options{
@@ -78,10 +83,10 @@ func TestInstallerIsolation_UserModeHermeticRoots(t *testing.T) {
 	}
 
 	// Real host user home must be completely untouched
-	realHome := config.GetRealHostUserHome()
-	realLocalBinAgyPool := filepath.Join(realHome, ".local", "bin", "agy-pool")
-	if _, err := os.Lstat(realLocalBinAgyPool); os.IsNotExist(err) {
-		t.Fatalf("CRITICAL: real host entrypoint %s was deleted!", realLocalBinAgyPool)
+	if realExistedBefore {
+		if _, err := os.Lstat(realLocalBinAgyPool); os.IsNotExist(err) {
+			t.Fatalf("CRITICAL: real host entrypoint %s was deleted!", realLocalBinAgyPool)
+		}
 	}
 }
 

@@ -848,6 +848,12 @@ func AssertSafeDestructivePath(path string) error {
 		}
 	}
 
+	// Check 5: structural symlink component resolution (handles non-existent target files/dirs)
+	resolvedAll := resolvePathSymlinks(cleanAbs)
+	if isProtectedProductionDir(resolvedAll) {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path: %s", resolvedAll)
+	}
+
 	return nil
 }
 
@@ -877,5 +883,48 @@ func AssertSafeReadPath(path string) error {
 			return fmt.Errorf("[FAIL-CLOSED GUARD] refusing read from protected production path in test mode: %s", cleanEval)
 		}
 	}
+
+	resolvedAll := resolvePathSymlinks(cleanAbs)
+	if isProtectedProductionDir(resolvedAll) {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing read from protected production path in test mode: %s", resolvedAll)
+	}
+
 	return nil
+}
+
+// resolvePathSymlinks resolves symlink components along path as far as possible,
+// even if terminal path components or targets do not currently exist on disk.
+func resolvePathSymlinks(path string) string {
+	clean := filepath.Clean(path)
+	if eval, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(eval)
+	}
+
+	parts := strings.Split(clean, string(os.PathSeparator))
+	curr := "/"
+	if !filepath.IsAbs(clean) {
+		curr = "."
+	}
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		next := filepath.Join(curr, part)
+		for hop := 0; hop < 16; hop++ {
+			fi, err := os.Lstat(next)
+			if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				break
+			}
+			target, err := os.Readlink(next)
+			if err != nil {
+				break
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(next), target)
+			}
+			next = filepath.Clean(target)
+		}
+		curr = next
+	}
+	return filepath.Clean(curr)
 }
