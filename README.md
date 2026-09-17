@@ -21,6 +21,7 @@ A high-performance, zero-CGO Go implementation and reverse proxy gateway for **A
   - `agy-pool list`: Compact account inventory and cached quota overview.
   - `agy-pool quota`: Dedicated quota dashboard with live progress bars, reset countdowns, and `--refresh` capability.
   - `agy-pool doctor`: Comprehensive system diagnostic checking binary discovery, daemon health, process table, database integrity, and Google TLS connectivity.
+- **Go-Native Persistent State**: Stores authoritative pool and runtime state in SQLite (`state.db`) under `~/.local/share/agy-pool/state.db` with transactional locking and schema versioning. Legacy JSON state (`~/.gemini/agy-pool-accounts.json`) is supported strictly as legacy migration input or rollback reference data.
 - **Cross-Platform Session Continuity**: Resolves and continues directory sessions across account rotations using `conversation_summaries.db`.
 - **Encrypted Backup & Migration**: Securely export and import account pools with PBKDF2-HMAC-SHA256 and CTR keystream encryption.
 
@@ -81,13 +82,29 @@ PYTHON_REFERENCE=/nonexistent go test ./... -count=1
 
 ### Optional Differential Parity Verification
 
-The Python reference implementation is preserved strictly as an optional baseline for behavioral parity, migration validation, and emergency rollback. It is not required for building, running, or standard testing of the Go gateway.
+The external Python reference implementation is preserved strictly as an optional baseline for:
+- Differential and behavioral parity testing
+- Legacy state migration validation
+- Emergency rollback reference
+
+Python is **not** required for:
+- Go runtime execution
+- Go builds or cross-compilation
+- Normal unit tests or race detector tests
+- GitHub Actions CI workflows
 
 To optionally run full differential comparison against the reference Python implementation:
 ```bash
 PYTHON_REFERENCE=/path/to/agy-pool ./scripts/dual-test.sh
 ```
 
+---
+
+## Release & CI Architecture
+
+- **Continuous Integration (`ci.yml`)**: Triggered on push and PR to `main` with minimal permissions (`contents: read`). Runs formatting checks (`gofmt`), static analysis (`go vet`), offline unit tests, and race detector tests across standard platforms.
+- **Tag-Driven Releases (`release.yml`)**: Triggered on tag pushes (`v*`) or manual `workflow_dispatch`. Re-verifies all test gates, cross-compiles static binaries for all 4 supported architectures with build-time version injection via `-ldflags`, generates and verifies unified `SHA256SUMS`, and publishes the GitHub Release (`contents: write`).
+- **Production Deployment**: Production deployment remains an independent, manual operational procedure completely decoupled from CI and release publishing.
 
 ---
 

@@ -9,10 +9,11 @@
 
 > [!NOTE]
 > **Post-Cutover Implementation Status (Historical Specification)**:
-> - The Python-to-Go production cutover has been completed successfully.
-> - `agy-pool-go` is now the active primary implementation.
-> - The Python implementation remains available only as a reference for rollback, parity testing, and legacy migration.
-> - The specifications below are preserved for historical provenance and contract verification.
+> - Python-to-Go production cutover has been completed.
+> - Go is now the primary/live implementation.
+> - Python is retained only as parity, migration, and rollback reference.
+> - The historical migration contract below is intentionally preserved for audit/history.
+
 
 ---
 
