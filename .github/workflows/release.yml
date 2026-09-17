@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-gate:
+    name: Test & Parity Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Check code formatting (gofmt)
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following files require gofmt:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run static analysis (go vet)
+        run: go vet ./...
+
+      - name: Run unit tests (Offline)
+        run: go test -v ./... -count=1
+
+      - name: Run race detector
+        run: go test -v -race ./... -count=1
+
+  build-release:
+    name: Build (${{ matrix.target.os }}/${{ matrix.target.arch }})
+    needs: test-gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build release binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+        run: |
+          mkdir -p dist
+          BIN="agy-pool-${{ matrix.target.os }}-${{ matrix.target.arch }}"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building binary: ${BIN} with injected version: ${TAG_VERSION}"
+          go build -trimpath -ldflags="-s -w -X github.com/vlxlv/agy-pool-go/internal/config.Version=${TAG_VERSION}" -o "dist/${BIN}" ./cmd/agy-pool
+          cd dist
+          sha256sum "${BIN}" > "${BIN}.sha256"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: agy-pool-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: |
+            dist/agy-pool-${{ matrix.target.os }}-${{ matrix.target.arch }}
+            dist/agy-pool-${{ matrix.target.os }}-${{ matrix.target.arch }}.sha256
+          retention-days: 7
+
+  publish-release:
+    name: Package & Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download all release binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: agy-pool-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate and verify unified SHA256SUMS
+        run: |
+          cd dist
+          sha256sum agy-pool-linux-amd64 agy-pool-linux-arm64 agy-pool-darwin-amd64 agy-pool-darwin-arm64 > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Verify native linux-amd64 binary
+        run: |
+          chmod +x dist/agy-pool-linux-amd64
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+
+          echo "=== Testing --version ==="
+          OUTPUT=$(dist/agy-pool-linux-amd64 --version)
+          echo "$OUTPUT"
+
+          if [ -n "$TAG_VERSION" ] && [ "$GITHUB_REF_NAME" != "main" ]; then
+            if ! echo "$OUTPUT" | grep -q "$TAG_VERSION"; then
+              echo "Error: expected version output to contain '$TAG_VERSION', got '$OUTPUT'"
+              exit 1
+            fi
+          fi
+
+          echo "=== Testing --help ==="
+          dist/agy-pool-linux-amd64 --help
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          generate_release_notes: true
+          files: |
+            dist/agy-pool-linux-amd64
+            dist/agy-pool-linux-arm64
+            dist/agy-pool-darwin-amd64
+            dist/agy-pool-darwin-arm64
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
