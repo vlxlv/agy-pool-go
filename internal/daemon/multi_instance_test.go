@@ -123,19 +123,15 @@ func TestMultiInstance_ForegroundIsolation(t *testing.T) {
 		})
 	}()
 
-	// Wait for both to be listening
-	for i := 0; i < 30; i++ {
-		if IsPortListening(portA) && IsPortListening(portB) {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	select {
+	case <-readyA:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("server A failed to become ready")
 	}
-
-	if !IsPortListening(portA) {
-		t.Fatalf("port A (%d) failed to listen", portA)
-	}
-	if !IsPortListening(portB) {
-		t.Fatalf("port B (%d) failed to listen", portB)
+	select {
+	case <-readyB:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("server B failed to become ready")
 	}
 
 	// Verify status for both
