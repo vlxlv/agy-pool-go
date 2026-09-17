@@ -13,7 +13,6 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
-	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -64,62 +63,6 @@ func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 
 	fmt.Fprintf(stdout, "%s✓ Load balancing strategy set to: %s%s%s\n", clrGreen, clrBold, targetStrategy, clrReset)
 	return true
-}
-
-func handleAuditRouting(args []string, stdout, stderr io.Writer) int {
-	opts := diagnostics.AuditOptions{}
-
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "-h" || arg == "--help":
-			fmt.Fprintf(stdout, "usage: agy-pool audit-routing [--duration DURATION] [--json] [--report PATH]\n\n")
-			fmt.Fprintf(stdout, "Audit real max_quota routing behavior and headroom protection in real time.\n\n")
-			fmt.Fprintf(stdout, "Options:\n")
-			fmt.Fprintf(stdout, "  --duration DURATION, -d DURATION  Run for a fixed duration (e.g. 30s, 10m, 1h)\n")
-			fmt.Fprintf(stdout, "  --json                            Emit machine-readable JSONL events\n")
-			fmt.Fprintf(stdout, "  --report PATH                     Write report summary to file\n")
-			return 0
-		case arg == "--duration" || arg == "-d":
-			if i+1 < len(args) {
-				d, err := time.ParseDuration(args[i+1])
-				if err != nil {
-					fmt.Fprintf(stderr, "%s[Error] Invalid duration %q: %v%s\n", clrRed, args[i+1], err, clrReset)
-					return 2
-				}
-				opts.Duration = d
-				i++
-			} else {
-				fmt.Fprintf(stderr, "agy-pool audit-routing: error: flag needs an argument: %s\n", arg)
-				return 2
-			}
-		case strings.HasPrefix(arg, "--duration="):
-			dStr := strings.TrimPrefix(arg, "--duration=")
-			d, err := time.ParseDuration(dStr)
-			if err != nil {
-				fmt.Fprintf(stderr, "%s[Error] Invalid duration %q: %v%s\n", clrRed, dStr, err, clrReset)
-				return 2
-			}
-			opts.Duration = d
-		case arg == "--json":
-			opts.JSONMode = true
-		case arg == "--report":
-			if i+1 < len(args) {
-				opts.ReportPath = args[i+1]
-				i++
-			} else {
-				fmt.Fprintf(stderr, "agy-pool audit-routing: error: flag needs an argument: %s\n", arg)
-				return 2
-			}
-		case strings.HasPrefix(arg, "--report="):
-			opts.ReportPath = strings.TrimPrefix(arg, "--report=")
-		default:
-			fmt.Fprintf(stderr, "agy-pool audit-routing: error: unrecognized argument: %s\n", arg)
-			return 2
-		}
-	}
-
-	return diagnostics.RunAuditRouting(nil, opts, stdout, stderr)
 }
 
 func formatLastUsed(ts *int64, now int64) string {
@@ -215,18 +158,18 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 			statusStr = "✖ Auth Error"
 		} else if isCooling {
 			if isActive {
-				statusStr = "* Active (Cooldown)"
+				statusStr = "CLI Base (Cooldown)"
 			} else {
 				statusStr = "Cooldown"
 			}
 		} else if isExhausted {
 			if isActive {
-				statusStr = "* Active (Exhausted)"
+				statusStr = "CLI Base (Exhausted)"
 			} else {
 				statusStr = "Exhausted"
 			}
 		} else if isActive {
-			statusStr = "* Active"
+			statusStr = "CLI Base"
 		}
 
 		hits := a.GetHits()
@@ -250,7 +193,7 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 	if strat == "" {
 		strat = config.StrategyMaxQuota
 	}
-	fmt.Fprintf(stdout, "\nStrategy: %s | Active Account: %s | Total: %d account(s)\n",
+	fmt.Fprintf(stdout, "\nStrategy: %s | CLI Base: %s | Total: %d account(s)\n",
 		strat, activeID, len(pool.Accounts))
 	return 0
 }
@@ -382,7 +325,7 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 	if totalAccounts == 0 {
 		fmt.Fprintf(stdout, "Pool    : 0 accounts (empty)\n")
 	} else {
-		fmt.Fprintf(stdout, "Pool    : %d accounts | Active: %s | %d Ready | %d Cooldown | %d Restricted\n",
+		fmt.Fprintf(stdout, "Pool    : %d accounts | CLI Base: %s | %d Ready | %d Cooldown | %d Restricted\n",
 			totalAccounts, activeName, readyCnt, cooldownCnt, restrictedCnt)
 	}
 	fmt.Fprintf(stdout, "Strategy: %s\n", strat)

@@ -119,18 +119,18 @@ func ListAccounts(target string, stdout, stderr io.Writer) {
 			marker = fmt.Sprintf("%s✖ Auth Error%s", clrRed, clrReset)
 		} else if isCooling {
 			if isActive {
-				marker = fmt.Sprintf("%s* Active (Cooldown)%s", clrYellow, clrReset)
+				marker = fmt.Sprintf("%sCLI Base (Cooldown)%s", clrYellow, clrReset)
 			} else {
 				marker = fmt.Sprintf("%sCooldown%s", clrYellow, clrReset)
 			}
 		} else if isExhausted {
 			if isActive {
-				marker = fmt.Sprintf("%s* Active (Exhausted)%s", clrRed, clrReset)
+				marker = fmt.Sprintf("%sCLI Base (Exhausted)%s", clrRed, clrReset)
 			} else {
 				marker = fmt.Sprintf("%sExhausted%s", clrDim, clrReset)
 			}
 		} else if isActive {
-			marker = fmt.Sprintf("%s* Active%s", clrGreen, clrReset)
+			marker = fmt.Sprintf("%sCLI Base%s", clrGreen, clrReset)
 		} else {
 			marker = fmt.Sprintf("%sReady%s", clrCyan, clrReset)
 		}
@@ -170,8 +170,10 @@ func ListAccounts(target string, stdout, stderr io.Writer) {
 	}
 
 	fmt.Fprintf(stdout, "%s\n", subSep)
-	fmt.Fprintf(stdout, " %s[* Active]%s %sCLI Base Token%s    %s[Ready]%s %sIn Rotation Pool%s\n",
-		clrGreen, clrReset, clrDim, clrReset, clrCyan, clrReset, clrDim, clrReset)
+	fmt.Fprintf(stdout, " %s[CLI Base]%s %sBase account for CLI/auth metadata%s\n",
+		clrGreen, clrReset, clrDim, clrReset)
+	fmt.Fprintf(stdout, " %s[Ready]%s    %sAvailable in rotation pool%s\n",
+		clrCyan, clrReset, clrDim, clrReset)
 	fmt.Fprintf(stdout, " %s[Cooldown]%s %sRate Limited%s      %s[Exhausted] Quota Depleted%s\n",
 		clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
 	fmt.Fprintf(stdout, " Strategy: %s%s%s | Gateway Proxy: %s\n",
@@ -216,7 +218,7 @@ func SwitchAccount(target string, stdout, stderr io.Writer) {
 		fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
 		return
 	}
-	fmt.Fprintf(stdout, "%s✓ Switched active account to: %s%s%s\n", clrGreen, clrBold, accounts.DisplayAccountName(acc), clrReset)
+	fmt.Fprintf(stdout, "%s✓ Switched CLI base account to: %s%s%s\n", clrGreen, clrBold, accounts.DisplayAccountName(acc), clrReset)
 }
 
 func handleExport(args []string, stdout, stderr io.Writer) int {

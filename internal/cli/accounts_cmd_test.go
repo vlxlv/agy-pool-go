@@ -102,8 +102,8 @@ func TestListAccounts_EmptyAndPopulated(t *testing.T) {
 	if !strings.Contains(out, "Personal") {
 		t.Errorf("expected account name Personal, got: %s", out)
 	}
-	if !strings.Contains(out, "* Active") {
-		t.Errorf("expected * Active status, got: %s", out)
+	if !strings.Contains(out, "CLI Base") {
+		t.Errorf("expected CLI Base status, got: %s", out)
 	}
 	if !strings.Contains(out, "42") {
 		t.Errorf("expected 42 hits, got: %s", out)
@@ -117,7 +117,7 @@ func TestListAccounts_EmptyAndPopulated(t *testing.T) {
 		t.Fatalf("expected exit 0 on quota, got %d", code)
 	}
 	qOut := stdout.String()
-	if !strings.Contains(qOut, "Personal") || !strings.Contains(qOut, "Hits: 42") || !strings.Contains(qOut, "[* Active]") {
+	if !strings.Contains(qOut, "Personal") || !strings.Contains(qOut, "Hits: 42") || !strings.Contains(qOut, "[CLI Base]") {
 		t.Errorf("expected dashboard cards in quota output, got: %s", qOut)
 	}
 

@@ -207,7 +207,7 @@ func TestRunDoctor_PopulatedPoolAndPrivacy(t *testing.T) {
 	}
 
 	// Friendly name or Account ID should appear
-	if !strings.Contains(out, "Active: Work Account") {
+	if !strings.Contains(out, "CLI Base: Work Account") {
 		t.Errorf("expected active account display name 'Work Account', got:\n%s", out)
 	}
 	if !strings.Contains(out, "Session Continuity: Database active (3 conversation(s) recorded)") {

@@ -710,7 +710,7 @@ func RunDoctor(out io.Writer) bool {
 			if pool.ActiveAccountID != nil && *pool.ActiveAccountID != "" {
 				for _, a := range pool.Accounts {
 					if a != nil && a.ID == *pool.ActiveAccountID {
-						activeStr = fmt.Sprintf(" | Active: %s", accounts.DisplayAccountName(a))
+						activeStr = fmt.Sprintf(" | CLI Base: %s", accounts.DisplayAccountName(a))
 						break
 					}
 				}

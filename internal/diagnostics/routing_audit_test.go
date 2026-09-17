@@ -1,12 +1,8 @@
 package diagnostics
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -427,118 +423,6 @@ func TestAudit_L_JSONOutputValid(t *testing.T) {
 		if _, ok := parsed[f]; !ok {
 			t.Fatalf("missing required field in JSON: %q", f)
 		}
-	}
-}
-
-// Test M: Duration termination works
-func TestAudit_M_DurationTerminationWorks(t *testing.T) {
-	tmpDir := t.TempDir()
-	logFile := tmpDir + "/test.log"
-
-	opts := AuditOptions{
-		Duration: 100 * time.Millisecond,
-		LogPath:  logFile,
-	}
-
-	var out bytes.Buffer
-	start := time.Now()
-	auditor := NewAuditor(opts)
-	err := auditor.Run(context.Background(), &out, &out)
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("auditor run returned error: %v", err)
-	}
-	if elapsed > 1*time.Second {
-		t.Fatalf("duration termination took too long: %v (expected ~100ms)", elapsed)
-	}
-	if !strings.Contains(out.String(), "Summary") {
-		t.Fatalf("expected output to contain Summary, got:\n%s", out.String())
-	}
-}
-
-// Test N: Ctrl-C / context cancellation graceful termination
-func TestAudit_N_ContextCancellationGracefulTermination(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	eventChan := make(chan RoutingAuditEvent)
-	opts := AuditOptions{
-		EventChan: eventChan,
-	}
-
-	var out bytes.Buffer
-	auditor := NewAuditor(opts)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_ = auditor.Run(ctx, &out, &out)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel() // simulate Ctrl-C
-
-	wg.Wait()
-	if !strings.Contains(out.String(), "Summary") {
-		t.Fatalf("expected graceful summary output on cancellation, got:\n%s", out.String())
-	}
-}
-
-func TestAudit_ReaderAndReport(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = config.ConfigureStateDir(tmpDir)
-
-	now := 1789560000.0
-	pool := &storage.Pool{
-		Strategy: config.StrategyMaxQuota,
-		Accounts: []*storage.Account{
-			makeTestAccount("acc_work", "Work", floatPtr(0.824), floatPtr(0.651), now),
-			makeTestAccount("acc_backup", "Backup", floatPtr(0.962), floatPtr(0.669), now),
-		},
-	}
-	_ = storage.SavePool(pool)
-
-	logLines := `[2026-09-17 17:30:02] [PROXY] POST v1internal:streamGenerateContent -> Work (Status: 200)
-[2026-09-17 17:30:05] [PROXY] POST v1internal:listExperiments -> Work (Status: 200)
-[2026-09-17 17:30:18] [PROXY] POST v1internal:streamGenerateContent -> Backup (Status: 200)
-`
-	reportPath := tmpDir + "/report.json"
-	opts := AuditOptions{
-		Reader:     strings.NewReader(logLines),
-		ReportPath: reportPath,
-	}
-
-	var out bytes.Buffer
-	auditor := NewAuditor(opts)
-	err := auditor.Run(context.Background(), &out, &out)
-	if err != nil {
-		t.Fatalf("run failed: %v", err)
-	}
-
-	// Verify human output
-	outStr := out.String()
-	if !strings.Contains(outStr, "Work") || !strings.Contains(outStr, "Backup") {
-		t.Fatalf("expected Work and Backup in output:\n%s", outStr)
-	}
-	if !strings.Contains(outStr, "PASS") {
-		t.Fatalf("expected PASS in output:\n%s", outStr)
-	}
-	// listExperiments should NOT be counted (only generation requests)
-	if auditor.summary.GenerationAttempts != 2 {
-		t.Fatalf("expected exactly 2 generation attempts (ignoring listExperiments), got %d", auditor.summary.GenerationAttempts)
-	}
-
-	// Verify report file
-	reportData, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("failed to read report file: %v", err)
-	}
-	if !strings.Contains(string(reportData), "Work") {
-		t.Fatalf("expected Work in report file: %s", string(reportData))
-	}
-	if auditor.summary.Violations != 0 {
-		t.Fatalf("expected 0 violations, got %d", auditor.summary.Violations)
 	}
 }
 

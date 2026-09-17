@@ -128,22 +128,6 @@ agy-pool uninstall
 
 Uninstall safely removes `agy-pool`-owned shims (`agy`, `agy-raw`, `agy-orig`), the `agy-pool` binary, and the managed native copy in `libexec/agy-pool`, while leaving any external native binaries completely untouched.
 
-#### Production Routing Audit
-
-Validate actual routing decisions and headroom protection against authoritative scheduler and quota state in real time:
-
-```bash
-# Audit live generation routing for 10 minutes
-agy-pool audit-routing --duration 10m
-
-# Output machine-readable JSONL events
-agy-pool audit-routing --duration 30m --json
-```
-
-- **Read-only diagnostic**: Observes live generation routing without mutating pool state or interfering with proxy traffic.
-- **Authoritative validation**: Evaluates each candidate selection against the daemon's internal scheduler and quota capacity state.
-- **Strategy-aware**: Reserve headroom validation (15% 5H, 10% Weekly) applies strictly to `max_quota`; `least_used` and `round_robin` are audited without headroom constraints.
-- **Privacy & security**: No request content, prompt text, model responses, tokens, authorization headers, or email addresses are logged or emitted.
 
 ---
 

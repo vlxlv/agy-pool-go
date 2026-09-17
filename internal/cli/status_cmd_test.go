@@ -98,7 +98,7 @@ func TestStatusCmd_NoQuotaBarsAndDashboard(t *testing.T) {
 		"Gateway :",
 		"STOPPED",
 		"State   :",
-		"Pool    : 1 accounts | Active: MainAccount | 1 Ready | 0 Cooldown | 0 Restricted",
+		"Pool    : 1 accounts | CLI Base: MainAccount | 1 Ready | 0 Cooldown | 0 Restricted",
 		"Strategy: max_quota",
 		"Stopped",
 	} {
@@ -114,8 +114,8 @@ func TestStatusCmd_NoQuotaBarsAndDashboard(t *testing.T) {
 		"Quota age:",
 		"Hits:",
 		"Antigravity Multi-Account Pool",
-		"CLI Base Token",
-		"In Rotation Pool",
+		"Base account for CLI/auth metadata",
+		"Available in rotation pool",
 		"[━━━━",
 		"[░░░░",
 	} {
@@ -444,51 +444,33 @@ func TestQuotaCmd_ContainsProgressBars(t *testing.T) {
 	}
 }
 
-func TestAuditRoutingCLI(t *testing.T) {
-	// 1. Help flag
+func TestAuditRouting_RemovedFromCLI(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	for _, cmd := range []string{"audit-routing", "monitor-routing"} {
+		var stdout, stderr bytes.Buffer
+		code := Main([]string{cmd}, nil, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("expected code 2 when invoking removed command %q, got %d", cmd, code)
+		}
+		if !strings.Contains(stderr.String(), fmt.Sprintf("invalid choice: '%s'", cmd)) {
+			t.Fatalf("expected 'invalid choice: '%s'' in stderr, got: %s", cmd, stderr.String())
+		}
+		if strings.Contains(stderr.String(), cmd+",") {
+			t.Fatalf("usage list in error output should not contain %q: %s", cmd, stderr.String())
+		}
+	}
+
+	// Help output must not mention audit-routing or monitor-routing
 	var stdout, stderr bytes.Buffer
-	code := Main([]string{"audit-routing", "-h"}, nil, &stdout, &stderr)
+	code := Main([]string{"--help"}, nil, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("expected exit 0 on audit-routing -h, got %d", code)
+		t.Fatalf("expected code 0 for --help, got %d", code)
 	}
-	if !strings.Contains(stdout.String(), "usage: agy-pool audit-routing") {
-		t.Fatalf("expected usage message, got:\n%s", stdout.String())
-	}
-
-	// 2. Alias monitor-routing
-	stdout.Reset()
-	stderr.Reset()
-	code = Main([]string{"monitor-routing", "-h"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit 0 on monitor-routing -h, got %d", code)
-	}
-
-	// 3. Invalid flag
-	stdout.Reset()
-	stderr.Reset()
-	code = Main([]string{"audit-routing", "--unknown-flag"}, nil, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("expected exit 2 on unknown flag, got %d", code)
-	}
-
-	// 4. Invalid duration
-	stdout.Reset()
-	stderr.Reset()
-	code = Main([]string{"audit-routing", "--duration", "not-a-duration"}, nil, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("expected exit 2 on invalid duration, got %d", code)
-	}
-
-	// 5. Short duration run
-	tmpDir := t.TempDir()
-	_ = config.ConfigureDataDir(tmpDir)
-	stdout.Reset()
-	stderr.Reset()
-	code = Main([]string{"audit-routing", "--duration", "50ms"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit 0 on duration run, got %d", code)
-	}
-	if !strings.Contains(stdout.String(), "Summary") {
-		t.Fatalf("expected output to contain Summary, got:\n%s", stdout.String())
+	for _, term := range []string{"audit-routing", "monitor-routing"} {
+		if strings.Contains(stdout.String(), term) {
+			t.Fatalf("help text must not mention %q, got: %s", term, stdout.String())
+		}
 	}
 }
