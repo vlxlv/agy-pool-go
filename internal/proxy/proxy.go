@@ -171,6 +171,37 @@ func ReadRequestBody(r *http.Request) ([]byte, error) {
 	return body, nil
 }
 
+// IsGenerationRequest reports whether the request targets a content generation endpoint.
+func IsGenerationRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := r.URL.RequestURI()
+	if path == "" {
+		path = r.URL.Path
+	}
+	return strings.Contains(strings.ToLower(path), "generatecontent")
+}
+
+// IsStreamRequest reports whether the request targets a streaming endpoint or expects text/event-stream.
+func IsStreamRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if IsGenerationRequest(r) {
+		return true
+	}
+	path := ""
+	if r.URL != nil {
+		path = r.URL.RequestURI()
+		if path == "" {
+			path = r.URL.Path
+		}
+	}
+	return strings.Contains(strings.ToLower(path), "stream") ||
+		strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+}
+
 // FilterRequestHeaders builds upstream headers, rewriting Host, Auth, User-Agent, and Accept-Encoding.
 func FilterRequestHeaders(r *http.Request, accessToken, clientUA string) http.Header {
 	excluded := HopByHopNames(r.Header)
@@ -179,6 +210,10 @@ func FilterRequestHeaders(r *http.Request, accessToken, clientUA string) http.He
 	excluded["authorization"] = true
 	excluded["accept-encoding"] = true
 	excluded["expect"] = true
+	if IsGenerationRequest(r) {
+		excluded["idempotency-key"] = true
+		excluded["x-idempotency-key"] = true
+	}
 
 	headers := make(http.Header)
 	for k, vv := range r.Header {
@@ -254,10 +289,8 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pathLower := strings.ToLower(path)
-	isGeneration := strings.Contains(pathLower, "generatecontent")
-	isSSE := isGeneration || strings.Contains(pathLower, "stream") ||
-		strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+	isGeneration := IsGenerationRequest(r)
+	isSSE := IsStreamRequest(r)
 
 	maybeRotateLog()
 
@@ -349,8 +382,13 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// CRITICAL AUDIT: Ensure req.GetBody is nil so net/http cannot automatically rewind/retry POST
 		upstreamReq.GetBody = nil
+		if isGeneration {
+			upstreamReq.Close = true
+		}
 
-		resp, err := HTTPClient.Do(upstreamReq)
+		client := GetClient(isGeneration)
+		resp, err := client.Do(upstreamReq)
+
 		if err != nil {
 			lastError = err
 

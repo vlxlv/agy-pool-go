@@ -201,3 +201,135 @@ func TestNetHttpTransport_NoAutomaticRetry(t *testing.T) {
 		t.Fatalf("BaseTransport executed hidden retry! attempts = %d, want 1", attempts)
 	}
 }
+
+func TestRequestClassification(t *testing.T) {
+	tests := []struct {
+		url      string
+		accept   string
+		isGen    bool
+		isStream bool
+	}{
+		{"/v1/models/gemini-pro:generateContent", "", true, true},
+		{"/v1/models/gemini-pro:streamGenerateContent", "", true, true},
+		{"/v1beta/projects/p/locations/l/publishers/google/models/gemini-1.5:generateContent?alt=sse", "", true, true},
+		{"/v1/models", "", false, false},
+		{"/v1/models?stream=true", "", false, true},
+		{"/v1/models", "text/event-stream", false, true},
+		{"/v1/models", "application/json", false, false},
+	}
+
+	for _, tt := range tests {
+		req, _ := http.NewRequest("POST", tt.url, nil)
+		if tt.accept != "" {
+			req.Header.Set("Accept", tt.accept)
+		}
+		if got := IsGenerationRequest(req); got != tt.isGen {
+			t.Errorf("IsGenerationRequest(%s) = %v, want %v", tt.url, got, tt.isGen)
+		}
+		if got := IsStreamRequest(req); got != tt.isStream {
+			t.Errorf("IsStreamRequest(%s) = %v, want %v", tt.url, got, tt.isStream)
+		}
+	}
+}
+
+func TestGenerationTransport_NoReplayConfiguration(t *testing.T) {
+	if !GenerationTransport.DisableKeepAlives {
+		t.Fatal("GenerationTransport must have DisableKeepAlives == true")
+	}
+	if GenerationTransport.ForceAttemptHTTP2 {
+		t.Fatal("GenerationTransport must not force HTTP/2")
+	}
+	if GenerationTransport.TLSHandshakeTimeout == 0 {
+		t.Fatal("GenerationTransport TLSHandshakeTimeout must be set")
+	}
+}
+
+func TestGenerationRoundTripper_StripsIdempotencyAndGetBody(t *testing.T) {
+	var hookCalled bool
+	RoundTripHook = func(req *http.Request) {
+		hookCalled = true
+	}
+	defer func() { RoundTripHook = nil }()
+
+	var seenGetBody bool
+	var seenIdempotencyKey string
+	var seenXIdempotencyKey string
+
+	mockRT := &mockRoundTripper{
+		roundTripFunc: func(req *http.Request) (*http.Response, error) {
+			seenGetBody = req.GetBody != nil
+			seenIdempotencyKey = req.Header.Get("Idempotency-Key")
+			seenXIdempotencyKey = req.Header.Get("X-Idempotency-Key")
+			return &http.Response{
+				StatusCode: 200,
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	rt := &GenerationRoundTripper{Base: mockRT}
+	req, _ := http.NewRequest("POST", "http://example.com/generateContent", strings.NewReader("body"))
+	req.Header.Set("Idempotency-Key", "test-key")
+	req.Header.Set("X-Idempotency-Key", "test-x-key")
+
+	if req.GetBody == nil {
+		t.Fatal("expected NewRequest with strings.Reader to have initialized GetBody")
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	if !hookCalled {
+		t.Fatal("expected RoundTripHook to be called")
+	}
+	if seenGetBody {
+		t.Fatal("expected GenerationRoundTripper to have cleared GetBody")
+	}
+	if seenIdempotencyKey != "" {
+		t.Fatalf("expected Idempotency-Key to be stripped, got %q", seenIdempotencyKey)
+	}
+	if seenXIdempotencyKey != "" {
+		t.Fatalf("expected X-Idempotency-Key to be stripped, got %q", seenXIdempotencyKey)
+	}
+}
+
+func TestFilterRequestHeaders_StripsIdempotencyForGeneration(t *testing.T) {
+	// Generation request: idempotency headers stripped
+	genReq, _ := http.NewRequest("POST", "/v1/generateContent", nil)
+	genReq.Header.Set("Idempotency-Key", "gen-key")
+	genReq.Header.Set("X-Idempotency-Key", "gen-x-key")
+	genReq.Header.Set("X-Custom", "custom-val")
+
+	h1 := FilterRequestHeaders(genReq, "token", "ua")
+	if h1.Get("Idempotency-Key") != "" {
+		t.Fatal("FilterRequestHeaders must strip Idempotency-Key for generation requests")
+	}
+	if h1.Get("X-Idempotency-Key") != "" {
+		t.Fatal("FilterRequestHeaders must strip X-Idempotency-Key for generation requests")
+	}
+	if h1.Get("X-Custom") != "custom-val" {
+		t.Fatal("FilterRequestHeaders must retain non-idempotency headers")
+	}
+
+	// Non-generation request: idempotency headers preserved
+	nonGenReq, _ := http.NewRequest("POST", "/v1/models", nil)
+	nonGenReq.Header.Set("Idempotency-Key", "non-gen-key")
+	h2 := FilterRequestHeaders(nonGenReq, "token", "ua")
+	if h2.Get("Idempotency-Key") != "non-gen-key" {
+		t.Fatal("FilterRequestHeaders should retain Idempotency-Key for non-generation requests")
+	}
+}
+
+type mockRoundTripper struct {
+	roundTripFunc func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.roundTripFunc(req)
+}
