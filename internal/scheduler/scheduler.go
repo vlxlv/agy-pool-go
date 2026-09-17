@@ -8,6 +8,39 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
+// FiveHourReserveFloor is the threshold below or equal to which an account's 5-hour quota is in reserve.
+const FiveHourReserveFloor = 0.15
+
+// WeeklyReserveFloor is the threshold below or equal to which an account's weekly quota is in reserve.
+const WeeklyReserveFloor = 0.10
+
+// IsReserveCandidate reports whether a candidate account has one or more known quota windows
+// at or below the reserve thresholds, while not being depleted.
+func IsReserveCandidate(acc *storage.Account, now float64) bool {
+	if acc == nil {
+		return false
+	}
+	capState := quota.ComputeCapacityState(acc, now)
+	return IsReserveCapacity(capState)
+}
+
+// IsReserveCapacity reports whether a computed CapacityState qualifies as reserve.
+func IsReserveCapacity(capState quota.CapacityState) bool {
+	if capState.IsDepleted {
+		return false
+	}
+	if capState.Q5Known && capState.Q5 != nil && *capState.Q5 <= FiveHourReserveFloor {
+		return true
+	}
+	if capState.Q7Known && capState.Q7 != nil && *capState.Q7 <= WeeklyReserveFloor {
+		return true
+	}
+	if capState.LegacyFractionKnown && capState.Q5 != nil && *capState.Q5 <= FiveHourReserveFloor {
+		return true
+	}
+	return false
+}
+
 // OrderCandidates orders account candidates according to the specified strategy and reference time.
 func OrderCandidates(candidates []*storage.Account, strategy string, pool *storage.Pool, now float64) []*storage.Account {
 	if len(candidates) == 0 {
@@ -93,8 +126,18 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		}
 
 	default: // StrategyMaxQuota
-		sort.SliceStable(eligible, func(i, j int) bool {
-			a, b := eligible[i], eligible[j]
+		var healthy []*storage.Account
+		var reserve []*storage.Account
+
+		for _, acc := range eligible {
+			if IsReserveCandidate(acc, now) {
+				reserve = append(reserve, acc)
+			} else {
+				healthy = append(healthy, acc)
+			}
+		}
+
+		maxQuotaCompare := func(a, b *storage.Account) bool {
 			capA := quota.ComputeCapacityState(a, now)
 			capB := quota.ComputeCapacityState(b, now)
 
@@ -122,7 +165,19 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 
 			hitsA, hitsB := a.GetHits(), b.GetHits()
 			return hitsA < hitsB // Lowest hits first (key had -hits descending)
+		}
+
+		sort.SliceStable(healthy, func(i, j int) bool {
+			return maxQuotaCompare(healthy[i], healthy[j])
 		})
+
+		sort.SliceStable(reserve, func(i, j int) bool {
+			return maxQuotaCompare(reserve[i], reserve[j])
+		})
+
+		eligible = make([]*storage.Account, 0, len(healthy)+len(reserve))
+		eligible = append(eligible, healthy...)
+		eligible = append(eligible, reserve...)
 	}
 
 	// Secondary tiers ordering: Depleted accounts ordered by raw_floor DESC, hits ASC

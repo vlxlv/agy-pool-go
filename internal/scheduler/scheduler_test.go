@@ -331,3 +331,293 @@ func TestSchedulerSnapshotConsistent(t *testing.T) {
 		t.Fatalf("snapshot data inconsistent: %+v", acc)
 	}
 }
+
+func makeAccountWithWindows(id string, q5, qw *float64, now float64) *storage.Account {
+	lq := &storage.QuotaState{
+		UpdatedAt: int64Ptr(int64(now - 10)),
+	}
+	if q5 != nil {
+		lq.Gemini5H = &storage.QuotaWindow{
+			Fraction:  q5,
+			ResetTime: "2026-09-17T20:00:00Z",
+		}
+	}
+	if qw != nil {
+		lq.GeminiWeekly = &storage.QuotaWindow{
+			Fraction:  qw,
+			ResetTime: "2026-09-24T00:00:00Z",
+		}
+	}
+	return &storage.Account{
+		ID:        id,
+		Status:    "active",
+		LastQuota: lq,
+	}
+}
+
+// Test A: Healthy beats Reserve
+func TestMaxQuota_ReserveHeadroom_HealthyBeatsReserve(t *testing.T) {
+	now := 1789560000.0
+	mainAcc := makeAccountWithWindows("Main", floatPtr(0.10), floatPtr(0.50), now)
+	backupAcc := makeAccountWithWindows("Backup", floatPtr(0.80), floatPtr(0.50), now)
+
+	ordered := OrderCandidates([]*storage.Account{mainAcc, backupAcc}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(ordered))
+	}
+	if ordered[0].ID != "Backup" || ordered[1].ID != "Main" {
+		t.Fatalf("expected [Backup, Main], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+// Test B: Existing pace ranking preserved among Healthy
+func TestMaxQuota_ReserveHeadroom_PaceRankingPreservedAmongHealthy(t *testing.T) {
+	now := 1789560000.0
+	acc1 := makeAccountWithWindows("acc_1", floatPtr(0.80), floatPtr(0.90), now)
+	acc2 := makeAccountWithWindows("acc_2", floatPtr(0.70), floatPtr(0.85), now)
+
+	ordered := OrderCandidates([]*storage.Account{acc2, acc1}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(ordered))
+	}
+	// acc1 has higher fractions and better pace, so acc1 must beat acc2
+	if ordered[0].ID != "acc_1" || ordered[1].ID != "acc_2" {
+		t.Fatalf("expected [acc_1, acc_2], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+// Test C: Reserve fallback works when all candidates are below reserve threshold
+func TestMaxQuota_ReserveHeadroom_ReserveFallbackWorks(t *testing.T) {
+	now := 1789560000.0
+	r1 := makeAccountWithWindows("res_1", floatPtr(0.12), floatPtr(0.80), now)
+	r2 := makeAccountWithWindows("res_2", floatPtr(0.08), floatPtr(0.80), now)
+
+	ordered := OrderCandidates([]*storage.Account{r2, r1}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(ordered))
+	}
+	// Both are Reserve; r1 has higher 5H fraction than r2, so r1 wins inside Reserve
+	if ordered[0].ID != "res_1" || ordered[1].ID != "res_2" {
+		t.Fatalf("expected [res_1, res_2], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+// Test D: Depleted never wins over Reserve
+func TestMaxQuota_ReserveHeadroom_DepletedNeverWinsOverReserve(t *testing.T) {
+	now := 1789560000.0
+	depAcc := makeAccountWithWindows("acc_depleted", floatPtr(0.004), floatPtr(0.50), now)
+	resAcc := makeAccountWithWindows("acc_reserve", floatPtr(0.10), floatPtr(0.50), now)
+
+	ordered := OrderCandidates([]*storage.Account{depAcc, resAcc}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(ordered))
+	}
+	if ordered[0].ID != "acc_reserve" || ordered[1].ID != "acc_depleted" {
+		t.Fatalf("expected [acc_reserve, acc_depleted], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+// Test E: Weekly protection: 5H high, weekly <= 10% -> Reserve
+func TestMaxQuota_ReserveHeadroom_WeeklyProtection(t *testing.T) {
+	now := 1789560000.0
+	accWeeklyLow := makeAccountWithWindows("weekly_low", floatPtr(0.80), floatPtr(0.08), now)
+	accHealthy := makeAccountWithWindows("healthy", floatPtr(0.60), floatPtr(0.50), now)
+
+	if !IsReserveCandidate(accWeeklyLow, now) {
+		t.Fatalf("expected accWeeklyLow to be classified as Reserve")
+	}
+	if IsReserveCandidate(accHealthy, now) {
+		t.Fatalf("expected accHealthy to NOT be classified as Reserve")
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accWeeklyLow, accHealthy}, config.StrategyMaxQuota, nil, now)
+	if ordered[0].ID != "healthy" || ordered[1].ID != "weekly_low" {
+		t.Fatalf("expected [healthy, weekly_low], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+// Test F: 5H protection: 5H <= 15%, weekly healthy -> Reserve
+func TestMaxQuota_ReserveHeadroom_FiveHourProtection(t *testing.T) {
+	now := 1789560000.0
+	acc5HLow := makeAccountWithWindows("5h_low", floatPtr(0.12), floatPtr(0.70), now)
+	accHealthy := makeAccountWithWindows("healthy", floatPtr(0.60), floatPtr(0.70), now)
+
+	if !IsReserveCandidate(acc5HLow, now) {
+		t.Fatalf("expected acc5HLow to be classified as Reserve")
+	}
+	if IsReserveCandidate(accHealthy, now) {
+		t.Fatalf("expected accHealthy to NOT be classified as Reserve")
+	}
+
+	ordered := OrderCandidates([]*storage.Account{acc5HLow, accHealthy}, config.StrategyMaxQuota, nil, now)
+	if ordered[0].ID != "healthy" || ordered[1].ID != "5h_low" {
+		t.Fatalf("expected [healthy, 5h_low], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+// Test G, H, I, J: Exact boundary conditions
+func TestMaxQuota_ReserveHeadroom_Boundaries(t *testing.T) {
+	now := 1789560000.0
+
+	// G. Boundary: exactly 15% 5H -> Reserve
+	accExact15 := makeAccountWithWindows("exact_15", floatPtr(0.15), floatPtr(0.70), now)
+	if !IsReserveCandidate(accExact15, now) {
+		t.Fatalf("G failed: exactly 0.15 5H should be Reserve")
+	}
+
+	// H. Boundary: just above 15% 5H -> Healthy
+	accAbove15 := makeAccountWithWindows("above_15", floatPtr(0.150001), floatPtr(0.70), now)
+	if IsReserveCandidate(accAbove15, now) {
+		t.Fatalf("H failed: 0.150001 5H should be Healthy")
+	}
+
+	// I. Boundary: exactly 10% weekly -> Reserve
+	accExact10 := makeAccountWithWindows("exact_10", floatPtr(0.70), floatPtr(0.10), now)
+	if !IsReserveCandidate(accExact10, now) {
+		t.Fatalf("I failed: exactly 0.10 weekly should be Reserve")
+	}
+
+	// J. Boundary: just above 10% weekly -> Healthy
+	accAbove10 := makeAccountWithWindows("above_10", floatPtr(0.70), floatPtr(0.100001), now)
+	if IsReserveCandidate(accAbove10, now) {
+		t.Fatalf("J failed: 0.100001 weekly should be Healthy")
+	}
+}
+
+// Test K: Unknown/missing window not automatically treated as zero/reserve
+func TestMaxQuota_ReserveHeadroom_UnknownMissingWindow(t *testing.T) {
+	now := 1789560000.0
+
+	// Only 5H known and healthy; weekly is nil
+	accOnly5H := makeAccountWithWindows("only_5h", floatPtr(0.80), nil, now)
+	if IsReserveCandidate(accOnly5H, now) {
+		t.Fatalf("missing weekly window should not trigger Reserve")
+	}
+
+	// Only weekly known and healthy; 5H is nil
+	accOnlyWeekly := makeAccountWithWindows("only_weekly", nil, floatPtr(0.80), now)
+	if IsReserveCandidate(accOnlyWeekly, now) {
+		t.Fatalf("missing 5H window should not trigger Reserve")
+	}
+
+	// Neither window known
+	accNoWindows := &storage.Account{ID: "no_windows", Status: "active"}
+	if IsReserveCandidate(accNoWindows, now) {
+		t.Fatalf("completely unknown account should not trigger Reserve")
+	}
+}
+
+// Test L: max_quota only; least_used and round_robin remain unchanged
+func TestMaxQuota_ReserveHeadroom_LeastUsedAndRoundRobinUnchanged(t *testing.T) {
+	now := 1789560000.0
+
+	// Main has low quota (Reserve for max_quota) but low request count
+	mainAcc := makeAccountWithWindows("Main", floatPtr(0.10), floatPtr(0.50), now)
+	mainAcc.RequestCount = 2
+
+	// Backup has high quota (Healthy) but higher request count
+	backupAcc := makeAccountWithWindows("Backup", floatPtr(0.80), floatPtr(0.50), now)
+	backupAcc.RequestCount = 20
+
+	// Under max_quota: Backup wins because Main is in Reserve
+	orderedMQ := OrderCandidates([]*storage.Account{mainAcc, backupAcc}, config.StrategyMaxQuota, nil, now)
+	if orderedMQ[0].ID != "Backup" {
+		t.Fatalf("max_quota expected Backup first, got %s", orderedMQ[0].ID)
+	}
+
+	// Under least_used: Main wins because Main has fewer requests (Hits=2 vs 20)
+	orderedLU := OrderCandidates([]*storage.Account{backupAcc, mainAcc}, config.StrategyLeastUsed, nil, now)
+	if orderedLU[0].ID != "Main" {
+		t.Fatalf("least_used expected Main first, got %s", orderedLU[0].ID)
+	}
+
+	// Under round_robin: cursor dictates order
+	pool := storage.NewEmptyPool()
+	pool.Strategy = "round_robin"
+	cursor := "Backup"
+	pool.RoundRobinLastAccountID = &cursor
+	orderedRR := OrderCandidates([]*storage.Account{backupAcc, mainAcc}, config.StrategyRoundRobin, pool, now)
+	if orderedRR[0].ID != "Main" {
+		t.Fatalf("round_robin expected rotation past Backup to Main, got %s", orderedRR[0].ID)
+	}
+}
+
+// Section 13: Real observed production snapshot test
+func TestMaxQuota_ReserveHeadroom_RealObservedSnapshot(t *testing.T) {
+	now := 1789560000.0
+
+	// Observed production shape:
+	// Main: 5H 0.6%, Weekly 49.2%
+	// Backup: 5H 100%, Weekly 67.1%
+	// Work: 5H 99.9%, Weekly 67.1%
+	mainAcc := makeAccountWithWindows("Main", floatPtr(0.006), floatPtr(0.492), now)
+	backupAcc := makeAccountWithWindows("Backup", floatPtr(1.0), floatPtr(0.671), now)
+	workAcc := makeAccountWithWindows("Work", floatPtr(0.999), floatPtr(0.671), now)
+
+	// Verify classifications
+	if !IsReserveCandidate(mainAcc, now) {
+		t.Fatalf("Main (5H 0.6%%) should be Reserve")
+	}
+	if IsReserveCandidate(backupAcc, now) {
+		t.Fatalf("Backup (5H 100%%) should be Healthy")
+	}
+	if IsReserveCandidate(workAcc, now) {
+		t.Fatalf("Work (5H 99.9%%) should be Healthy")
+	}
+
+	ordered := OrderCandidates([]*storage.Account{mainAcc, backupAcc, workAcc}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 3 {
+		t.Fatalf("expected 3 candidates, got %d", len(ordered))
+	}
+
+	// Main must NOT appear before Backup or Work
+	if ordered[0].ID == "Main" || ordered[1].ID == "Main" {
+		t.Fatalf("Main must not appear before Healthy candidates; got order: [%s, %s, %s]",
+			ordered[0].ID, ordered[1].ID, ordered[2].ID)
+	}
+	if ordered[2].ID != "Main" {
+		t.Fatalf("expected Main to be at index 2 (Reserve), got %s", ordered[2].ID)
+	}
+
+	// Deterministic pace comparison: Backup (1.0) has higher total pace than Work (0.999)
+	if ordered[0].ID != "Backup" || ordered[1].ID != "Work" {
+		t.Fatalf("expected [Backup, Work, Main], got [%s, %s, %s]",
+			ordered[0].ID, ordered[1].ID, ordered[2].ID)
+	}
+}
+
+// Test legacy fraction handling
+func TestMaxQuota_ReserveHeadroom_LegacyFraction(t *testing.T) {
+	now := 1789560000.0
+
+	// Legacy fraction 0.12 <= 0.15 -> Reserve
+	legacyRes := &storage.Account{
+		ID:     "legacy_res",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: floatPtr(0.12),
+			UpdatedAt:         int64Ptr(int64(now - 10)),
+		},
+	}
+	if !IsReserveCandidate(legacyRes, now) {
+		t.Fatalf("legacy 0.12 should be Reserve")
+	}
+
+	// Legacy fraction 0.50 > 0.15 -> Healthy
+	legacyHealthy := &storage.Account{
+		ID:     "legacy_healthy",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: floatPtr(0.50),
+			UpdatedAt:         int64Ptr(int64(now - 10)),
+		},
+	}
+	if IsReserveCandidate(legacyHealthy, now) {
+		t.Fatalf("legacy 0.50 should be Healthy")
+	}
+
+	ordered := OrderCandidates([]*storage.Account{legacyRes, legacyHealthy}, config.StrategyMaxQuota, nil, now)
+	if ordered[0].ID != "legacy_healthy" || ordered[1].ID != "legacy_res" {
+		t.Fatalf("expected [legacy_healthy, legacy_res], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
