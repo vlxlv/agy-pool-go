@@ -1,7 +1,6 @@
 package installer
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +19,12 @@ const (
 	AliasBlock = "\n# >>> agy-pool integration >>>\nalias agy='agy-pool run --'\nalias agy-orig='agy-raw'\n# <<< agy-pool integration <<<\n"
 )
 
+// ManagedShimMarker is the exact ownership marker embedded in all agy-pool generated shims.
+const ManagedShimMarker = "# agy-pool managed shim v1"
+
 // UserAgyShimContent is the thin POSIX shell shim for user-mode agy integration.
 const UserAgyShimContent = `#!/bin/sh
-# agy: agy-pool integration shim
+# agy-pool managed shim v1
 CONFIG_FILE="${AGY_CONFIG_FILE:-$HOME/.config/agy-pool/config.json}"
 DATA_DIR="${AGY_DATA_DIR:-$HOME/.local/share/agy-pool}"
 exec agy-pool run -c "$CONFIG_FILE" -D "$DATA_DIR" -- "$@"
@@ -30,7 +32,7 @@ exec agy-pool run -c "$CONFIG_FILE" -D "$DATA_DIR" -- "$@"
 
 // SystemAgyShimContent is the thin POSIX shell shim for system-mode agy integration.
 const SystemAgyShimContent = `#!/bin/sh
-# agy: agy-pool integration shim
+# agy-pool managed shim v1
 CONFIG_FILE="${AGY_CONFIG_FILE:-/etc/agy-pool/config.json}"
 DATA_DIR="${AGY_DATA_DIR:-/var/lib/agy-pool}"
 exec agy-pool run -c "$CONFIG_FILE" -D "$DATA_DIR" -- "$@"
@@ -38,7 +40,7 @@ exec agy-pool run -c "$CONFIG_FILE" -D "$DATA_DIR" -- "$@"
 
 // AgyRawShimContent is the thin POSIX shell shim invoking agy-pool's raw/direct execution.
 const AgyRawShimContent = `#!/bin/sh
-# agy-raw: agy-pool raw mode shim
+# agy-pool managed shim v1
 exec agy-pool raw -- "$@"
 `
 
@@ -54,7 +56,8 @@ type Options struct {
 	ConfigDir     string
 	DataDir       string
 	NativeAgyPath string
-	SkipShellRC   bool
+	SkipShellRC   bool // Deprecated: installs never modify shell RC files.
+	CleanLegacyRC bool // Opt-in cleanup of historical shell RC marker blocks during uninstall.
 	Stdout        io.Writer
 	Stderr        io.Writer
 }
@@ -299,23 +302,45 @@ func Install(opts Options) error {
 		fmt.Fprintf(out, "Note: %s is not in your PATH. Add it to your PATH to run 'agy' directly.\n", targetDir)
 	}
 
-	// 8. Configure Shell RC only if explicitly not skipped
-	if !opts.SkipShellRC && home != "" {
-		shellFiles := []string{
-			filepath.Join(home, ".bashrc"),
-			filepath.Join(home, ".zshrc"),
-		}
-		for _, rc := range shellFiles {
-			if _, err := os.Stat(rc); err == nil {
-				_ = AppendAliasIfMissing(rc)
-			}
-		}
-	}
-
+	// 8. New installs never modify shell startup / RC files; the installed shim is the sole integration.
 	return nil
 }
 
-// AppendAliasIfMissing adds the agy-pool alias block to an rc file idempotently.
+// RemoveLegacyRCBlock excises the exact historical agy-pool marker block from data,
+// leaving all surrounding content byte-for-byte identical.
+func RemoveLegacyRCBlock(data []byte) ([]byte, bool) {
+	s := string(data)
+	idxStart := strings.Index(s, MarkerStart)
+	if idxStart == -1 {
+		return data, false
+	}
+	idxEnd := strings.Index(s, MarkerEnd)
+	if idxEnd == -1 || idxEnd < idxStart {
+		return data, false
+	}
+	endBlock := idxEnd + len(MarkerEnd)
+	if endBlock < len(data) && data[endBlock] == '\r' {
+		endBlock++
+	}
+	if endBlock < len(data) && data[endBlock] == '\n' {
+		endBlock++
+	}
+
+	startBlock := idxStart
+	if startBlock > 0 && data[startBlock-1] == '\n' {
+		startBlock--
+		if startBlock > 0 && data[startBlock-1] == '\r' {
+			startBlock--
+		}
+	}
+
+	result := make([]byte, 0, len(data)-(endBlock-startBlock))
+	result = append(result, data[:startBlock]...)
+	result = append(result, data[endBlock:]...)
+	return result, true
+}
+
+// AppendAliasIfMissing adds the agy-pool alias block to an rc file idempotently (retained for legacy fixture testing).
 func AppendAliasIfMissing(rcPath string) error {
 	if err := config.AssertSafeDestructivePath(rcPath); err != nil {
 		return err
@@ -340,7 +365,7 @@ func AppendAliasIfMissing(rcPath string) error {
 	return err
 }
 
-// RemoveAlias cleans the agy-pool marker block from an rc file.
+// RemoveAlias cleans the historical agy-pool marker block from an rc file if present.
 func RemoveAlias(rcPath string) error {
 	if err := config.AssertSafeDestructivePath(rcPath); err != nil {
 		return err
@@ -353,35 +378,12 @@ func RemoveAlias(rcPath string) error {
 		return err
 	}
 
-	content := string(data)
-	if !strings.Contains(content, MarkerStart) {
+	cleaned, changed := RemoveLegacyRCBlock(data)
+	if !changed {
 		return nil
 	}
 
-	var newLines []string
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	insideBlock := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, MarkerStart) {
-			insideBlock = true
-			continue
-		}
-		if insideBlock {
-			if strings.Contains(line, MarkerEnd) {
-				insideBlock = false
-			}
-			continue
-		}
-		newLines = append(newLines, line)
-	}
-
-	result := strings.Join(newLines, "\n")
-	if len(newLines) > 0 && !strings.HasSuffix(result, "\n") {
-		result += "\n"
-	}
-
-	return os.WriteFile(rcPath, []byte(result), 0644)
+	return os.WriteFile(rcPath, cleaned, 0644)
 }
 
 // Uninstall cleans up installed binaries, symlinks, and aliases while preserving user data.
@@ -432,8 +434,8 @@ func Uninstall(opts Options) error {
 		_ = os.Remove(agyPath)
 	}
 
-	// 3. Clean shell rc files if home is set
-	if home != "" {
+	// 3. Clean legacy shell rc files ONLY if explicitly requested
+	if opts.CleanLegacyRC && home != "" {
 		for _, rc := range []string{filepath.Join(home, ".bashrc"), filepath.Join(home, ".zshrc")} {
 			if _, err := os.Stat(rc); err == nil {
 				if err := config.AssertSafeDestructivePath(rc); err != nil {

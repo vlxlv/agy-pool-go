@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,5 +269,118 @@ func TestAssertSafeInstallTarget_FailClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "FAIL-CLOSED GUARD") {
 		t.Errorf("expected FAIL-CLOSED GUARD message, got %v", err)
+	}
+}
+
+func TestInstallAndUninstall_NoShellRCModification(t *testing.T) {
+	tempDir, cleanup := setupInstallerTestEnv(t)
+	defer cleanup()
+
+	fakeHome := filepath.Join(tempDir, "home")
+	_ = os.MkdirAll(fakeHome, 0700)
+
+	bashrcContent := []byte("# User personal bashrc\nexport MY_VAR=123\nalias ll='ls -la'\n# End of bashrc\n")
+	zshrcContent := []byte("# User personal zshrc\nsetopt prompt_subst\nexport ZSH_THEME=agnoster\n")
+
+	bashrc := filepath.Join(fakeHome, ".bashrc")
+	zshrc := filepath.Join(fakeHome, ".zshrc")
+	if err := os.WriteFile(bashrc, bashrcContent, 0644); err != nil {
+		t.Fatalf("failed to write bashrc: %v", err)
+	}
+	if err := os.WriteFile(zshrc, zshrcContent, 0644); err != nil {
+		t.Fatalf("failed to write zshrc: %v", err)
+	}
+
+	targetDir := filepath.Join(fakeHome, ".local", "bin")
+	fakeNativeAgy := filepath.Join(tempDir, "fake_native_agy")
+	_ = os.WriteFile(fakeNativeAgy, []byte("#!/bin/sh\necho native\n"), 0755)
+
+	opts := Options{
+		HomeDir:       fakeHome,
+		TargetDir:     targetDir,
+		NativeAgyPath: fakeNativeAgy,
+		CleanLegacyRC: false,
+	}
+
+	// 1. Install must not touch bashrc or zshrc
+	if err := Install(opts); err != nil {
+		t.Fatalf("Install failed: %v", err)
+	}
+
+	afterInstallBashrc, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatalf("failed to read bashrc: %v", err)
+	}
+	if !bytes.Equal(afterInstallBashrc, bashrcContent) {
+		t.Fatalf("install modified .bashrc! Expected byte-for-byte identity.\nGot:\n%s\nExpected:\n%s", string(afterInstallBashrc), string(bashrcContent))
+	}
+
+	afterInstallZshrc, err := os.ReadFile(zshrc)
+	if err != nil {
+		t.Fatalf("failed to read zshrc: %v", err)
+	}
+	if !bytes.Equal(afterInstallZshrc, zshrcContent) {
+		t.Fatalf("install modified .zshrc! Expected byte-for-byte identity.\nGot:\n%s\nExpected:\n%s", string(afterInstallZshrc), string(zshrcContent))
+	}
+
+	// 2. Default uninstall must not touch bashrc or zshrc
+	if err := Uninstall(opts); err != nil {
+		t.Fatalf("Uninstall failed: %v", err)
+	}
+
+	afterUninstallBashrc, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatalf("failed to read bashrc: %v", err)
+	}
+	if !bytes.Equal(afterUninstallBashrc, bashrcContent) {
+		t.Fatalf("uninstall modified .bashrc! Expected byte-for-byte identity.\nGot:\n%s", string(afterUninstallBashrc))
+	}
+
+	afterUninstallZshrc, err := os.ReadFile(zshrc)
+	if err != nil {
+		t.Fatalf("failed to read zshrc: %v", err)
+	}
+	if !bytes.Equal(afterUninstallZshrc, zshrcContent) {
+		t.Fatalf("uninstall modified .zshrc! Expected byte-for-byte identity.\nGot:\n%s", string(afterUninstallZshrc))
+	}
+}
+
+func TestUninstall_LegacyRCOptInCleanup(t *testing.T) {
+	tempDir, cleanup := setupInstallerTestEnv(t)
+	defer cleanup()
+
+	fakeHome := filepath.Join(tempDir, "home_legacy")
+	_ = os.MkdirAll(fakeHome, 0700)
+
+	surroundingPrefix := "# Pre-existing user settings\nexport PATH=/custom/bin:$PATH\n"
+	surroundingSuffix := "\n# Post-existing user settings\nalias gs='git status'\n"
+	fullLegacyContent := surroundingPrefix + AliasBlock + surroundingSuffix
+
+	bashrc := filepath.Join(fakeHome, ".bashrc")
+	if err := os.WriteFile(bashrc, []byte(fullLegacyContent), 0644); err != nil {
+		t.Fatalf("failed to write bashrc: %v", err)
+	}
+
+	targetDir := filepath.Join(fakeHome, ".local", "bin")
+	_ = os.MkdirAll(targetDir, 0755)
+
+	opts := Options{
+		HomeDir:       fakeHome,
+		TargetDir:     targetDir,
+		CleanLegacyRC: true,
+	}
+
+	if err := Uninstall(opts); err != nil {
+		t.Fatalf("Uninstall failed: %v", err)
+	}
+
+	cleanedBashrc, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatalf("failed to read cleaned bashrc: %v", err)
+	}
+
+	expectedContent := surroundingPrefix + surroundingSuffix
+	if !bytes.Equal(cleanedBashrc, []byte(expectedContent)) {
+		t.Fatalf("expected exact byte-preserving cleanup.\nGot:\n%q\nExpected:\n%q", string(cleanedBashrc), expectedContent)
 	}
 }

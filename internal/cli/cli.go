@@ -677,6 +677,8 @@ func handleUninstall(args []string, stdout, stderr io.Writer) int {
 			opts.TargetDir = strings.TrimPrefix(arg, "--target=")
 		case strings.HasPrefix(arg, "--bin-dir="):
 			opts.TargetDir = strings.TrimPrefix(arg, "--bin-dir=")
+		case arg == "--clean-rc" || arg == "--clean-legacy-rc":
+			opts.CleanLegacyRC = true
 		default:
 			fmt.Fprintf(stderr, "agy-pool uninstall: error: unrecognized argument: %s\n", arg)
 			return 2
