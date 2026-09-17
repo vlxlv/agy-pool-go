@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/proxy"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
@@ -44,31 +46,53 @@ const (
 
 // RoutingAuditEvent contains non-sensitive metadata for a single generation routing attempt.
 type RoutingAuditEvent struct {
-	Timestamp         time.Time `json:"timestamp"`
-	RequestID         string    `json:"request_id,omitempty"`
-	Strategy          string    `json:"strategy"`
-	Account           string    `json:"account"`
-	AccountID         string    `json:"account_id,omitempty"`
-	Classification    string    `json:"classification"`
-	FiveHourRemaining *float64  `json:"five_hour_remaining"`
-	WeeklyRemaining   *float64  `json:"weekly_remaining"`
-	HealthyCandidates []string  `json:"healthy_candidates"`
-	Attempt           int       `json:"attempt"`
-	Status            int       `json:"status"`
-	FailoverReason    string    `json:"failover_reason,omitempty"`
-	Verdict           string    `json:"verdict"`
-	VerdictDetails    string    `json:"verdict_details,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+	RequestID      string    `json:"request_id,omitempty"`
+	Strategy       string    `json:"strategy"`
+	Account        string    `json:"account"`
+	AccountID      string    `json:"account_id,omitempty"`
+	Classification string    `json:"classification"`
+
+	FiveHourKnown      bool       `json:"five_hour_known,omitempty"`
+	FiveHourRemaining  *float64   `json:"five_hour_remaining"`
+	FiveHourResetAt    *time.Time `json:"five_hour_reset_at,omitempty"`
+	FiveHourResetRatio *float64   `json:"five_hour_reset_ratio,omitempty"`
+	FiveHourPace       *float64   `json:"five_hour_pace,omitempty"`
+
+	WeeklyKnown      bool       `json:"weekly_known,omitempty"`
+	WeeklyRemaining  *float64   `json:"weekly_remaining"`
+	WeeklyResetAt    *time.Time `json:"weekly_reset_at,omitempty"`
+	WeeklyResetRatio *float64   `json:"weekly_reset_ratio,omitempty"`
+	WeeklyPace       *float64   `json:"weekly_pace,omitempty"`
+
+	KnownWindowCount int      `json:"known_window_count"`
+	FreshnessRank    *int     `json:"freshness_rank,omitempty"`
+	WorstPace        *float64 `json:"worst_pace,omitempty"`
+	TotalPace        *float64 `json:"total_pace,omitempty"`
+	RawFloor         *float64 `json:"raw_floor,omitempty"`
+
+	HealthyCount      int      `json:"healthy_count"`
+	ReserveCount      int      `json:"reserve_count"`
+	HealthyCandidates []string `json:"healthy_candidates,omitempty"`
+	ReserveCandidates []string `json:"reserve_candidates,omitempty"`
+
+	Attempt        int    `json:"attempt"`
+	Status         int    `json:"status"`
+	FailoverReason string `json:"failover_reason,omitempty"`
+	Verdict        string `json:"verdict"`
+	VerdictDetails string `json:"verdict_details,omitempty"`
 }
 
 // AuditOptions configures the routing audit execution.
 type AuditOptions struct {
-	Duration   time.Duration
-	JSONMode   bool
-	ReportPath string
-	LogPath    string
-	FromStart  bool
-	Reader     io.Reader                // Optional direct reader for testing
-	EventChan  <-chan RoutingAuditEvent // Optional direct event stream for testing
+	Duration       time.Duration
+	JSONMode       bool
+	ReportPath     string
+	LogPath        string
+	FromStart      bool
+	Reader         io.Reader                 // Optional direct reader for testing
+	EventChan      <-chan RoutingAuditEvent  // Optional direct event stream for testing
+	ProxyEventChan <-chan proxy.RoutingEvent // Direct stream of frozen proxy routing events
 }
 
 // AuditSummary contains aggregated metrics for an audit session.
@@ -149,8 +173,37 @@ func EvaluateRoutingAttempt(
 
 	// 2. Classify selected account using authoritative scheduler and quota primitives
 	capState := quota.ComputeCapacityState(selectedAcc, now)
+	event.FiveHourKnown = capState.Q5Known
 	event.FiveHourRemaining = capState.Q5
+	event.FiveHourResetAt = capState.Reset5Time
+	event.FiveHourPace = capState.Pace5
+	if capState.Q5 != nil {
+		r5 := capState.R5
+		event.FiveHourResetRatio = &r5
+	}
+
+	event.WeeklyKnown = capState.Q7Known
 	event.WeeklyRemaining = capState.Q7
+	event.WeeklyResetAt = capState.Reset7Time
+	event.WeeklyPace = capState.Pace7
+	if capState.Q7 != nil {
+		r7 := capState.R7
+		event.WeeklyResetRatio = &r7
+	}
+
+	event.KnownWindowCount = capState.KnownWindowCount
+	if !math.IsInf(capState.WorstPace, 0) {
+		wp := capState.WorstPace
+		event.WorstPace = &wp
+	}
+	if !math.IsInf(capState.TotalPace, 0) {
+		tp := capState.TotalPace
+		event.TotalPace = &tp
+	}
+	rf := capState.RawFloor
+	event.RawFloor = &rf
+	freshness := quota.FreshnessRank(selectedAcc, now)
+	event.FreshnessRank = &freshness
 
 	var classification AccountTier
 	if capState.IsDepleted {
@@ -182,13 +235,16 @@ func EvaluateRoutingAttempt(
 			continue
 		}
 		candDisp := accounts.DisplayAccountName(cand)
-		if scheduler.IsReserveCandidate(cand, now) {
+		if scheduler.IsReserveCapacity(candCap) {
 			reserveCandidates = append(reserveCandidates, candDisp)
 		} else if candCap.KnownWindowCount > 0 || candCap.LegacyFractionKnown {
 			healthyCandidates = append(healthyCandidates, candDisp)
 		}
 	}
+	event.HealthyCount = len(healthyCandidates)
+	event.ReserveCount = len(reserveCandidates)
 	event.HealthyCandidates = healthyCandidates
+	event.ReserveCandidates = reserveCandidates
 
 	// 4. Violation semantics (Section 2 & Section 11)
 	if strategy == config.StrategyMaxQuota {
@@ -233,6 +289,111 @@ func EvaluateRoutingAttempt(
 	return event
 }
 
+// EvaluateFrozenRoutingEvent evaluates PASS / WARNING / VIOLATION purely from the frozen RoutingEvent.
+// It DOES NOT read state.db or re-evaluate mutable quota state after dequeue.
+func EvaluateFrozenRoutingEvent(ev proxy.RoutingEvent) RoutingAuditEvent {
+	strategy := ev.Strategy
+	if strategy == "" {
+		strategy = config.StrategyMaxQuota
+	}
+
+	accName := ev.Account
+	if accName == "" {
+		accName = ev.AccountName
+	}
+
+	healthyCount := ev.HealthyCandidateCount
+	if healthyCount == 0 && len(ev.HealthyCandidates) > 0 {
+		healthyCount = len(ev.HealthyCandidates)
+	}
+
+	reserveCount := ev.ReserveCandidateCount
+	if reserveCount == 0 && len(ev.ReserveCandidates) > 0 {
+		reserveCount = len(ev.ReserveCandidates)
+	}
+
+	auditEv := RoutingAuditEvent{
+		Timestamp:          ev.Timestamp,
+		Strategy:           strategy,
+		Account:            accName,
+		AccountID:          ev.AccountID,
+		Classification:     strings.ToLower(ev.Classification),
+		FiveHourKnown:      ev.FiveHourKnown,
+		FiveHourRemaining:  ev.FiveHourRemaining,
+		FiveHourResetAt:    ev.FiveHourResetAt,
+		FiveHourResetRatio: ev.FiveHourResetRatio,
+		FiveHourPace:       ev.FiveHourPace,
+		WeeklyKnown:        ev.WeeklyKnown,
+		WeeklyRemaining:    ev.WeeklyRemaining,
+		WeeklyResetAt:      ev.WeeklyResetAt,
+		WeeklyResetRatio:   ev.WeeklyResetRatio,
+		WeeklyPace:         ev.WeeklyPace,
+		KnownWindowCount:   ev.KnownWindowCount,
+		FreshnessRank:      ev.FreshnessRank,
+		WorstPace:          ev.WorstPace,
+		TotalPace:          ev.TotalPace,
+		RawFloor:           ev.RawFloor,
+		HealthyCount:       healthyCount,
+		ReserveCount:       reserveCount,
+		HealthyCandidates:  ev.HealthyCandidates,
+		ReserveCandidates:  ev.ReserveCandidates,
+		Attempt:            ev.Attempt,
+		Status:             ev.Status,
+		FailoverReason:     ev.FailoverReason,
+	}
+	if auditEv.Attempt <= 0 {
+		auditEv.Attempt = 1
+	}
+
+	tier := strings.Title(strings.ToLower(ev.Classification))
+	if strategy == config.StrategyMaxQuota {
+		switch tier {
+		case "Healthy":
+			auditEv.Verdict = "pass"
+			auditEv.VerdictDetails = "Healthy account selected"
+		case "Reserve":
+			hasOtherHealthy := false
+			for _, hc := range ev.HealthyCandidates {
+				if !strings.EqualFold(hc, accName) {
+					hasOtherHealthy = true
+					break
+				}
+			}
+			if !hasOtherHealthy && healthyCount > 0 {
+				hasOtherHealthy = true
+			}
+			if hasOtherHealthy {
+				auditEv.Verdict = "violation"
+				healthyList := strings.Join(ev.HealthyCandidates, ", ")
+				if healthyList == "" {
+					healthyList = fmt.Sprintf("%d healthy candidates", healthyCount)
+				}
+				auditEv.VerdictDetails = fmt.Sprintf("Reserve account %s selected while Healthy candidates were available: %s",
+					accName, healthyList)
+			} else {
+				auditEv.Verdict = "pass"
+				auditEv.VerdictDetails = "Reserve account selected as fallback (no Healthy candidates available)"
+			}
+		case "Depleted":
+			if healthyCount > 0 || len(ev.HealthyCandidates) > 0 || reserveCount > 0 || len(ev.ReserveCandidates) > 0 {
+				auditEv.Verdict = "violation"
+				auditEv.VerdictDetails = fmt.Sprintf("Depleted account %s selected while Healthy or Reserve candidates were available", accName)
+			} else {
+				auditEv.Verdict = "pass"
+				auditEv.VerdictDetails = "Depleted account selected (all accounts depleted)"
+			}
+		default: // "Unknown"
+			auditEv.Verdict = "warning"
+			auditEv.VerdictDetails = "Selected account quota classification cannot be determined from selection-time metadata"
+		}
+	} else {
+		auditEv.Verdict = "pass"
+		auditEv.VerdictDetails = fmt.Sprintf("Reserve headroom checks not applicable to strategy %s", strategy)
+	}
+
+	return auditEv
+}
+
 // ParsedLogEntry contains extracted fields from a daemon log line.
 type ParsedLogEntry struct {
 	Timestamp      time.Time
@@ -242,6 +403,11 @@ type ParsedLogEntry struct {
 	Status         int
 	FailoverReason string
 	IsGeneration   bool
+	HasAuditMeta   bool
+	Strategy       string
+	Classification string
+	HealthyCount   int
+	ReserveCount   int
 }
 
 // ParseLogLine parses a log line produced by the agy-pool proxy.
@@ -267,7 +433,7 @@ func ParseLogLine(line string) (*ParsedLogEntry, bool) {
 
 	switch tag {
 	case "PROXY":
-		// Format: METHOD PATH -> ACCOUNT (Status: STATUS)
+		// Format: METHOD PATH -> ACCOUNT (Status: STATUS) [audit: ...]
 		arrowIdx := strings.Index(msg, " -> ")
 		if arrowIdx == -1 {
 			return nil, false
@@ -283,6 +449,35 @@ func ParseLogLine(line string) (*ParsedLogEntry, bool) {
 			path = parts[0]
 		}
 		isGen := strings.Contains(strings.ToLower(path), "generatecontent")
+
+		var hasAuditMeta bool
+		var auditStrat, auditTier string
+		var auditHealthy, auditReserve int
+		auditIdx := strings.Index(right, " [audit: ")
+		if auditIdx != -1 {
+			metaStr := right[auditIdx+9:]
+			right = right[:auditIdx]
+			closeBracket := strings.Index(metaStr, "]")
+			if closeBracket != -1 {
+				metaStr = metaStr[:closeBracket]
+			}
+			hasAuditMeta = true
+			for _, field := range strings.Fields(metaStr) {
+				kv := strings.SplitN(field, "=", 2)
+				if len(kv) == 2 {
+					switch kv[0] {
+					case "strategy":
+						auditStrat = kv[1]
+					case "tier":
+						auditTier = kv[1]
+					case "healthy":
+						auditHealthy, _ = strconv.Atoi(kv[1])
+					case "reserve":
+						auditReserve, _ = strconv.Atoi(kv[1])
+					}
+				}
+			}
+		}
 
 		// Parse right: ACCOUNT (Status: STATUS)
 		statusIdx := strings.LastIndex(right, "(Status: ")
@@ -294,16 +489,21 @@ func ParseLogLine(line string) (*ParsedLogEntry, bool) {
 		status, _ := strconv.Atoi(statusStr)
 
 		return &ParsedLogEntry{
-			Timestamp:    ts,
-			Type:         "PROXY",
-			Path:         path,
-			AccountName:  accName,
-			Status:       status,
-			IsGeneration: isGen,
+			Timestamp:      ts,
+			Type:           "PROXY",
+			Path:           path,
+			AccountName:    accName,
+			Status:         status,
+			IsGeneration:   isGen,
+			HasAuditMeta:   hasAuditMeta,
+			Strategy:       auditStrat,
+			Classification: auditTier,
+			HealthyCount:   auditHealthy,
+			ReserveCount:   auditReserve,
 		}, true
 
 	case "PROXY ERROR":
-		// Format: METHOD PATH -> ACCOUNT HTTP STATUS
+		// Format: METHOD PATH -> ACCOUNT HTTP STATUS [audit: ...]
 		arrowIdx := strings.Index(msg, " -> ")
 		if arrowIdx == -1 {
 			return nil, false
@@ -320,6 +520,35 @@ func ParseLogLine(line string) (*ParsedLogEntry, bool) {
 		}
 		isGen := strings.Contains(strings.ToLower(path), "generatecontent")
 
+		var hasAuditMeta bool
+		var auditStrat, auditTier string
+		var auditHealthy, auditReserve int
+		auditIdx := strings.Index(right, " [audit: ")
+		if auditIdx != -1 {
+			metaStr := right[auditIdx+9:]
+			right = right[:auditIdx]
+			closeBracket := strings.Index(metaStr, "]")
+			if closeBracket != -1 {
+				metaStr = metaStr[:closeBracket]
+			}
+			hasAuditMeta = true
+			for _, field := range strings.Fields(metaStr) {
+				kv := strings.SplitN(field, "=", 2)
+				if len(kv) == 2 {
+					switch kv[0] {
+					case "strategy":
+						auditStrat = kv[1]
+					case "tier":
+						auditTier = kv[1]
+					case "healthy":
+						auditHealthy, _ = strconv.Atoi(kv[1])
+					case "reserve":
+						auditReserve, _ = strconv.Atoi(kv[1])
+					}
+				}
+			}
+		}
+
 		httpIdx := strings.LastIndex(right, " HTTP ")
 		if httpIdx == -1 {
 			return nil, false
@@ -329,12 +558,17 @@ func ParseLogLine(line string) (*ParsedLogEntry, bool) {
 		status, _ := strconv.Atoi(statusStr)
 
 		return &ParsedLogEntry{
-			Timestamp:    ts,
-			Type:         "PROXY ERROR",
-			Path:         path,
-			AccountName:  accName,
-			Status:       status,
-			IsGeneration: isGen,
+			Timestamp:      ts,
+			Type:           "PROXY ERROR",
+			Path:           path,
+			AccountName:    accName,
+			Status:         status,
+			IsGeneration:   isGen,
+			HasAuditMeta:   hasAuditMeta,
+			Strategy:       auditStrat,
+			Classification: auditTier,
+			HealthyCount:   auditHealthy,
+			ReserveCount:   auditReserve,
 		}, true
 
 	case "FAILOVER":
@@ -372,7 +606,31 @@ func NewAuditor(opts AuditOptions) *Auditor {
 	}
 }
 
-// RecordEvent processes and aggregates a single routing event.
+func formatResetCountdown(t *time.Time, now time.Time) string {
+	if t == nil {
+		return ""
+	}
+	d := t.Sub(now)
+	if d <= 0 {
+		return "reset now"
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	if days > 0 {
+		return fmt.Sprintf("reset in %dd%dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("reset in %dh%dm", hours, mins)
+	}
+	if mins > 0 {
+		return fmt.Sprintf("reset in %dm", mins)
+	}
+	secs := int(d.Seconds()) % 60
+	return fmt.Sprintf("reset in %ds", secs)
+}
+
+// RecordEvent records a verified routing event into summaries and logs.
 func (a *Auditor) RecordEvent(event RoutingAuditEvent, out io.Writer) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -419,15 +677,27 @@ func (a *Auditor) RecordEvent(event RoutingAuditEvent, out io.Writer) {
 			fmt.Fprintf(out, "    Tier    : %s\n", tierDisp)
 
 			if event.FiveHourRemaining != nil {
-				fmt.Fprintf(out, "    5H      : %.1f%%\n", *event.FiveHourRemaining*100.0)
+				resetInfo := ""
+				if event.FiveHourResetAt != nil {
+					resetInfo = fmt.Sprintf(" (%s)", formatResetCountdown(event.FiveHourResetAt, event.Timestamp))
+				}
+				fmt.Fprintf(out, "    5H      : %.1f%%%s\n", *event.FiveHourRemaining*100.0, resetInfo)
 			} else {
 				fmt.Fprintf(out, "    5H      : N/A\n")
 			}
 
 			if event.WeeklyRemaining != nil {
-				fmt.Fprintf(out, "    Weekly  : %.1f%%\n", *event.WeeklyRemaining*100.0)
+				resetInfo := ""
+				if event.WeeklyResetAt != nil {
+					resetInfo = fmt.Sprintf(" (%s)", formatResetCountdown(event.WeeklyResetAt, event.Timestamp))
+				}
+				fmt.Fprintf(out, "    Weekly  : %.1f%%%s\n", *event.WeeklyRemaining*100.0, resetInfo)
 			} else {
 				fmt.Fprintf(out, "    Weekly  : N/A\n")
+			}
+
+			if event.WorstPace != nil {
+				fmt.Fprintf(out, "    WorstPace: %+.4f\n", *event.WorstPace)
 			}
 
 			fmt.Fprintf(out, "    Status  : %d\n", event.Status)
@@ -564,6 +834,30 @@ func (a *Auditor) Run(ctx context.Context, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "  Duration : %s\n", durStr)
 	}
 
+	// 0. In-process proxy event channel mode (direct subscription with frozen RoutingEvent)
+	if a.options.ProxyEventChan != nil {
+		for {
+			select {
+			case <-ctx.Done():
+				a.summary.Duration = time.Since(a.startTime)
+				a.summary.DroppedEvents = proxy.DroppedAuditEvents()
+				a.PrintSummary(stdout)
+				_ = a.WriteReport()
+				return nil
+			case ev, ok := <-a.options.ProxyEventChan:
+				if !ok {
+					a.summary.Duration = time.Since(a.startTime)
+					a.summary.DroppedEvents = proxy.DroppedAuditEvents()
+					a.PrintSummary(stdout)
+					_ = a.WriteReport()
+					return nil
+				}
+				auditEv := EvaluateFrozenRoutingEvent(ev)
+				a.RecordEvent(auditEv, stdout)
+			}
+		}
+	}
+
 	// 1. In-process event channel mode (testing or embedded)
 	if a.options.EventChan != nil {
 		for {
@@ -616,20 +910,36 @@ func (a *Auditor) Run(ctx context.Context, stdout, stderr io.Writer) error {
 				continue
 			}
 
-			currentPool, _ := storage.LoadPool()
-			if currentPool == nil {
-				currentPool = pool
+			var ev RoutingAuditEvent
+			if entry.HasAuditMeta {
+				ev = EvaluateFrozenRoutingEvent(proxy.RoutingEvent{
+					Timestamp:             entry.Timestamp,
+					Strategy:              entry.Strategy,
+					Account:               entry.AccountName,
+					AccountName:           entry.AccountName,
+					Classification:        entry.Classification,
+					HealthyCandidateCount: entry.HealthyCount,
+					ReserveCandidateCount: entry.ReserveCount,
+					Attempt:               currentAttempt,
+					Status:                entry.Status,
+					FailoverReason:        lastFailoverReason,
+					Path:                  entry.Path,
+				})
+			} else {
+				currentPool, _ := storage.LoadPool()
+				if currentPool == nil {
+					currentPool = pool
+				}
+				ev = EvaluateRoutingAttempt(
+					currentPool,
+					entry.AccountName,
+					entry.Status,
+					currentAttempt,
+					lastFailoverReason,
+					entry.Timestamp,
+					"",
+				)
 			}
-
-			ev := EvaluateRoutingAttempt(
-				currentPool,
-				entry.AccountName,
-				entry.Status,
-				currentAttempt,
-				lastFailoverReason,
-				entry.Timestamp,
-				"",
-			)
 			a.RecordEvent(ev, stdout)
 
 			if entry.Status >= 400 && lastFailoverReason != "" {
@@ -748,20 +1058,36 @@ func (a *Auditor) Run(ctx context.Context, stdout, stderr io.Writer) error {
 			continue
 		}
 
-		currentPool, _ := storage.LoadPool()
-		if currentPool == nil {
-			currentPool = pool
+		var ev RoutingAuditEvent
+		if entry.HasAuditMeta {
+			ev = EvaluateFrozenRoutingEvent(proxy.RoutingEvent{
+				Timestamp:             entry.Timestamp,
+				Strategy:              entry.Strategy,
+				Account:               entry.AccountName,
+				AccountName:           entry.AccountName,
+				Classification:        entry.Classification,
+				HealthyCandidateCount: entry.HealthyCount,
+				ReserveCandidateCount: entry.ReserveCount,
+				Attempt:               currentAttempt,
+				Status:                entry.Status,
+				FailoverReason:        lastFailoverReason,
+				Path:                  entry.Path,
+			})
+		} else {
+			currentPool, _ := storage.LoadPool()
+			if currentPool == nil {
+				currentPool = pool
+			}
+			ev = EvaluateRoutingAttempt(
+				currentPool,
+				entry.AccountName,
+				entry.Status,
+				currentAttempt,
+				lastFailoverReason,
+				entry.Timestamp,
+				"",
+			)
 		}
-
-		ev := EvaluateRoutingAttempt(
-			currentPool,
-			entry.AccountName,
-			entry.Status,
-			currentAttempt,
-			lastFailoverReason,
-			entry.Timestamp,
-			"",
-		)
 		a.RecordEvent(ev, stdout)
 
 		if entry.Status >= 400 && lastFailoverReason != "" {

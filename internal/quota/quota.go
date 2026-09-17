@@ -192,20 +192,22 @@ func FormatQuotaAge(acc *storage.Account, now float64) string {
 
 // CapacityState contains the reset-aware capacity parameters calculated for an account.
 type CapacityState struct {
-	Q5                  *float64 `json:"q5"`
-	Q7                  *float64 `json:"q7"`
-	R5                  float64  `json:"r5"`
-	R7                  float64  `json:"r7"`
-	Pace5               *float64 `json:"pace5"`
-	Pace7               *float64 `json:"pace7"`
-	WorstPace           float64  `json:"worst_pace"`
-	TotalPace           float64  `json:"total_pace"`
-	RawFloor            float64  `json:"raw_floor"`
-	Q5Known             bool     `json:"q5_known"`
-	Q7Known             bool     `json:"q7_known"`
-	KnownWindowCount    int      `json:"known_window_count"`
-	LegacyFractionKnown bool     `json:"legacy_fraction_known"`
-	IsDepleted          bool     `json:"is_depleted"`
+	Q5                  *float64   `json:"q5"`
+	Q7                  *float64   `json:"q7"`
+	R5                  float64    `json:"r5"`
+	R7                  float64    `json:"r7"`
+	Pace5               *float64   `json:"pace5"`
+	Pace7               *float64   `json:"pace7"`
+	WorstPace           float64    `json:"worst_pace"`
+	TotalPace           float64    `json:"total_pace"`
+	RawFloor            float64    `json:"raw_floor"`
+	Q5Known             bool       `json:"q5_known"`
+	Q7Known             bool       `json:"q7_known"`
+	KnownWindowCount    int        `json:"known_window_count"`
+	LegacyFractionKnown bool       `json:"legacy_fraction_known"`
+	IsDepleted          bool       `json:"is_depleted"`
+	Reset5Time          *time.Time `json:"reset5_time,omitempty"`
+	Reset7Time          *time.Time `json:"reset7_time,omitempty"`
 }
 
 // ComputeCapacityState computes reset-aware capacity without treating missing fractions as full quota.
@@ -365,6 +367,28 @@ func ComputeCapacityState(acc *storage.Account, now float64) CapacityState {
 
 	isDepleted := len(knownFractions) > 0 && rawFloor <= config.DepletedThreshold
 
+	var reset5Time, reset7Time *time.Time
+
+	if acc.Gemini5HResetSec != nil {
+		tm := time.Unix(int64(now+*acc.Gemini5HResetSec), 0).UTC()
+		reset5Time = &tm
+	} else if reset5 != nil {
+		if ep := ParseISOOrTimestamp(reset5); ep != nil {
+			tm := time.Unix(int64(*ep), 0).UTC()
+			reset5Time = &tm
+		}
+	}
+
+	if acc.GeminiWeeklyResetSec != nil {
+		tm := time.Unix(int64(now+*acc.GeminiWeeklyResetSec), 0).UTC()
+		reset7Time = &tm
+	} else if reset7 != nil {
+		if ep := ParseISOOrTimestamp(reset7); ep != nil {
+			tm := time.Unix(int64(*ep), 0).UTC()
+			reset7Time = &tm
+		}
+	}
+
 	return CapacityState{
 		Q5:                  q5,
 		Q7:                  q7,
@@ -380,6 +404,8 @@ func ComputeCapacityState(acc *storage.Account, now float64) CapacityState {
 		KnownWindowCount:    knownWindowCount,
 		LegacyFractionKnown: legacyFractionKnown,
 		IsDepleted:          isDepleted,
+		Reset5Time:          reset5Time,
+		Reset7Time:          reset7Time,
 	}
 }
 

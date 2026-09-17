@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
@@ -33,9 +35,242 @@ var (
 	LogWriter           io.Writer = os.Stderr
 	logMu               sync.Mutex
 
-	// AuditObserver is an optional hook invoked on physical generation dispatch attempts.
+	// AuditObserver is an optional hook invoked asynchronously outside the generation hot path.
 	AuditObserver func(accountName string, status int, attempt int, failoverReason string, path string)
+	// AuditObserverEvent is an optional hook receiving rich selection-time RoutingEvents outside the hot path.
+	AuditObserverEvent func(ev RoutingEvent)
 )
+
+// RoutingEvent represents an immutable routing attempt event emitted on generation paths.
+type RoutingEvent struct {
+	Timestamp             time.Time `json:"timestamp"`
+	Strategy              string    `json:"strategy"`
+	Account               string    `json:"account"`
+	AccountName           string    `json:"account_name"`
+	AccountID             string    `json:"account_id,omitempty"`
+	Classification        string    `json:"classification"` // "Healthy", "Reserve", "Depleted", "Unknown"
+	HealthyCandidateCount int       `json:"healthy_candidate_count"`
+	HealthyCandidates     []string  `json:"healthy_candidates,omitempty"`
+	ReserveCandidateCount int       `json:"reserve_candidate_count"`
+	ReserveCandidates     []string  `json:"reserve_candidates,omitempty"`
+
+	// Identified 5H window
+	FiveHourKnown      bool       `json:"five_hour_known,omitempty"`
+	FiveHourRemaining  *float64   `json:"five_hour_remaining,omitempty"`
+	FiveHourResetAt    *time.Time `json:"five_hour_reset_at,omitempty"`
+	FiveHourResetRatio *float64   `json:"five_hour_reset_ratio,omitempty"`
+	FiveHourPace       *float64   `json:"five_hour_pace,omitempty"`
+
+	// Identified Weekly window
+	WeeklyKnown      bool       `json:"weekly_known,omitempty"`
+	WeeklyRemaining  *float64   `json:"weekly_remaining,omitempty"`
+	WeeklyResetAt    *time.Time `json:"weekly_reset_at,omitempty"`
+	WeeklyResetRatio *float64   `json:"weekly_reset_ratio,omitempty"`
+	WeeklyPace       *float64   `json:"weekly_pace,omitempty"`
+
+	// Ranking and freshness inputs
+	KnownWindowCount int      `json:"known_window_count"`
+	FreshnessRank    *int     `json:"freshness_rank,omitempty"`
+	WorstPace        *float64 `json:"worst_pace,omitempty"`
+	TotalPace        *float64 `json:"total_pace,omitempty"`
+	RawFloor         *float64 `json:"raw_floor,omitempty"`
+
+	Attempt        int    `json:"attempt"`
+	Status         int    `json:"status"`
+	FailoverReason string `json:"failover_reason,omitempty"`
+	Path           string `json:"path"`
+}
+
+// SelectionAuditContext holds frozen pool candidate metadata computed at selection time.
+type SelectionAuditContext struct {
+	Strategy          string
+	Now               float64
+	HealthyCandidates []string
+	ReserveCandidates []string
+}
+
+// DefaultAuditBufferSize defines the capacity of the non-blocking audit event queue.
+const DefaultAuditBufferSize = 1024
+
+var (
+	auditQueue           = make(chan RoutingEvent, DefaultAuditBufferSize)
+	droppedAuditEvents   int64
+	sessionDroppedEvents int64
+	activeAuditors       int32
+	activeSubscribers    []chan RoutingEvent
+	auditMu              sync.RWMutex
+)
+
+func init() {
+	go runAuditWorker()
+}
+
+func runAuditWorker() {
+	for ev := range auditQueue {
+		obs := GetAuditObserver()
+		obsEv := GetAuditObserverEvent()
+
+		if obs != nil {
+			func() {
+				defer func() { _ = recover() }()
+				obs(ev.AccountName, ev.Status, ev.Attempt, ev.FailoverReason, ev.Path)
+			}()
+		}
+		if obsEv != nil {
+			func() {
+				defer func() { _ = recover() }()
+				obsEv(ev)
+			}()
+		}
+	}
+}
+
+// HasActiveAuditor reports whether any auditor or observer is actively listening for events.
+func HasActiveAuditor() bool {
+	return atomic.LoadInt32(&activeAuditors) > 0
+}
+
+// SubscribeAudit registers an audit listener channel with a bounded buffer.
+// It resets the session dropped-event counter and returns a cancel function.
+func SubscribeAudit(bufSize int) (events <-chan RoutingEvent, cancel func()) {
+	if bufSize <= 0 {
+		bufSize = DefaultAuditBufferSize
+	}
+	ch := make(chan RoutingEvent, bufSize)
+
+	auditMu.Lock()
+	atomic.StoreInt64(&sessionDroppedEvents, 0)
+	activeSubscribers = append(activeSubscribers, ch)
+	updateActiveAuditorsLocked()
+	auditMu.Unlock()
+
+	cancel = func() {
+		auditMu.Lock()
+		defer auditMu.Unlock()
+		for i, sub := range activeSubscribers {
+			if sub == ch {
+				activeSubscribers = append(activeSubscribers[:i], activeSubscribers[i+1:]...)
+				close(ch)
+				break
+			}
+		}
+		updateActiveAuditorsLocked()
+	}
+	return ch, cancel
+}
+
+func updateActiveAuditorsLocked() {
+	count := len(activeSubscribers)
+	if AuditObserver != nil {
+		count++
+	}
+	if AuditObserverEvent != nil {
+		count++
+	}
+	atomic.StoreInt32(&activeAuditors, int32(count))
+}
+
+// DroppedAuditEvents returns the number of audit events dropped in the active session.
+func DroppedAuditEvents() int64 {
+	return atomic.LoadInt64(&sessionDroppedEvents)
+}
+
+// ResetDroppedAuditEvents resets the dropped audit event counter.
+func ResetDroppedAuditEvents() {
+	atomic.StoreInt64(&sessionDroppedEvents, 0)
+	atomic.StoreInt64(&droppedAuditEvents, 0)
+}
+
+func drainAuditQueueLocked() {
+	for {
+		select {
+		case <-auditQueue:
+		default:
+			return
+		}
+	}
+}
+
+// SetAuditObserver safely sets the legacy audit observer callback.
+func SetAuditObserver(fn func(accountName string, status int, attempt int, failoverReason string, path string)) {
+	auditMu.Lock()
+	AuditObserver = fn
+	drainAuditQueueLocked()
+	if fn != nil {
+		atomic.StoreInt64(&sessionDroppedEvents, 0)
+	}
+	updateActiveAuditorsLocked()
+	auditMu.Unlock()
+}
+
+// SetAuditObserverEvent safely sets the rich RoutingEvent audit observer callback.
+func SetAuditObserverEvent(fn func(ev RoutingEvent)) {
+	auditMu.Lock()
+	AuditObserverEvent = fn
+	drainAuditQueueLocked()
+	if fn != nil {
+		atomic.StoreInt64(&sessionDroppedEvents, 0)
+	}
+	updateActiveAuditorsLocked()
+	auditMu.Unlock()
+}
+
+// GetAuditObserver safely returns the current legacy audit observer.
+func GetAuditObserver() func(accountName string, status int, attempt int, failoverReason string, path string) {
+	auditMu.RLock()
+	defer auditMu.RUnlock()
+	return AuditObserver
+}
+
+// GetAuditObserverEvent safely returns the current rich audit observer.
+func GetAuditObserverEvent() func(ev RoutingEvent) {
+	auditMu.RLock()
+	defer auditMu.RUnlock()
+	return AuditObserverEvent
+}
+
+// AuditQueueLen returns the current number of events queued in auditQueue (for testing).
+func AuditQueueLen() int {
+	return len(auditQueue)
+}
+
+// EmitRoutingEvent enqueues a routing event into active bounded buffers in a non-blocking manner.
+// If no auditor is active, it returns false immediately without performing channel operations.
+// If buffers are full, events are dropped and dropped counter is incremented.
+func EmitRoutingEvent(ev RoutingEvent) bool {
+	if !HasActiveAuditor() {
+		return false
+	}
+
+	auditMu.RLock()
+	defer auditMu.RUnlock()
+
+	if !HasActiveAuditor() {
+		return false
+	}
+
+	delivered := true
+	for _, sub := range activeSubscribers {
+		select {
+		case sub <- ev:
+		default:
+			atomic.AddInt64(&sessionDroppedEvents, 1)
+			atomic.AddInt64(&droppedAuditEvents, 1)
+			delivered = false
+		}
+	}
+
+	if AuditObserver != nil || AuditObserverEvent != nil {
+		select {
+		case auditQueue <- ev:
+		default:
+			atomic.AddInt64(&sessionDroppedEvents, 1)
+			atomic.AddInt64(&droppedAuditEvents, 1)
+			delivered = false
+		}
+	}
+	return delivered
+}
 
 // Hop-by-hop headers per RFC 7230 matching Python proxy.
 var hopByHopHeaders = map[string]bool{
@@ -356,13 +591,43 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		clientUA = GetUserAgent()
 	}
 
+	var selectionAuditCtx *SelectionAuditContext
+	if isGeneration && HasActiveAuditor() {
+		ctx := &SelectionAuditContext{
+			Strategy: strategy,
+			Now:      now,
+		}
+		for _, cand := range pool.Accounts {
+			if cand == nil {
+				continue
+			}
+			if cand.Status == "validation_required" || cand.Status == "auth_error" {
+				continue
+			}
+			if cand.RateLimitedUntil != nil && *cand.RateLimitedUntil > now {
+				continue
+			}
+			candCap := quota.ComputeCapacityState(cand, now)
+			if candCap.IsDepleted {
+				continue
+			}
+			disp := accounts.DisplayAccountName(cand)
+			if scheduler.IsReserveCapacity(candCap) {
+				ctx.ReserveCandidates = append(ctx.ReserveCandidates, disp)
+			} else if candCap.KnownWindowCount > 0 || candCap.LegacyFractionKnown {
+				ctx.HealthyCandidates = append(ctx.HealthyCandidates, disp)
+			}
+		}
+		selectionAuditCtx = ctx
+	}
+
 	committer := NewResponseCommitter(w)
 
 	var lastError error
 	attempt := 0
 	for _, acc := range candidates {
 		attempt++
-		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt)
+		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, selectionAuditCtx)
 		if outcome.Err != nil {
 			lastError = outcome.Err
 		}
@@ -398,12 +663,90 @@ func (h *Handler) dispatchAccount(
 	acc *storage.Account,
 	clientUA string,
 	attempt int,
+	auditCtx *SelectionAuditContext,
 ) DispatchOutcome {
 	dispName := accounts.DisplayAccountName(acc)
-	notifyAudit := func(status int, reason string) {
-		if isGeneration && AuditObserver != nil {
-			AuditObserver(dispName, status, attempt, reason, path)
+
+	var frozenEvent *RoutingEvent
+	if isGeneration && auditCtx != nil && HasActiveAuditor() {
+		candCap := quota.ComputeCapacityState(acc, auditCtx.Now)
+		freshness := quota.FreshnessRank(acc, auditCtx.Now)
+
+		var worstPacePtr, totalPacePtr, rawFloorPtr *float64
+		if !math.IsInf(candCap.WorstPace, 0) {
+			wp := candCap.WorstPace
+			worstPacePtr = &wp
 		}
+		if !math.IsInf(candCap.TotalPace, 0) {
+			tp := candCap.TotalPace
+			totalPacePtr = &tp
+		}
+		rf := candCap.RawFloor
+		rawFloorPtr = &rf
+
+		var r5Ptr, r7Ptr *float64
+		if candCap.Q5 != nil {
+			r5Val := candCap.R5
+			r5Ptr = &r5Val
+		}
+		if candCap.Q7 != nil {
+			r7Val := candCap.R7
+			r7Ptr = &r7Val
+		}
+
+		var classification string
+		if candCap.IsDepleted {
+			classification = "Depleted"
+		} else if scheduler.IsReserveCapacity(candCap) {
+			classification = "Reserve"
+		} else if candCap.KnownWindowCount > 0 || candCap.LegacyFractionKnown {
+			classification = "Healthy"
+		} else {
+			classification = "Unknown"
+		}
+
+		frozenEvent = &RoutingEvent{
+			Strategy:              auditCtx.Strategy,
+			Account:               dispName,
+			AccountName:           dispName,
+			AccountID:             acc.ID,
+			Classification:        classification,
+			HealthyCandidateCount: len(auditCtx.HealthyCandidates),
+			HealthyCandidates:     auditCtx.HealthyCandidates,
+			ReserveCandidateCount: len(auditCtx.ReserveCandidates),
+			ReserveCandidates:     auditCtx.ReserveCandidates,
+
+			FiveHourKnown:      candCap.Q5Known,
+			FiveHourRemaining:  candCap.Q5,
+			FiveHourResetAt:    candCap.Reset5Time,
+			FiveHourResetRatio: r5Ptr,
+			FiveHourPace:       candCap.Pace5,
+
+			WeeklyKnown:      candCap.Q7Known,
+			WeeklyRemaining:  candCap.Q7,
+			WeeklyResetAt:    candCap.Reset7Time,
+			WeeklyResetRatio: r7Ptr,
+			WeeklyPace:       candCap.Pace7,
+
+			KnownWindowCount: candCap.KnownWindowCount,
+			FreshnessRank:    &freshness,
+			WorstPace:        worstPacePtr,
+			TotalPace:        totalPacePtr,
+			RawFloor:         rawFloorPtr,
+			Path:             path,
+		}
+	}
+
+	notifyAudit := func(status int, reason string) {
+		if frozenEvent == nil || !HasActiveAuditor() {
+			return
+		}
+		ev := *frozenEvent
+		ev.Timestamp = NowFunc()
+		ev.Attempt = attempt
+		ev.Status = status
+		ev.FailoverReason = reason
+		EmitRoutingEvent(ev)
 	}
 
 	at, err := doRefreshToken(acc)
@@ -483,7 +826,12 @@ func (h *Handler) dispatchAccount(
 	if statusCode >= 400 {
 		errBody, _ := io.ReadAll(resp.Body)
 
-		logMessage("PROXY ERROR", fmt.Sprintf("%s %s -> %s HTTP %d", r.Method, pathBase, dispName, statusCode))
+		auditSuffix := ""
+		if frozenEvent != nil {
+			auditSuffix = fmt.Sprintf(" [audit: strategy=%s tier=%s healthy=%d reserve=%d]",
+				frozenEvent.Strategy, frozenEvent.Classification, frozenEvent.HealthyCandidateCount, frozenEvent.ReserveCandidateCount)
+		}
+		logMessage("PROXY ERROR", fmt.Sprintf("%s %s -> %s HTTP %d%s", r.Method, pathBase, dispName, statusCode, auditSuffix))
 
 		// Failover on Google Security Validation Required
 		if auth.IsValidationError(statusCode, errBody) {
@@ -529,7 +877,13 @@ func (h *Handler) dispatchAccount(
 
 	// 2xx response
 	notifyAudit(statusCode, "")
-	logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d)", r.Method, pathBase, dispName, statusCode))
+
+	auditSuffix := ""
+	if frozenEvent != nil {
+		auditSuffix = fmt.Sprintf(" [audit: strategy=%s tier=%s healthy=%d reserve=%d]",
+			frozenEvent.Strategy, frozenEvent.Classification, frozenEvent.HealthyCandidateCount, frozenEvent.ReserveCandidateCount)
+	}
+	logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d)%s", r.Method, pathBase, dispName, statusCode, auditSuffix))
 
 	respContentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	isStream := isSSE || strings.Contains(respContentType, "text/event-stream")
