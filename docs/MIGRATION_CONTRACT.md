@@ -7,6 +7,13 @@
 **Target Implementation:** `agy-pool-go` (`v0.1.0-alpha.1` candidate)
 **Authoritative Source of Truth:** This document governs all development, verification, candidate gating, and eventual production cutover for the Go rewrite of `agy-pool`.
 
+> [!NOTE]
+> **Post-Cutover Implementation Status (Historical Specification)**:
+> - The Python-to-Go production cutover has been completed successfully.
+> - `agy-pool-go` is now the active primary implementation.
+> - The Python implementation remains available only as a reference for rollback, parity testing, and legacy migration.
+> - The specifications below are preserved for historical provenance and contract verification.
+
 ---
 
 ## Classification Schema

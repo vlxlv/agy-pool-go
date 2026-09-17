@@ -47,9 +47,6 @@ const AgyRawShimContent = `#!/bin/sh
 exec agy-pool raw -- "$@"
 `
 
-// Legacy RawScriptContent retained for backwards-compatibility reference.
-const RawScriptContent = AgyRawShimContent
-
 type Options struct {
 	SourceBinary  string
 	TargetDir     string

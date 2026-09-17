@@ -74,12 +74,20 @@ go test -race ./... -count=1
 # Format and vet
 test -z "$(gofmt -l .)"
 go vet ./...
+
+# Verify test independence without Python reference
+PYTHON_REFERENCE=/nonexistent go test ./... -count=1
 ```
 
-To run differential comparison against the reference Python implementation:
+### Optional Differential Parity Verification
+
+The Python reference implementation is preserved strictly as an optional baseline for behavioral parity, migration validation, and emergency rollback. It is not required for building, running, or standard testing of the Go gateway.
+
+To optionally run full differential comparison against the reference Python implementation:
 ```bash
-PYTHONPATH=/path/to/agy-pool ./scripts/dual-test.sh
+PYTHON_REFERENCE=/path/to/agy-pool ./scripts/dual-test.sh
 ```
+
 
 ---
 
