@@ -131,12 +131,16 @@ func Install(opts Options) error {
 
 	// 1. Precondition: discover real native agy
 	nativeAgy := opts.NativeAgyPath
-	if nativeAgy == "" {
-		nativeAgy = diagnostics.FindRealAgyBinary()
-	}
-	fi, err := os.Stat(nativeAgy)
-	if err != nil || fi.IsDir() || (fi.Mode()&0111) == 0 || diagnostics.IsShimOrSelf(nativeAgy) {
-		return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+	if nativeAgy != "" {
+		if err := diagnostics.ValidateNativeCandidate(nativeAgy); err != nil {
+			return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+		}
+	} else {
+		var err error
+		nativeAgy, _, err = diagnostics.ResolveNativeAgyBinary()
+		if err != nil {
+			return errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+		}
 	}
 	fmt.Fprintf(out, "Found native agy: %s\n", nativeAgy)
 

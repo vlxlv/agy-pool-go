@@ -1117,19 +1117,9 @@ func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
 	_, _ = accounts.SyncActiveAgyTokenFile()
 
 	// 6. Find native agy binary
-	cfg := config.GetStaticConfig()
-	var agyPath string
-	if cfg.NativeAgy.Binary != nil && *cfg.NativeAgy.Binary != "" {
-		agyPath = *cfg.NativeAgy.Binary
-		if fi, err := os.Stat(agyPath); err != nil || fi.IsDir() || (fi.Mode()&0111) == 0 {
-			fmt.Fprintf(stderr, "%s[Error] Specified native_agy.binary %q is not executable.%s\n", clrRed, agyPath, clrReset)
-			return 1
-		}
-	} else {
-		agyPath = diagnostics.FindRealAgyBinary()
-	}
-	if agyPath == "" {
-		fmt.Fprintf(stderr, "%s[Error] Could not locate 'agy' executable in PATH.%s\n", clrRed, clrReset)
+	agyPath, _, err := diagnostics.ResolveNativeAgyBinary()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Could not locate native 'agy' executable: %v%s\n", clrRed, err, clrReset)
 		return 1
 	}
 
@@ -1169,9 +1159,9 @@ func RunAgyDirect(extraArgs []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	agyPath := diagnostics.FindRealAgyBinary()
-	if agyPath == "" {
-		fmt.Fprintf(stderr, "%s[Error] Could not locate 'agy' executable in PATH.%s\n", clrRed, clrReset)
+	agyPath, _, err := diagnostics.ResolveNativeAgyBinary()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Could not locate native 'agy' executable: %v%s\n", clrRed, err, clrReset)
 		return 1
 	}
 

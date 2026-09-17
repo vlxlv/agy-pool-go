@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -75,25 +76,23 @@ func SetTLSProber(fn func(host string, timeout time.Duration) error) {
 func getSelfPaths() map[string]bool {
 	paths := make(map[string]bool)
 
-	// Executable of current process
+	// Current executable
 	if exe, err := os.Executable(); err == nil {
 		if realExe, err := filepath.EvalSymlinks(exe); err == nil {
 			paths[realExe] = true
-		} else {
-			paths[filepath.Clean(exe)] = true
 		}
+		paths[filepath.Clean(exe)] = true
 	}
 
 	// argv[0]
 	if len(os.Args) > 0 && os.Args[0] != "" {
 		if realArg, err := filepath.EvalSymlinks(os.Args[0]); err == nil {
 			paths[realArg] = true
-		} else {
-			paths[filepath.Clean(os.Args[0])] = true
 		}
+		paths[filepath.Clean(os.Args[0])] = true
 	}
 
-	// ~/.local/bin/agy-pool
+	// Common agy-pool locations
 	home := os.Getenv("HOME")
 	if home == "" {
 		if u, err := user.Current(); err == nil {
@@ -101,27 +100,39 @@ func getSelfPaths() map[string]bool {
 		}
 	}
 	if home != "" {
-		userBin := filepath.Join(home, ".local", "bin", "agy-pool")
-		if realBin, err := filepath.EvalSymlinks(userBin); err == nil {
-			paths[realBin] = true
-		} else {
-			paths[filepath.Clean(userBin)] = true
+		p := filepath.Join(home, ".local", "bin", "agy-pool")
+		if realP, err := filepath.EvalSymlinks(p); err == nil {
+			paths[realP] = true
 		}
+		paths[filepath.Clean(p)] = true
+	}
+
+	pUsr := filepath.Join("/usr/local/bin", "agy-pool")
+	if realP, err := filepath.EvalSymlinks(pUsr); err == nil {
+		paths[realP] = true
+	}
+	paths[filepath.Clean(pUsr)] = true
+
+	if prefix := os.Getenv("PREFIX"); prefix != "" {
+		pPre := filepath.Join(prefix, "bin", "agy-pool")
+		if realP, err := filepath.EvalSymlinks(pPre); err == nil {
+			paths[realP] = true
+		}
+		paths[filepath.Clean(pPre)] = true
 	}
 
 	if explicit := os.Getenv("AGY_SELF_PATH"); explicit != "" {
 		if realExp, err := filepath.EvalSymlinks(explicit); err == nil {
 			paths[realExp] = true
-		} else {
-			paths[filepath.Clean(explicit)] = true
 		}
+		paths[filepath.Clean(explicit)] = true
 	}
 
 	return paths
 }
 
-// IsShimOrSelf reports whether a path is the agy-pool binary itself, an agy/agy-raw shim,
-// or a symlink resolving to one.
+// IsShimOrSelf reports whether a path is the agy-pool binary itself, an agy/agy-raw/agy-orig shim,
+// a hard link to one of them, or a symlink resolving to one.
 func IsShimOrSelf(path string) bool {
 	if path == "" {
 		return false
@@ -130,6 +141,8 @@ func IsShimOrSelf(path string) bool {
 	if err != nil {
 		abs = filepath.Clean(path)
 	}
+
+	candFi, statErr := os.Stat(abs)
 
 	// 1. Check known self paths
 	selfPaths := getSelfPaths()
@@ -147,16 +160,22 @@ func IsShimOrSelf(path string) bool {
 		return true
 	}
 
-	// 2. Inode / SameFile check against running executable
-	if exe, err := os.Executable(); err == nil {
-		if fi1, err1 := os.Stat(abs); err1 == nil {
-			if fi2, err2 := os.Stat(exe); err2 == nil && os.SameFile(fi1, fi2) {
+	// 2. Inode / SameFile check against running executable and known self paths
+	// Catches hard links even if filenames differ completely!
+	if statErr == nil {
+		if exe, err := os.Executable(); err == nil {
+			if exeFi, err := os.Stat(exe); err == nil && os.SameFile(candFi, exeFi) {
+				return true
+			}
+		}
+		for sp := range selfPaths {
+			if spFi, err := os.Stat(sp); err == nil && os.SameFile(candFi, spFi) {
 				return true
 			}
 		}
 	}
 
-	// 3. Inspect file header for shim signature
+	// 3. Inspect file header for exact agy-pool shim signatures (narrow content fallback)
 	f, err := os.Open(realPath)
 	if err != nil {
 		return false
@@ -167,17 +186,179 @@ func IsShimOrSelf(path string) bool {
 	n, _ := f.Read(buf)
 	if n > 0 {
 		header := string(buf[:n])
-		if strings.Contains(header, "agy-pool run") ||
-			strings.Contains(header, "agy-pool raw") ||
-			strings.Contains(header, "agy-pool direct") ||
-			strings.Contains(header, "agy-pool orig") ||
-			strings.Contains(header, "# agy-pool") ||
-			strings.Contains(header, "agy-pool integration") {
+		if strings.Contains(header, "# agy-pool managed shim v1") ||
+			strings.Contains(header, "# >>> agy-pool integration >>>") ||
+			strings.Contains(header, "exec agy-pool run") ||
+			strings.Contains(header, "exec agy-pool raw") {
 			return true
 		}
 	}
 
 	return false
+}
+
+// ValidateNativeCandidate validates whether a candidate path is a valid native agy executable.
+// It enforces that the candidate exists, is executable, and is not an agy-pool binary, hard link, or managed shim.
+func ValidateNativeCandidate(cand string) error {
+	if strings.TrimSpace(cand) == "" {
+		return errors.New("empty path")
+	}
+	abs, err := filepath.Abs(cand)
+	if err != nil {
+		abs = filepath.Clean(cand)
+	}
+
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("file not found or inaccessible: %w", err)
+	}
+	if fi.IsDir() {
+		return errors.New("candidate path is a directory")
+	}
+	if (fi.Mode() & 0111) == 0 {
+		return errors.New("candidate file is not executable")
+	}
+
+	if IsShimOrSelf(abs) {
+		return errors.New("candidate is agy-pool binary, hard link, or managed shim (recursion prevented)")
+	}
+
+	return nil
+}
+
+var (
+	ErrNativeAgyNotFound = errors.New("Native agy was not found.\nInstall the original Antigravity CLI first, then rerun agy-pool installer.")
+)
+
+const (
+	SourceEnvAgyBin = "AGY_BIN"
+	SourceConfig    = "config"
+	SourcePrefix    = "PREFIX"
+	SourceSystem    = "system path"
+	SourceUserLocal = "~/.local/bin"
+	SourcePathEnv   = "PATH"
+)
+
+// ResolveNativeAgyBinary resolves the native agy binary using the strict discovery precedence contract.
+func ResolveNativeAgyBinary() (string, string, error) {
+	hooksMu.RLock()
+	finder := agyBinaryFinder
+	hooksMu.RUnlock()
+	if finder != nil {
+		p := finder()
+		if p != "" {
+			return p, "mock", nil
+		}
+		return "", "mock", ErrNativeAgyNotFound
+	}
+
+	// 1. AGY_BIN environment override (highest priority)
+	if explicit := os.Getenv("AGY_BIN"); explicit != "" {
+		if err := ValidateNativeCandidate(explicit); err != nil {
+			return "", SourceEnvAgyBin, fmt.Errorf("explicit AGY_BIN override %q is invalid: %w", explicit, err)
+		}
+		clean, _ := filepath.Abs(explicit)
+		return clean, SourceEnvAgyBin, nil
+	}
+
+	// 2. Configured native_agy.binary
+	cfg := config.GetStaticConfig()
+	if cfg != nil && cfg.NativeAgy.Binary != nil && *cfg.NativeAgy.Binary != "" {
+		cand := *cfg.NativeAgy.Binary
+		if err := ValidateNativeCandidate(cand); err != nil {
+			return "", SourceConfig, fmt.Errorf("explicit config native_agy.binary %q is invalid: %w", cand, err)
+		}
+		clean, _ := filepath.Abs(cand)
+		return clean, SourceConfig, nil
+	}
+
+	// Fallback discovery in documented order:
+	type fallbackCandidate struct {
+		path   string
+		source string
+	}
+	var fallbacks []fallbackCandidate
+
+	// 3. $PREFIX/bin/agy
+	if prefix := os.Getenv("PREFIX"); prefix != "" {
+		fallbacks = append(fallbacks, fallbackCandidate{
+			path:   filepath.Join(prefix, "bin", "agy"),
+			source: SourcePrefix,
+		})
+	}
+
+	// 4. /data/data/com.termux/files/usr/bin/agy
+	fallbacks = append(fallbacks, fallbackCandidate{
+		path:   "/data/data/com.termux/files/usr/bin/agy",
+		source: SourceSystem,
+	})
+
+	// 5. /usr/local/bin/agy
+	fallbacks = append(fallbacks, fallbackCandidate{
+		path:   "/usr/local/bin/agy",
+		source: SourceSystem,
+	})
+
+	// 6. /usr/bin/agy
+	fallbacks = append(fallbacks, fallbackCandidate{
+		path:   "/usr/bin/agy",
+		source: SourceSystem,
+	})
+
+	// 7. ~/.local/bin/agy
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
+	}
+	if home != "" {
+		fallbacks = append(fallbacks, fallbackCandidate{
+			path:   filepath.Join(home, ".local", "bin", "agy"),
+			source: SourceUserLocal,
+		})
+	}
+
+	// 8. PATH entries in order
+	pathEnv := os.Getenv("PATH")
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir != "" {
+			fallbacks = append(fallbacks, fallbackCandidate{
+				path:   filepath.Join(dir, "agy"),
+				source: SourcePathEnv,
+			})
+		}
+	}
+
+	seenPaths := make(map[string]bool)
+
+	for _, cand := range fallbacks {
+		if cand.path == "" {
+			continue
+		}
+		clean, err := filepath.Abs(cand.path)
+		if err != nil {
+			clean = filepath.Clean(cand.path)
+		}
+		realPath, err := filepath.EvalSymlinks(clean)
+		if err != nil {
+			realPath = clean
+		}
+		if seenPaths[clean] || seenPaths[realPath] {
+			continue
+		}
+		seenPaths[clean] = true
+		seenPaths[realPath] = true
+
+		if err := ValidateNativeCandidate(clean); err != nil {
+			// Candidate is missing, not executable, or self/shim: continue fallback search
+			continue
+		}
+
+		return clean, cand.source, nil
+	}
+
+	return "", "none", ErrNativeAgyNotFound
 }
 
 // FindRealAgyBinary locates the underlying native agy executable dynamically without self-recursion.
@@ -189,72 +370,11 @@ func FindRealAgyBinary() string {
 		return finder()
 	}
 
-	var candidates []string
-
-	// 1. Configured native_agy.binary
-	cfg := config.GetStaticConfig()
-	if cfg != nil && cfg.NativeAgy.Binary != nil && *cfg.NativeAgy.Binary != "" {
-		candidates = append(candidates, *cfg.NativeAgy.Binary)
+	p, _, err := ResolveNativeAgyBinary()
+	if err != nil {
+		return ""
 	}
-
-	// 2. AGY_BIN environment override
-	if explicit := os.Getenv("AGY_BIN"); explicit != "" {
-		candidates = append(candidates, explicit)
-	}
-
-	// 3. Ordered candidate locations matching Python reference
-	if prefix := os.Getenv("PREFIX"); prefix != "" {
-		candidates = append(candidates, filepath.Join(prefix, "bin", "agy"))
-	}
-
-	candidates = append(candidates,
-		"/data/data/com.termux/files/usr/bin/agy",
-		"/usr/local/bin/agy",
-		"/usr/bin/agy",
-	)
-
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := user.Current(); err == nil {
-			home = u.HomeDir
-		}
-	}
-	if home != "" {
-		candidates = append(candidates, filepath.Join(home, ".local", "bin", "agy"))
-	}
-
-	// 4. All PATH entries to find native agy even if preceded by shims on PATH
-	pathEnv := os.Getenv("PATH")
-	for _, dir := range filepath.SplitList(pathEnv) {
-		if dir != "" {
-			candidates = append(candidates, filepath.Join(dir, "agy"))
-		}
-	}
-
-	seen := make(map[string]bool)
-	for _, cand := range candidates {
-		if cand == "" {
-			continue
-		}
-		clean := filepath.Clean(cand)
-		if seen[clean] {
-			continue
-		}
-		seen[clean] = true
-
-		fi, err := os.Stat(clean)
-		if err != nil || fi.IsDir() || fi.Mode()&0111 == 0 {
-			continue
-		}
-
-		if IsShimOrSelf(clean) {
-			continue
-		}
-
-		return clean
-	}
-
-	return ""
+	return p
 }
 
 // GetInstalledAgyVersion queries the version of the discovered agy binary.
@@ -319,14 +439,14 @@ func RunDoctor(out io.Writer) bool {
 		clrGreen, clrReset)
 
 	// 2. Native Antigravity Executable (agy)
-	realAgy := FindRealAgyBinary()
-	if realAgy != "" {
+	realAgy, source, err := ResolveNativeAgyBinary()
+	if err == nil {
 		agyVer := GetInstalledAgyVersion()
-		fmt.Fprintf(out, "  %s✓%s Native Binary: %s%s%s (v%s)\n",
-			clrGreen, clrReset, clrBold, realAgy, clrReset, agyVer)
+		fmt.Fprintf(out, "  %s✓%s Native Binary: %s%s%s (v%s, source: %s)\n",
+			clrGreen, clrReset, clrBold, realAgy, clrReset, agyVer, source)
 	} else {
-		fmt.Fprintf(out, "  %s⚠%s Native Binary: No native 'agy' found in standard PATH candidates\n",
-			clrYellow, clrReset)
+		fmt.Fprintf(out, "  %s⚠%s Native Binary: %v\n",
+			clrYellow, clrReset, err)
 		fmt.Fprintf(out, "    %s↳ Set AGY_BIN=/path/to/agy if installed in custom location.%s\n",
 			clrDim, clrReset)
 		warningsFound++
