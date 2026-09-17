@@ -33,6 +33,7 @@ type DaemonInfo struct {
 	ConfigPath  string `json:"config_path,omitempty"`
 	ConfigHash  string `json:"config_hash,omitempty"`
 	DataDir     string `json:"data_dir,omitempty"`
+	ListenHost  string `json:"listen_host,omitempty"`
 	Listen      string `json:"listen,omitempty"`
 	Port        int    `json:"port,omitempty"`
 }
@@ -67,6 +68,12 @@ func WritePIDFile(path string, info DaemonInfo) error {
 	if err := config.AssertSafeWritePath(path); err != nil {
 		return err
 	}
+	if info.ListenHost == "" && info.Listen != "" {
+		info.ListenHost = info.Listen
+	}
+	if info.Listen == "" && info.ListenHost != "" {
+		info.Listen = info.ListenHost
+	}
 	return storage.AtomicJSONWrite(path, info)
 }
 
@@ -92,6 +99,12 @@ func ReadPIDFile(path string) (*DaemonInfo, error) {
 		}
 		if info.PID <= 0 {
 			return nil, fmt.Errorf("%w: invalid pid %d", ErrPIDMalformed, info.PID)
+		}
+		if info.ListenHost == "" && info.Listen != "" {
+			info.ListenHost = info.Listen
+		}
+		if info.Listen == "" && info.ListenHost != "" {
+			info.Listen = info.ListenHost
 		}
 		return &info, nil
 	}

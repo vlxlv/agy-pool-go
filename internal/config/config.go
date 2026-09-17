@@ -248,6 +248,11 @@ func expandUser(path string) string {
 	return path
 }
 
+// ExpandUser expands ~ or ~/ in path to the user home directory.
+func ExpandUser(path string) string {
+	return expandUser(path)
+}
+
 func initStateDir() {
 	if envDir := os.Getenv("AGY_DATA_DIR"); envDir != "" {
 		_ = ConfigureDataDir(envDir)
@@ -474,12 +479,12 @@ func ConfigureDataDir(dir string) error {
 	}
 
 	dataDirMu.Lock()
-	configuredDataDir = abs
-	configuredStateDir = abs
+	configuredDataDir = realTarget
+	configuredStateDir = realTarget
 	dataDirMu.Unlock()
 
 	// Ensure locks directory exists
-	locksDir := filepath.Join(abs, "locks")
+	locksDir := filepath.Join(realTarget, "locks")
 	_ = os.MkdirAll(locksDir, 0o700)
 
 	return nil
@@ -744,6 +749,11 @@ func GetPresenceLockFile(cid string) string {
 // ConfigureStateDir configures the storage directory with fail-closed safety checks.
 func ConfigureStateDir(dir string) error {
 	return ConfigureDataDir(dir)
+}
+
+// IsProtectedProductionDir reports whether path falls within a protected production state directory.
+func IsProtectedProductionDir(path string) bool {
+	return isProtectedProductionDir(path)
 }
 
 func isProtectedProductionDir(path string) bool {
