@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,10 +15,106 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
+	"golang.org/x/term"
 )
 
-// ListAccounts renders the account pool dashboard matching Python reference.
+// terminalWidth detects terminal column width using golang.org/x/term when stdout is a TTY,
+// or returns 100 as the deterministic non-TTY default (desktop layout).
+func terminalWidth(w io.Writer) int {
+	if f, ok := w.(*os.File); ok {
+		fd := int(f.Fd())
+		if term.IsTerminal(fd) {
+			if width, _, err := term.GetSize(fd); err == nil && width > 0 {
+				return width
+			}
+		}
+	}
+	return 100
+}
+
+// chooseBarWidth calculates the largest bar width (up to maxDesired) that fits within lineWidth budget.
+// If available space is less than minUseful, it returns 0 (no bar).
+func chooseBarWidth(lineWidth, nonBarLen, maxDesired, minUseful int) int {
+	available := lineWidth - nonBarLen
+	if available >= maxDesired {
+		return maxDesired
+	}
+	if available >= minUseful {
+		return available
+	}
+	return 0
+}
+
+// ListAccounts renders the account pool dashboard with responsive layout based on terminal width.
 func ListAccounts(target string, stdout, stderr io.Writer) {
+	width := terminalWidth(stdout)
+	ListAccountsWithWidth(target, width, stdout, stderr)
+}
+
+func getAccountState(acc *storage.Account, pool *storage.Pool, nowTS int64) (string, string) {
+	q := acc.LastQuota
+	q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+	isCooling := acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > float64(nowTS)
+	isExhausted := (q5Frac != nil && *q5Frac <= config.DepletedThreshold) ||
+		(gwFrac != nil && *gwFrac <= config.DepletedThreshold)
+	isActive := pool.ActiveAccountID != nil && acc.ID == *pool.ActiveAccountID
+
+	status := acc.Status
+	if status == "validation_required" {
+		return "Verify Required", clrYellow
+	}
+	if status == "auth_error" {
+		return "Auth Error", clrRed
+	}
+	if isCooling {
+		if isActive {
+			return "CLI Base (Cooldown)", clrYellow
+		}
+		return "Cooldown", clrYellow
+	}
+	if isExhausted {
+		if isActive {
+			return "CLI Base (Exhausted)", clrRed
+		}
+		return "Exhausted", clrDim
+	}
+	if isActive {
+		return "CLI Base", clrGreen
+	}
+	return "Ready", clrCyan
+}
+
+func extractResetTimes(acc *storage.Account, q *storage.QuotaState, nowTS int64) (any, any) {
+	var legacyReset any
+	if q != nil && q.Gemini5H == nil && q.GeminiWeekly == nil {
+		legacyReset = q.ResetTime
+	}
+	var reset5, reset7 any
+	if q != nil && q.Gemini5H != nil {
+		reset5 = q.Gemini5H.ResetTime
+	} else {
+		reset5 = legacyReset
+	}
+	if q != nil && q.GeminiWeekly != nil {
+		reset7 = q.GeminiWeekly.ResetTime
+	} else {
+		reset7 = legacyReset
+	}
+	if reset5 == nil && acc.Gemini5HResetSec != nil {
+		reset5 = float64(nowTS) + *acc.Gemini5HResetSec
+	}
+	if reset7 == nil && acc.GeminiWeeklyResetSec != nil {
+		reset7 = float64(nowTS) + *acc.GeminiWeeklyResetSec
+	}
+	return reset5, reset7
+}
+
+// ListAccountsWithWidth renders the account pool dashboard for a specific terminal width.
+func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer) {
+	if width <= 0 {
+		width = 100
+	}
+
 	pool, err := storage.LoadPool()
 	if err != nil || pool == nil || len(pool.Accounts) == 0 {
 		fmt.Fprintf(stdout, "\n%sNo accounts in pool yet.%s\n", clrYellow, clrReset)
@@ -58,6 +155,27 @@ func ListAccounts(target string, stdout, stderr io.Writer) {
 		gatewayStatus = fmt.Sprintf("%sSTOPPED%s", clrDim, clrReset)
 	}
 
+	nowTS := time.Now().Unix()
+
+	if width >= 96 {
+		renderWideQuotaDashboard(accList, pool, gatewayStatus, nowTS, stdout)
+		return
+	}
+
+	if width >= 60 {
+		renderCompactQuotaDashboard(accList, pool, nowTS, width, stdout)
+		return
+	}
+
+	if width >= 40 {
+		renderMobileQuotaDashboard(accList, pool, daemonRunning, nowTS, width, stdout)
+		return
+	}
+
+	renderVeryNarrowQuotaDashboard(accList, pool, nowTS, width, stdout)
+}
+
+func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, gatewayStatus string, nowTS int64, stdout io.Writer) {
 	sep := strings.Repeat("=", 68)
 	subSep := strings.Repeat("-", 68)
 
@@ -66,39 +184,14 @@ func ListAccounts(target string, stdout, stderr io.Writer) {
 	fmt.Fprintf(stdout, "%s%*s%s\n", clrBold, (68+len(title))/2, title, clrReset)
 	fmt.Fprintf(stdout, "%s\n", sep)
 
-	activeID := ""
-	if pool.ActiveAccountID != nil {
-		activeID = *pool.ActiveAccountID
-	}
-
-	nowTS := time.Now().Unix()
-
 	for i, acc := range accList {
 		if acc == nil {
 			continue
 		}
-		accID := acc.ID
-		isActive := (accID == activeID)
+
 		q := acc.LastQuota
-		status := acc.Status
-
 		q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
-
-		var legacyReset any
-		if q != nil && q.Gemini5H == nil && q.GeminiWeekly == nil {
-			legacyReset = q.ResetTime
-		}
-		var reset5, reset7 any
-		if q != nil && q.Gemini5H != nil {
-			reset5 = q.Gemini5H.ResetTime
-		} else {
-			reset5 = legacyReset
-		}
-		if q != nil && q.GeminiWeekly != nil {
-			reset7 = q.GeminiWeekly.ResetTime
-		} else {
-			reset7 = legacyReset
-		}
+		reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
 		g5Reset := quota.FormatRemainingTime(reset5)
 		gwReset := quota.FormatRemainingTime(reset7)
@@ -106,38 +199,14 @@ func ListAccounts(target string, stdout, stderr io.Writer) {
 		g5Bar := quota.RenderProgressBar(q5Frac, 10)
 		gwBar := quota.RenderProgressBar(gwFrac, 10)
 
-		isCooling := acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > float64(nowTS)
-		isExhausted := (q5Frac != nil && *q5Frac <= config.DepletedThreshold) ||
-			(gwFrac != nil && *gwFrac <= config.DepletedThreshold)
-
+		state, stateClr := getAccountState(acc, pool, nowTS)
+		marker := fmt.Sprintf("%s%s%s", stateClr, state, clrReset)
 		hits := acc.GetHits()
-
-		marker := ""
-		if status == "validation_required" {
-			marker = fmt.Sprintf("%s⚠ Verify Required%s", clrYellow, clrReset)
-		} else if status == "auth_error" {
-			marker = fmt.Sprintf("%s✖ Auth Error%s", clrRed, clrReset)
-		} else if isCooling {
-			if isActive {
-				marker = fmt.Sprintf("%sCLI Base (Cooldown)%s", clrYellow, clrReset)
-			} else {
-				marker = fmt.Sprintf("%sCooldown%s", clrYellow, clrReset)
-			}
-		} else if isExhausted {
-			if isActive {
-				marker = fmt.Sprintf("%sCLI Base (Exhausted)%s", clrRed, clrReset)
-			} else {
-				marker = fmt.Sprintf("%sExhausted%s", clrDim, clrReset)
-			}
-		} else if isActive {
-			marker = fmt.Sprintf("%sCLI Base%s", clrGreen, clrReset)
-		} else {
-			marker = fmt.Sprintf("%sReady%s", clrCyan, clrReset)
-		}
-
 		dispName := accounts.DisplayAccountName(acc)
+
 		fmt.Fprintf(stdout, "%s[%d] %s%s  [%s]  Hits: %d\n", clrBold, i+1, dispName, clrReset, marker, hits)
 
+		status := acc.Status
 		if status == "validation_required" {
 			fmt.Fprintf(stdout, "    • Gemini 5-Hour: %s[░░░░░░░░░░]  Action Required (Blocked)%s\n", clrYellow, clrReset)
 			fmt.Fprintf(stdout, "    • Gemini Weekly: %s[░░░░░░░░░░]  Action Required (Blocked)%s\n", clrYellow, clrReset)
@@ -179,6 +248,269 @@ func ListAccounts(target string, stdout, stderr io.Writer) {
 	fmt.Fprintf(stdout, " Strategy: %s%s%s | Gateway Proxy: %s\n",
 		clrBold, strat, clrReset, gatewayStatus)
 	fmt.Fprintf(stdout, "%s\n\n", sep)
+}
+
+func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, stdout io.Writer) {
+	fmt.Fprintln(stdout)
+	for i, acc := range accList {
+		if acc == nil {
+			continue
+		}
+
+		dispName := accounts.DisplayAccountName(acc)
+		state, stateClr := getAccountState(acc, pool, nowTS)
+		hits := acc.GetHits()
+
+		prefix := fmt.Sprintf("  [%d] ", i+1)
+		suffix := fmt.Sprintf(" · %s", state)
+		fullLen := len(prefix) + len(dispName) + len(suffix)
+		if fullLen > width {
+			maxNameLen := width - len(prefix) - len(suffix)
+			if maxNameLen > 3 && len(dispName) > maxNameLen {
+				dispName = dispName[:maxNameLen-1] + "…"
+			}
+		}
+
+		fmt.Fprintf(stdout, "%s%s%s%s · %s%s%s\n", prefix, clrBold, dispName, clrReset, stateClr, state, clrReset)
+
+		status := acc.Status
+		if status == "validation_required" {
+			fmt.Fprintf(stdout, "      %sAction Required (Verify needed)%s\n", clrYellow, clrReset)
+			fmt.Fprintf(stdout, "      Run: agy-pool verify %d\n", i+1)
+		} else if status == "auth_error" {
+			fmt.Fprintf(stdout, "      %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
+		} else {
+			q := acc.LastQuota
+			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			reset5, reset7 := extractResetTimes(acc, q, nowTS)
+
+			g5Pct := "  N/A "
+			if q5Frac != nil {
+				g5Pct = fmt.Sprintf("%5.1f%%", *q5Frac*100.0)
+			}
+			g5Reset := quota.FormatCompactRemainingTime(reset5)
+			r5Str := "reset " + g5Reset
+			if g5Reset == "ready" || g5Reset == "N/A" {
+				r5Str = g5Reset
+			}
+			nonBar5 := 18 + len(r5Str)
+			barW5 := chooseBarWidth(width, nonBar5, 10, 4)
+			if barW5 > 0 {
+				g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
+				fmt.Fprintf(stdout, "      5H %s %s  %s\n", g5Pct, g5Bar, r5Str)
+			} else {
+				fmt.Fprintf(stdout, "      5H %s  %s\n", g5Pct, r5Str)
+			}
+
+			gwPct := "  N/A "
+			if gwFrac != nil {
+				gwPct = fmt.Sprintf("%5.1f%%", *gwFrac*100.0)
+			}
+			gwReset := quota.FormatCompactRemainingTime(reset7)
+			r7Str := "reset " + gwReset
+			if gwReset == "ready" || gwReset == "N/A" {
+				r7Str = gwReset
+			}
+			nonBar7 := 18 + len(r7Str)
+			barW7 := chooseBarWidth(width, nonBar7, 10, 4)
+			if barW7 > 0 {
+				gwBar := quota.RenderBlockProgressBar(gwFrac, barW7)
+				fmt.Fprintf(stdout, "      WK %s %s  %s\n", gwPct, gwBar, r7Str)
+			} else {
+				fmt.Fprintf(stdout, "      WK %s  %s\n", gwPct, r7Str)
+			}
+
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
+				tpPct := fmt.Sprintf("%5.1f%%", *q.ThirdParty5H.Fraction*100.0)
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
+				rTpStr := "reset " + tpReset
+				if tpReset == "ready" || tpReset == "N/A" {
+					rTpStr = tpReset
+				}
+				nonBarTp := 18 + len(rTpStr)
+				barWTp := chooseBarWidth(width, nonBarTp, 10, 4)
+				if barWTp > 0 {
+					tpBar := quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, barWTp)
+					fmt.Fprintf(stdout, "      3P %s %s  %s\n", tpPct, tpBar, rTpStr)
+				} else {
+					fmt.Fprintf(stdout, "      3P %s  %s\n", tpPct, rTpStr)
+				}
+			}
+
+			ageStr := quota.FormatQuotaAge(acc, float64(nowTS))
+			fmt.Fprintf(stdout, "      age %s · hits %d\n", ageStr, hits)
+		}
+
+		if i < len(accList)-1 {
+			fmt.Fprintln(stdout)
+		}
+	}
+	fmt.Fprintln(stdout)
+}
+
+func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, daemonRunning bool, nowTS int64, width int, stdout io.Writer) {
+	fmt.Fprintln(stdout)
+	for i, acc := range accList {
+		if acc == nil {
+			continue
+		}
+
+		dispName := accounts.DisplayAccountName(acc)
+		state, stateClr := getAccountState(acc, pool, nowTS)
+		hits := acc.GetHits()
+
+		suffix := fmt.Sprintf(" · %s", state)
+		fullLen := len(dispName) + len(suffix)
+		if fullLen > width {
+			maxNameLen := width - len(suffix)
+			if maxNameLen > 3 && len(dispName) > maxNameLen {
+				dispName = dispName[:maxNameLen-1] + "…"
+			}
+		}
+
+		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
+
+		status := acc.Status
+		if status == "validation_required" {
+			fmt.Fprintf(stdout, "%sAction Required (Verify needed)%s\n", clrYellow, clrReset)
+			fmt.Fprintf(stdout, "Run: agy-pool verify %d\n", i+1)
+		} else if status == "auth_error" {
+			fmt.Fprintf(stdout, "%sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
+		} else {
+			q := acc.LastQuota
+			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			reset5, reset7 := extractResetTimes(acc, q, nowTS)
+
+			g5Pct := " N/A"
+			if q5Frac != nil {
+				pctVal := int(math.Round(*q5Frac * 100.0))
+				g5Pct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+			}
+			g5Reset := quota.FormatCompactRemainingTime(reset5)
+			nonBar5 := 10 + len(g5Reset)
+			barW5 := chooseBarWidth(width, nonBar5, 10, 4)
+			if barW5 > 0 {
+				g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
+				fmt.Fprintf(stdout, "5H %s %s  %s\n", g5Pct, g5Bar, g5Reset)
+			} else {
+				fmt.Fprintf(stdout, "5H %s  %s\n", g5Pct, g5Reset)
+			}
+
+			gwPct := " N/A"
+			if gwFrac != nil {
+				pctVal := int(math.Round(*gwFrac * 100.0))
+				gwPct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+			}
+			gwReset := quota.FormatCompactRemainingTime(reset7)
+			nonBar7 := 10 + len(gwReset)
+			barW7 := chooseBarWidth(width, nonBar7, 10, 4)
+			if barW7 > 0 {
+				gwBar := quota.RenderBlockProgressBar(gwFrac, barW7)
+				fmt.Fprintf(stdout, "WK %s %s  %s\n", gwPct, gwBar, gwReset)
+			} else {
+				fmt.Fprintf(stdout, "WK %s  %s\n", gwPct, gwReset)
+			}
+
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
+				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
+				nonBarTp := 10 + len(tpReset)
+				barWTp := chooseBarWidth(width, nonBarTp, 10, 4)
+				if barWTp > 0 {
+					tpBar := quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, barWTp)
+					fmt.Fprintf(stdout, "3P %s %s  %s\n", tpPct, tpBar, tpReset)
+				} else {
+					fmt.Fprintf(stdout, "3P %s  %s\n", tpPct, tpReset)
+				}
+			}
+
+			ageStr := quota.FormatShortQuotaAge(acc, float64(nowTS))
+			fmt.Fprintf(stdout, "age %s · hits %d\n", ageStr, hits)
+		}
+
+		if i < len(accList)-1 {
+			fmt.Fprintln(stdout)
+		}
+	}
+
+	strat := pool.Strategy
+	if strat == "" {
+		strat = config.StrategyMaxQuota
+	}
+	fmt.Fprintln(stdout)
+	if daemonRunning {
+		fmt.Fprintf(stdout, "%s · proxy up · :%d\n\n", strat, config.DefaultPort)
+	} else {
+		fmt.Fprintf(stdout, "%s · proxy down\n\n", strat)
+	}
+}
+
+func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, stdout io.Writer) {
+	fmt.Fprintln(stdout)
+	for i, acc := range accList {
+		if acc == nil {
+			continue
+		}
+
+		dispName := accounts.DisplayAccountName(acc)
+		state, stateClr := getAccountState(acc, pool, nowTS)
+		hits := acc.GetHits()
+
+		suffix := fmt.Sprintf(" · %s", state)
+		fullLen := len(dispName) + len(suffix)
+		if fullLen > width {
+			maxNameLen := width - len(suffix)
+			if maxNameLen > 3 && len(dispName) > maxNameLen {
+				dispName = dispName[:maxNameLen-1] + "…"
+			}
+		}
+
+		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
+
+		status := acc.Status
+		if status == "validation_required" {
+			fmt.Fprintf(stdout, "%sVerify Needed%s\n", clrYellow, clrReset)
+			fmt.Fprintf(stdout, "agy-pool verify %d\n", i+1)
+		} else if status == "auth_error" {
+			fmt.Fprintf(stdout, "%sAuth Error%s\n", clrRed, clrReset)
+		} else {
+			q := acc.LastQuota
+			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			reset5, reset7 := extractResetTimes(acc, q, nowTS)
+
+			g5Pct := " N/A"
+			if q5Frac != nil {
+				pctVal := int(math.Round(*q5Frac * 100.0))
+				g5Pct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+			}
+			g5Reset := quota.FormatCompactRemainingTime(reset5)
+			fmt.Fprintf(stdout, "5H %s  %s\n", g5Pct, g5Reset)
+
+			gwPct := " N/A"
+			if gwFrac != nil {
+				pctVal := int(math.Round(*gwFrac * 100.0))
+				gwPct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+			}
+			gwReset := quota.FormatCompactRemainingTime(reset7)
+			fmt.Fprintf(stdout, "WK %s  %s\n", gwPct, gwReset)
+
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
+				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
+				fmt.Fprintf(stdout, "3P %s  %s\n", tpPct, tpReset)
+			}
+
+			ageStr := quota.FormatShortQuotaAge(acc, float64(nowTS))
+			fmt.Fprintf(stdout, "%s · %d hits\n", ageStr, hits)
+		}
+
+		if i < len(accList)-1 {
+			fmt.Fprintln(stdout)
+		}
+	}
+	fmt.Fprintln(stdout)
 }
 
 // RenameAccount renames an account's friendly label.

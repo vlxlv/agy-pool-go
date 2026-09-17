@@ -115,3 +115,94 @@ func DisplayQuotaFractions(q *storage.QuotaState) (*float64, *float64) {
 
 	return q5, q7
 }
+
+// RenderBlockProgressBar renders a block gauge using full block (█) and light shade (░).
+func RenderBlockProgressBar(fraction *float64, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if fraction == nil {
+		return fmt.Sprintf("%s%s%s", clrDim, strings.Repeat("░", width), clrReset)
+	}
+
+	f := *fraction
+	if f < 0.0 {
+		f = 0.0
+	} else if f > 1.0 {
+		f = 1.0
+	}
+
+	filled := int(math.Round(f * float64(width)))
+	if filled > width {
+		filled = width
+	}
+	empty := width - filled
+
+	color := clrRed
+	if f > 0.4 {
+		color = clrGreen
+	} else if f > 0.15 {
+		color = clrYellow
+	}
+
+	filledBar := strings.Repeat("█", filled)
+	emptyBar := strings.Repeat("░", empty)
+
+	return fmt.Sprintf("%s%s%s%s%s%s",
+		color, filledBar, clrReset,
+		clrDim, emptyBar, clrReset)
+}
+
+// FormatCompactRemainingTime formats a reset timestamp into compact form (e.g. "4h57m", "5d15h", "ready").
+func FormatCompactRemainingTime(resetTime any) string {
+	if resetTime == nil {
+		return "N/A"
+	}
+
+	ts := ParseISOOrTimestamp(resetTime)
+	if ts == nil {
+		str := fmt.Sprintf("%v", resetTime)
+		if len(str) > 10 {
+			return str[:10]
+		}
+		return str
+	}
+
+	diffSec := int64(*ts - float64(time.Now().Unix()))
+	if diffSec <= 0 {
+		return "ready"
+	}
+
+	days := diffSec / 86400
+	rem := diffSec % 86400
+	hours := rem / 3600
+	rem = rem % 3600
+	minutes := rem / 60
+
+	if days > 0 {
+		return fmt.Sprintf("%dd%dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh%dm", hours, minutes)
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
+// FormatShortQuotaAge returns a compact representation of snapshot age (e.g. "2m", "45s", "1h").
+func FormatShortQuotaAge(acc *storage.Account, now float64) string {
+	info := Freshness(acc, now)
+	if info.Age == nil {
+		return "unk"
+	}
+	age := int(*info.Age)
+	if age < 0 {
+		age = 0
+	}
+	if age >= 3600 {
+		return fmt.Sprintf("%dh", age/3600)
+	}
+	if age >= 60 {
+		return fmt.Sprintf("%dm", age/60)
+	}
+	return fmt.Sprintf("%ds", age)
+}
