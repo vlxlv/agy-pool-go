@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -32,14 +33,28 @@ type ServerOptions struct {
 	BoundPortChan        chan int
 	QuotaRefreshInterval time.Duration
 	DisableSignals       bool
+	Instance             *InstanceContext
 }
 
 // RunForeground runs the agy-pool reverse proxy server in the foreground,
 // acquiring the PID lock, writing PID metadata, and shutting down gracefully on signal or context cancellation.
 func RunForeground(ctx context.Context, opts ServerOptions) error {
+	ctxInst := opts.Instance
+	if ctxInst == nil {
+		dataDir := config.GetDataDir()
+		if opts.PIDFile != "" {
+			dataDir = filepath.Dir(opts.PIDFile)
+		}
+		var err error
+		ctxInst, err = ResolveInstanceContext(dataDir, "", opts.Port, "")
+		if err != nil {
+			return err
+		}
+	}
+
 	pidFile := opts.PIDFile
 	if pidFile == "" {
-		pidFile = PIDFileProvider()
+		pidFile = ctxInst.PIDFile()
 	}
 	if err := config.AssertSafeWritePath(pidFile); err != nil {
 		return err
@@ -47,7 +62,7 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 
 	port := opts.Port
 	if port <= 0 && !opts.EphemeralPort {
-		port = DefaultPortProvider()
+		port = ctxInst.ListenPort
 	}
 
 	// Fail-closed test safety guard: never bind 8899 or 8901 in test mode!
@@ -73,7 +88,7 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	defer unlock()
 
 	// 2. Open TCP listener
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := fmt.Sprintf("%s:%d", ctxInst.ListenHost, port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("%w: failed to listen on %s: %v", ErrForeignPortOccupied, addr, err)
@@ -86,7 +101,7 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	}
 
 	// 3. Write PID metadata atomically with 0600 mode
-	currExe := GetEntrypointPath()
+	currExe := ctxInst.BinaryPath
 	var scriptMtime int64
 	if st, err := os.Stat(currExe); err == nil {
 		scriptMtime = st.ModTime().Unix()
@@ -95,27 +110,15 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	}
 
 	currentPID := os.Getpid()
-	cfg := config.GetStaticConfig()
-	cfgPath := ""
-	cfgHash := ""
-	if p, err := config.ResolveDefaultConfigFile(); err == nil && p != "" {
-		cfgPath = p
-		if h, err := config.ComputeConfigFileHash(p); err == nil {
-			cfgHash = h
-		}
-	}
-	listenHost := "127.0.0.1"
-	if cfg != nil && cfg.Server.Listen != "" {
-		listenHost = cfg.Server.Listen
-	}
 	pidInfo := DaemonInfo{
 		PID:         currentPID,
-		Version:     VersionProvider(),
+		Version:     ctxInst.Version,
 		ScriptMtime: scriptMtime,
-		ConfigPath:  cfgPath,
-		ConfigHash:  cfgHash,
-		DataDir:     config.GetDataDir(),
-		Listen:      listenHost,
+		ConfigPath:  ctxInst.ConfigPath,
+		ConfigHash:  ctxInst.ConfigHash,
+		DataDir:     ctxInst.DataDir,
+		ListenHost:  ctxInst.ListenHost,
+		Listen:      ctxInst.ListenHost,
 		Port:        actualPort,
 	}
 	if err := WritePIDFile(pidFile, pidInfo); err != nil {

@@ -276,9 +276,11 @@ func MatchesInstance(info *DaemonInfo, ctx *InstanceContext) MatchResult {
 	return MatchExact
 }
 
-// CheckInstanceStatus inspects the status of the daemon for the given InstanceContext.
-func CheckInstanceStatus(ctx *InstanceContext) (InstanceStatus, *DaemonInfo, string) {
-	pidFile := ctx.PIDFile()
+// CheckStatusWithFile inspects the status of the daemon for the given InstanceContext and specific PID file path.
+func CheckStatusWithFile(ctx *InstanceContext, pidFile string) (InstanceStatus, *DaemonInfo, string) {
+	if pidFile == "" {
+		pidFile = ctx.PIDFile()
+	}
 	info, err := ReadPIDFile(pidFile)
 	if err != nil {
 		if errors.Is(err, ErrPIDNotFound) {
@@ -330,4 +332,9 @@ func CheckInstanceStatus(ctx *InstanceContext) (InstanceStatus, *DaemonInfo, str
 	default:
 		return StatusForeignInstance, info, "unknown match state"
 	}
+}
+
+// CheckInstanceStatus inspects the status of the daemon for the given InstanceContext.
+func CheckInstanceStatus(ctx *InstanceContext) (InstanceStatus, *DaemonInfo, string) {
+	return CheckStatusWithFile(ctx, ctx.PIDFile())
 }

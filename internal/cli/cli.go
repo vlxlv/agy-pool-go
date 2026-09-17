@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -137,17 +138,13 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "log", "logs":
 		return handleLogs(args[1:], stdout, stderr)
 	case "start":
-		StartDaemonCmd(stdout, stderr)
-		return 0
+		return StartDaemonCmd(stdout, stderr, args[1:]...)
 	case "stop":
-		StopDaemonCmd(stdout, stderr)
-		return 0
+		return StopDaemonCmd(stdout, stderr, args[1:]...)
 	case "restart":
-		RestartDaemonCmd(stdout, stderr)
-		return 0
+		return RestartDaemonCmd(stdout, stderr, args[1:]...)
 	case "status":
-		StatusCmd(stdout, stderr)
-		return 0
+		return StatusCmd(stdout, stderr, args[1:]...)
 	case "daemon-run":
 		return handleDaemonRun(args[1:], stdout, stderr)
 	case "migrate-legacy":
@@ -794,19 +791,71 @@ func handleLogs(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func handleDaemonRun(args []string, stdout, stderr io.Writer) int {
-	port := 0
+// ParseInstanceFlags parses -c/--config, -D/--directory, and -p/--port flags.
+func ParseInstanceFlags(args []string) (configFile string, dataDir string, port int, remainingArgs []string, err error) {
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--port" && i+1 < len(args) {
-			p, err := strconv.Atoi(args[i+1])
-			if err == nil {
-				port = p
+		arg := args[i]
+		if arg == "-c" || arg == "--config" {
+			if i+1 >= len(args) {
+				return "", "", 0, nil, fmt.Errorf("flag needs an argument: %s", arg)
 			}
+			configFile = args[i+1]
 			i++
+		} else if strings.HasPrefix(arg, "--config=") {
+			configFile = strings.TrimPrefix(arg, "--config=")
+		} else if arg == "-D" || arg == "--directory" {
+			if i+1 >= len(args) {
+				return "", "", 0, nil, fmt.Errorf("flag needs an argument: %s", arg)
+			}
+			dataDir = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--directory=") {
+			dataDir = strings.TrimPrefix(arg, "--directory=")
+		} else if arg == "-p" || arg == "--port" {
+			if i+1 >= len(args) {
+				return "", "", 0, nil, fmt.Errorf("flag needs an argument: %s", arg)
+			}
+			p, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return "", "", 0, nil, fmt.Errorf("invalid port %q: %w", args[i+1], err)
+			}
+			port = p
+			i++
+		} else if strings.HasPrefix(arg, "--port=") {
+			p, err := strconv.Atoi(strings.TrimPrefix(arg, "--port="))
+			if err != nil {
+				return "", "", 0, nil, fmt.Errorf("invalid port: %s", arg)
+			}
+			port = p
+		} else {
+			remainingArgs = append(remainingArgs, arg)
 		}
 	}
-	err := daemon.RunForeground(context.Background(), daemon.ServerOptions{
-		Port: port,
+	return configFile, dataDir, port, remainingArgs, nil
+}
+
+func resolveContextForCmd(args []string) (*daemon.InstanceContext, []string, error) {
+	cfgFile, dataDir, port, rem, err := ParseInstanceFlags(args)
+	if err != nil {
+		return nil, nil, err
+	}
+	ctx, err := daemon.ResolveInstanceContext(dataDir, cfgFile, port, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = config.ConfigureDataDir(ctx.DataDir)
+	return ctx, rem, nil
+}
+
+func handleDaemonRun(args []string, stdout, stderr io.Writer) int {
+	ctx, _, err := resolveContextForCmd(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daemon-run error: %v\n", err)
+		return 1
+	}
+	err = daemon.RunForeground(context.Background(), daemon.ServerOptions{
+		Port:     ctx.ListenPort,
+		Instance: ctx,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "daemon-run error: %v\n", err)
@@ -816,58 +865,117 @@ func handleDaemonRun(args []string, stdout, stderr io.Writer) int {
 }
 
 // StartDaemonCmd starts the proxy gateway in background mode.
-func StartDaemonCmd(stdout, stderr io.Writer) {
-	res, err := daemon.StartDaemon(daemon.LaunchOptions{Foreground: false})
+func StartDaemonCmd(stdout, stderr io.Writer, args ...string) int {
+	ctx, _, err := resolveContextForCmd(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+	res, err := daemon.StartInstance(ctx, daemon.LaunchOptions{Foreground: false})
 	if err != nil {
 		fmt.Fprintf(stdout, "%s[Error] Failed to start gateway. Check %s%s\n",
-			clrRed, config.GetLogFile(), clrReset)
-		return
+			clrRed, ctx.LogFile(), clrReset)
+		return 1
 	}
 	if res.AlreadyRun {
 		fmt.Fprintf(stdout, "%sProxy daemon is already running (PID: %d).%s\n",
 			clrYellow, res.PID, clrReset)
 	} else {
-		fmt.Fprintf(stdout, "%s✓ Started agy-pool gateway proxy on http://127.0.0.1:%d (PID: %d)%s\n",
-			clrGreen, config.DefaultPort, res.PID, clrReset)
+		fmt.Fprintf(stdout, "%s✓ Started agy-pool gateway proxy on http://%s:%d (PID: %d)%s\n",
+			clrGreen, ctx.ListenHost, ctx.ListenPort, res.PID, clrReset)
 	}
+	return 0
 }
 
 // StopDaemonCmd stops the proxy gateway.
-func StopDaemonCmd(stdout, stderr io.Writer) {
-	err := daemon.StopDaemon("", config.DefaultPort, 3*time.Second)
+func StopDaemonCmd(stdout, stderr io.Writer, args ...string) int {
+	ctx, _, err := resolveContextForCmd(args)
 	if err != nil {
-		fmt.Fprintf(stdout, "%sProxy daemon is not running.%s\n", clrYellow, clrReset)
-	} else {
-		fmt.Fprintf(stdout, "%s✓ Stopped proxy daemon%s\n", clrGreen, clrReset)
+		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
+		return 1
 	}
+	err = daemon.StopInstance(ctx, 3*time.Second)
+	if err != nil {
+		if errors.Is(err, daemon.ErrNotRunning) {
+			fmt.Fprintf(stdout, "%sProxy daemon is not running.%s\n", clrYellow, clrReset)
+			return 0
+		}
+		fmt.Fprintf(stderr, "%s[Error] Cannot stop proxy daemon: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s✓ Stopped proxy daemon%s\n", clrGreen, clrReset)
+	return 0
 }
 
 // RestartDaemonCmd restarts the proxy gateway.
-func RestartDaemonCmd(stdout, stderr io.Writer) {
-	StopDaemonCmd(stdout, stderr)
-	time.Sleep(1 * time.Second)
-	StartDaemonCmd(stdout, stderr)
+func RestartDaemonCmd(stdout, stderr io.Writer, args ...string) int {
+	ctx, _, err := resolveContextForCmd(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+	res, err := daemon.RestartInstance(ctx, daemon.LaunchOptions{})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to restart gateway: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s✓ Started agy-pool gateway proxy on http://%s:%d (PID: %d)%s\n",
+		clrGreen, ctx.ListenHost, ctx.ListenPort, res.PID, clrReset)
+	return 0
 }
 
 // StatusCmd checks daemon status and displays account dashboard.
-func StatusCmd(stdout, stderr io.Writer) {
-	info := daemon.GetDaemonInfo("")
-	if info != nil && daemon.IsPortListening(config.DefaultPort) {
+func StatusCmd(stdout, stderr io.Writer, args ...string) int {
+	ctx, rem, err := resolveContextForCmd(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+
+	target := ""
+	if len(rem) > 0 {
+		target = rem[0]
+	}
+
+	status, info, msg := daemon.CheckInstanceStatus(ctx)
+	switch status {
+	case daemon.StatusRunningSameInstance:
 		verNote := ""
-		if info.Version != "" {
+		if info != nil && info.Version != "" {
 			verNote = fmt.Sprintf(" [v%s]", info.Version)
 		}
-		if daemon.IsDaemonOutdated("", config.DefaultPort) {
-			fmt.Fprintf(stdout, "%s⚠ Gateway Proxy is RUNNING (PID: %d%s, Outdated Code). Run 'agy-pool restart' to reload.%s\n",
-				clrYellow, info.PID, verNote, clrReset)
-		} else {
-			fmt.Fprintf(stdout, "%s✓ Gateway Proxy is RUNNING (PID: %d%s) on http://127.0.0.1:%d%s\n",
-				clrGreen, info.PID, verNote, config.DefaultPort, clrReset)
+		fmt.Fprintf(stdout, "%s✓ Gateway Proxy is RUNNING (PID: %d%s) on http://%s:%d%s\n",
+			clrGreen, info.PID, verNote, ctx.ListenHost, ctx.ListenPort, clrReset)
+	case daemon.StatusOutdatedBinary:
+		verNote := ""
+		if info != nil && info.Version != "" {
+			verNote = fmt.Sprintf(" [v%s]", info.Version)
 		}
-	} else {
+		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy is RUNNING (PID: %d%s, Outdated Code). Run 'agy-pool restart' to reload.%s\n",
+			clrYellow, info.PID, verNote, clrReset)
+	case daemon.StatusConfigMismatch:
+		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy has CONFIG MISMATCH: %s. Run 'agy-pool restart' to reload.%s\n",
+			clrYellow, msg, clrReset)
+	case daemon.StatusPortOccupiedForeign:
+		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy is STOPPED, but port %d is OCCUPIED by another process or instance.%s\n",
+			clrYellow, ctx.ListenPort, clrReset)
+	case daemon.StatusForeignInstance:
+		fmt.Fprintf(stdout, "%s⚠ PID file points to a FOREIGN instance: %s%s\n",
+			clrYellow, msg, clrReset)
+	case daemon.StatusStalePID:
+		_ = os.Remove(ctx.PIDFile())
+		fmt.Fprintf(stdout, "%s○ Gateway Proxy is STOPPED (stale PID file cleaned)%s\n", clrYellow, clrReset)
+	case daemon.StatusLegacyPID:
+		fmt.Fprintf(stdout, "%s⚠ Gateway Proxy has LEGACY unverified PID file (PID: %d)%s\n",
+			clrYellow, info.PID, clrReset)
+	case daemon.StatusStopped:
 		fmt.Fprintf(stdout, "%s○ Gateway Proxy is STOPPED%s\n", clrYellow, clrReset)
+	default:
+		fmt.Fprintf(stdout, "%s○ Gateway Proxy is STOPPED (%s)%s\n", clrYellow, msg, clrReset)
 	}
-	ListAccounts("", stdout, stderr)
+
+	ListAccounts(target, stdout, stderr)
+	return 0
 }
 
 // ParseRunArgs parses options scoped to `agy-pool run`.
@@ -954,73 +1062,60 @@ func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// 1. Static config loading
-	var cfg *config.StaticConfig
-	if configFile != "" {
-		c, err := config.LoadConfigFile(configFile)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s[Error] Failed to load config %s: %v%s\n", clrRed, configFile, err, clrReset)
-			return 1
-		}
-		cfg = c
-		config.SetStaticConfig(cfg)
-	} else {
-		resolvedFile, _ := config.ResolveDefaultConfigFile()
-		if resolvedFile != "" {
-			c, err := config.LoadConfigFile(resolvedFile)
-			if err == nil {
-				cfg = c
-				config.SetStaticConfig(cfg)
-			}
-		}
-		if cfg == nil {
-			cfg = config.GetStaticConfig()
-		}
+	// 1. Resolve explicit instance context
+	ctx, err := daemon.ResolveInstanceContext(dataDir, configFile, 0, "")
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
+		return 1
 	}
 
 	// 2. Data directory configuration
-	if dataDir != "" {
-		if err := config.ConfigureDataDir(dataDir); err != nil {
-			fmt.Fprintf(stderr, "%s[Error] Invalid data directory %s: %v%s\n", clrRed, dataDir, err, clrReset)
+	if err := config.ConfigureDataDir(ctx.DataDir); err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Invalid data directory %s: %v%s\n", clrRed, ctx.DataDir, err, clrReset)
+		return 1
+	}
+
+	// 3. Ensure exact daemon is running for this instance
+	status, info, msg := daemon.CheckInstanceStatus(ctx)
+	switch status {
+	case daemon.StatusRunningSameInstance:
+		// Exact instance is running
+	case daemon.StatusOutdatedBinary:
+		fmt.Fprintf(stderr, "%s[agy-pool] Outdated daemon detected; reloading...%s\n", clrYellow, clrReset)
+		_, err := daemon.RestartInstance(ctx, daemon.LaunchOptions{})
+		if err != nil {
+			fmt.Fprintf(stderr, "%s[Error] Failed to reload daemon: %v%s\n", clrRed, err, clrReset)
 			return 1
 		}
-	} else {
-		_ = config.ConfigureDefaultDataDir()
-	}
-
-	// 3. Ensure daemon is running for this instance
-	port := cfg.Server.Port
-	listen := cfg.Server.Listen
-	if listen == "" {
-		listen = "127.0.0.1"
-	}
-	pidFile := config.GetPIDFile()
-	logFile := config.GetLogFile()
-
-	if mismatch := daemon.CheckDaemonMismatch(pidFile, port, configFile); mismatch != "" {
-		fmt.Fprintf(stderr, "%s[agy-pool] Notice: %s%s\n", clrYellow, mismatch, clrReset)
-	}
-
-	if !daemon.IsDaemonRunning(pidFile, port) {
-		_, _ = daemon.StartDaemon(daemon.LaunchOptions{
-			Foreground: false,
-			Port:       port,
-			StateDir:   config.GetDataDir(),
-			ConfigFile: configFile,
-			PIDFile:    pidFile,
-			LogFile:    logFile,
-		})
+	case daemon.StatusConfigMismatch:
+		fmt.Fprintf(stderr, "%s[agy-pool] Notice: %s%s\n", clrYellow, msg, clrReset)
+		if info != nil && info.ConfigPath != ctx.ConfigPath {
+			fmt.Fprintf(stderr, "%s[Error] Port %d is occupied by another daemon with config %q (requested %q)%s\n", clrRed, ctx.ListenPort, info.ConfigPath, ctx.ConfigPath, clrReset)
+			return 1
+		}
+	case daemon.StatusPortOccupiedForeign, daemon.StatusForeignInstance:
+		if !config.IsTestMode() {
+			fmt.Fprintf(stderr, "%s[Error] Port %d or data directory is occupied by another process: %s%s\n", clrRed, ctx.ListenPort, msg, clrReset)
+			return 1
+		}
+	case daemon.StatusStopped, daemon.StatusStalePID:
+		_, err := daemon.StartInstance(ctx, daemon.LaunchOptions{})
+		if err != nil && !config.IsTestMode() {
+			fmt.Fprintf(stderr, "%s[Error] Failed to start gateway daemon: %v%s\n", clrRed, err, clrReset)
+			return 1
+		}
 	}
 
 	// 4. Set gateway environment
 	env := os.Environ()
-	gatewayURL := fmt.Sprintf("http://%s:%d", listen, port)
+	gatewayURL := fmt.Sprintf("http://%s:%d", ctx.ListenHost, ctx.ListenPort)
 	env = append(env, "CLOUD_CODE_URL="+gatewayURL)
 
 	// 5. Sync active agy token
 	_, _ = accounts.SyncActiveAgyTokenFile()
 
 	// 6. Find native agy binary
+	cfg := config.GetStaticConfig()
 	var agyPath string
 	if cfg.NativeAgy.Binary != nil && *cfg.NativeAgy.Binary != "" {
 		agyPath = *cfg.NativeAgy.Binary
