@@ -527,7 +527,7 @@ func RenameAccount(target, name string, stdout, stderr io.Writer) bool {
 
 	acc, err := accounts.RenameAccount(target, name)
 	if err != nil || acc == nil {
-		fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
+		fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, safeSelector(target), clrReset)
 		return false
 	}
 	return true
@@ -537,7 +537,7 @@ func RenameAccount(target, name string, stdout, stderr io.Writer) bool {
 func RemoveAccount(target string, stdout, stderr io.Writer) bool {
 	acc, err := accounts.RemoveAccount(target)
 	if err != nil || acc == nil {
-		fmt.Fprintf(stderr, "%s[Error] Could not remove account '%s': %v%s\n", clrRed, target, err, clrReset)
+		fmt.Fprintf(stderr, "%s[Error] Could not remove the selected account.%s\n", clrRed, clrReset)
 		return false
 	}
 	fmt.Fprintf(stdout, "%s✓ Removed account %s from pool.%s\n", clrGreen, accounts.DisplayAccountName(acc), clrReset)
@@ -546,14 +546,18 @@ func RemoveAccount(target string, stdout, stderr io.Writer) bool {
 
 // SwitchAccount switches the active account in the pool.
 func SwitchAccount(target string, stdout, stderr io.Writer) bool {
-	pool, _ := storage.LoadPool()
+	pool, err := storage.LoadPool()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Could not load the account pool.%s\n", clrRed, clrReset)
+		return false
+	}
 	if pool == nil || len(pool.Accounts) == 0 {
 		fmt.Fprintf(stderr, "%s[Error] Account pool is empty.%s\n", clrRed, clrReset)
 		return false
 	}
 	acc, err := accounts.SwitchAccount(target)
 	if err != nil || acc == nil {
-		fmt.Fprintf(stderr, "%s[Error] Could not switch account '%s': %v%s\n", clrRed, target, err, clrReset)
+		fmt.Fprintf(stderr, "%s[Error] Could not switch the selected account.%s\n", clrRed, clrReset)
 		return false
 	}
 	fmt.Fprintf(stdout, "%s✓ Switched CLI base account to: %s%s%s\n", clrGreen, clrBold, accounts.DisplayAccountName(acc), clrReset)
@@ -584,7 +588,11 @@ func handleExport(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	pool, _ := storage.LoadPool()
+	pool, err := storage.LoadPool()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Could not load the account pool: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
 	if pool == nil || len(pool.Accounts) == 0 {
 		fmt.Fprintf(stdout, "\n%sNo accounts in pool to export.%s\n", clrYellow, clrReset)
 		return 0
@@ -638,14 +646,15 @@ func handleImport(args []string, stdout, stderr io.Writer) int {
 
 	res, err := accounts.ImportPool(filePath, password, replace, skipExisting)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s[Error] %v%s\n", clrRed, err, clrReset)
-		return 0
+		fmt.Fprintf(stderr, "%s[Error] Import failed: %v%s\n", clrRed, err, clrReset)
+		return 1
 	}
-	finalPool, _ := storage.LoadPool()
-	total := 0
-	if finalPool != nil {
-		total = len(finalPool.Accounts)
+	finalPool, err := storage.LoadPool()
+	if err != nil || finalPool == nil {
+		fmt.Fprintf(stderr, "%s[Error] Import completed but the account pool could not be verified.%s\n", clrRed, clrReset)
+		return 1
 	}
+	total := len(finalPool.Accounts)
 	fmt.Fprintf(stdout, "%s✓ Successfully imported %d account(s) (Pool total: %d)%s\n", clrGreen, res.Added+res.Updated, total, clrReset)
 	return 0
 }
@@ -749,7 +758,13 @@ func LoginCmdWithOptions(stdin io.Reader, stdout, stderr io.Writer, extraOpts ac
 			fmt.Fprintf(stderr, "\n%s[Error] Login cancelled.%s\n", clrRed, clrReset)
 			return 130
 		}
-		fmt.Fprintf(stderr, "%s[Error] Login failed: %v%s\n", clrRed, err, clrReset)
+		message := "Login failed."
+		if strings.Contains(err.Error(), "login timed out or cancelled") {
+			message = "login timed out or cancelled"
+		} else if strings.Contains(err.Error(), "OAuth callback error: access_denied") {
+			message = "OAuth callback error: access_denied"
+		}
+		fmt.Fprintf(stderr, "%s[Error] %s%s\n", clrRed, message, clrReset)
 		return 1
 	}
 

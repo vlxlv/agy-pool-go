@@ -123,7 +123,10 @@ func runDaemonChild(stderr io.Writer) int {
 		fmt.Fprintf(stderr, "daemon child error: %v\n", err)
 		return 1
 	}
-	_ = config.ConfigureDataDir(ctx.DataDir)
+	if err := config.ConfigureDataDir(ctx.DataDir); err != nil {
+		fmt.Fprintf(stderr, "daemon child error: %v\n", err)
+		return 1
+	}
 
 	pidFile := os.Getenv("AGY_TEST_PID_FILE")
 	if pidFile == "" {

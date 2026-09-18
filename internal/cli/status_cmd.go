@@ -21,7 +21,11 @@ import (
 func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 	validStrategies := []string{config.StrategyMaxQuota, config.StrategyLeastUsed, config.StrategyRoundRobin}
 
-	pool, _ := storage.LoadPool()
+	pool, err := storage.LoadPool()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Could not load the account pool.%s\n", clrRed, clrReset)
+		return false
+	}
 	current := config.StrategyMaxQuota
 	if pool != nil && pool.Strategy != "" {
 		current = pool.Strategy
@@ -52,7 +56,7 @@ func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 		return false
 	}
 
-	err := storage.PoolTransaction(func(p *storage.Pool) error {
+	err = storage.PoolTransaction(func(p *storage.Pool) error {
 		p.Strategy = targetStrategy
 		return nil
 	})
@@ -112,7 +116,7 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 			if idx >= 1 && idx <= len(accList) {
 				accList = []*storage.Account{accList[idx-1]}
 			} else {
-				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
+				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, safeSelector(target), clrReset)
 				return 0
 			}
 		} else {
@@ -126,7 +130,7 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 			if found != nil {
 				accList = []*storage.Account{found}
 			} else {
-				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
+				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, safeSelector(target), clrReset)
 				return 0
 			}
 		}
@@ -206,6 +210,11 @@ func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
 		return 1
 	}
 
+	if len(rem) > 0 && rem[0] == "--refresh" {
+		fmt.Fprintln(stderr, "usage: agy-pool quota [account]")
+		fmt.Fprintln(stderr, "agy-pool quota: error: unrecognized argument '--refresh'")
+		return 2
+	}
 	target := ""
 	if len(rem) > 0 {
 		target = rem[0]

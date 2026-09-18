@@ -19,7 +19,7 @@ A high-performance, zero-CGO Go implementation and reverse proxy gateway for **A
 - **Distinct CLI Domain Responsibilities**:
   - `agy-pool status`: Fast, script-friendly runtime summary (PID, memory, uptime, state.db schema, pool counts) without slow network quota refreshes.
   - `agy-pool list`: Compact account inventory and cached quota overview.
-  - `agy-pool quota`: Dedicated quota dashboard with live progress bars, reset countdowns, and `--refresh` capability.
+  - `agy-pool quota`: Dedicated quota dashboard with live progress bars and reset countdowns.
   - `agy-pool doctor`: Comprehensive system diagnostic checking binary discovery, daemon health, process table, database integrity, and Google TLS connectivity.
 - **Go-Native Persistent State**: Stores authoritative pool and runtime state in SQLite (`state.db`) under `~/.local/share/agy-pool/state.db` with transactional locking and schema versioning. Legacy JSON state (`~/.gemini/agy-pool-accounts.json`) is supported strictly as legacy migration input or rollback reference data.
 - **Cross-Platform Session Continuity**: Resolves and continues directory sessions across account rotations using `conversation_summaries.db`.

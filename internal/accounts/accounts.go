@@ -702,7 +702,7 @@ func Login(ctx context.Context, opts LoginOptions) (*storage.Account, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("OAuth exchange failed HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("OAuth exchange failed HTTP %d", resp.StatusCode)
 	}
 
 	var tokenRes struct {

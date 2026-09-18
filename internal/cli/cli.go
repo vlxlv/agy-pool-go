@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -79,7 +80,16 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "login", "add":
 		return LoginCmd(stdin, stdout, stderr)
 	case "import-current":
-		_, _ = accounts.ImportCurrent()
+		acc, err := accounts.ImportCurrent()
+		if err != nil {
+			fmt.Fprintf(stderr, "%s[Error] Could not import current native credentials: %v%s\n", clrRed, err, clrReset)
+			return 1
+		}
+		if acc == nil {
+			fmt.Fprintf(stderr, "%s[Error] Current native credentials were not imported.%s\n", clrRed, clrReset)
+			return 1
+		}
+		fmt.Fprintf(stdout, "%s✓ Imported current native credentials into the pool.%s\n", clrGreen, clrReset)
 		return 0
 	case "list", "ls":
 		return ListCmd(stdout, stderr, args[1:]...)
@@ -130,7 +140,27 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if len(args) > 1 {
 			target = args[1]
 		}
-		_, _, _ = accounts.VerifyAccount(target)
+		acc, verificationURL, err := accounts.VerifyAccount(target)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s[Error] Verification could not be completed: %v%s\n", clrRed, err, clrReset)
+			return 1
+		}
+		if acc == nil {
+			fmt.Fprintf(stderr, "%s[Error] Verification could not be completed.%s\n", clrRed, clrReset)
+			return 1
+		}
+		label := accounts.DisplayAccountName(acc)
+		if verificationURL == "" {
+			fmt.Fprintf(stdout, "Verification is not required for %s.\n", label)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Verification required for %s.\n", label)
+		fmt.Fprintln(stdout, "Open the verification URL shown below:")
+		if safeURL, ok := redactUserURL(verificationURL); ok {
+			fmt.Fprintln(stdout, safeURL)
+		} else {
+			fmt.Fprintln(stdout, "Re-run login/re-authentication for this account.")
+		}
 		return 0
 	case "log", "logs":
 		return handleLogs(args[1:], stdout, stderr)
@@ -227,6 +257,32 @@ func resolveContextForCmd(args []string) (*daemon.InstanceContext, []string, err
 	if err != nil {
 		return nil, nil, err
 	}
-	_ = config.ConfigureDataDir(ctx.DataDir)
+	if err := config.ConfigureDataDir(ctx.DataDir); err != nil {
+		return nil, nil, err
+	}
 	return ctx, rem, nil
+}
+
+func safeSelector(target string) string {
+	if strings.Contains(target, "@") {
+		return "the selected account"
+	}
+	return target
+}
+
+func redactUserURL(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", false
+	}
+	q := u.Query()
+	for key := range q {
+		switch strings.ToLower(key) {
+		case "email", "login_hint", "user", "account", "token", "access_token", "refresh_token", "id_token", "code":
+			q.Set(key, "REDACTED")
+		}
+	}
+	u.RawQuery = q.Encode()
+	u.Fragment = ""
+	return u.String(), true
 }
