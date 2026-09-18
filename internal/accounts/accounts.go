@@ -181,7 +181,7 @@ func writeAgyTokenFile(account *storage.Account) error {
 		return err
 	}
 	tokenFile := config.GetAgyTokenFile()
-	if err := config.AssertSafeWritePath(tokenFile); err != nil {
+	if err := config.AssertSafeNativeTokenWrite(tokenFile); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
@@ -206,7 +206,7 @@ func WriteAgyTokenFile(account *storage.Account) error {
 		return errors.New("nil account")
 	}
 	lockFile := config.GetAgyTokenFile() + ".lock"
-	if err := config.AssertSafeWritePath(lockFile); err != nil {
+	if err := config.AssertSafeNativeTokenWrite(lockFile); err != nil {
 		return err
 	}
 	return storage.WithFileLock(lockFile, true, func() error { return writeAgyTokenFile(account) })
@@ -215,11 +215,11 @@ func WriteAgyTokenFile(account *storage.Account) error {
 // SyncActiveAgyTokenFile synchronizes native agy's compatibility token with the current active account.
 func SyncActiveAgyTokenFile() (bool, error) {
 	tokenFile := config.GetAgyTokenFile()
-	if err := config.AssertSafeWritePath(tokenFile); err != nil {
+	if err := config.AssertSafeNativeTokenWrite(tokenFile); err != nil {
 		return false, err
 	}
 	lockFile := tokenFile + ".lock"
-	if err := config.AssertSafeWritePath(lockFile); err != nil {
+	if err := config.AssertSafeNativeTokenWrite(lockFile); err != nil {
 		return false, err
 	}
 

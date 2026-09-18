@@ -882,6 +882,119 @@ func AssertSafeWritePath(path string) error {
 	return AssertSafeDestructivePath(path)
 }
 
+// AssertSafeNativeTokenWrite validates that path is safe for native token credential operations:
+//
+// In TEST MODE:
+//   - Any path resolving to real production state (realProductionGeminiDir or realHostUserHome/.gemini)
+//     MUST fail closed.
+//   - Target must be inside the active synthetic sandbox or configured isolated test root.
+//
+// In PRODUCTION MODE:
+//   - Only the canonical native token file derived from current config/HOME, its sidecar lock file,
+//     and atomic staging files in the canonical CLI directory are permitted.
+//   - Arbitrary sibling paths, unrelated directories, path traversal, and unsafe symlink
+//     redirections are strictly rejected.
+func AssertSafeNativeTokenWrite(path string) error {
+	if path == "" {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] native token write path is empty")
+	}
+
+	abs, err := filepath.Abs(expandUser(path))
+	if err != nil {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] failed to resolve native token write path %q: %w", path, err)
+	}
+	cleanTarget := filepath.Clean(abs)
+
+	resolvedTarget := resolvePathSymlinks(cleanTarget)
+	if resolvedTarget == "" {
+		resolvedTarget = cleanTarget
+	}
+
+	if IsTestMode() {
+		realProd := GetRealProductionGeminiDir()
+		if realProd != "" {
+			cleanRealProd := filepath.Clean(realProd)
+			if cleanTarget == cleanRealProd || strings.HasPrefix(cleanTarget, cleanRealProd+string(os.PathSeparator)) ||
+				resolvedTarget == cleanRealProd || strings.HasPrefix(resolvedTarget, cleanRealProd+string(os.PathSeparator)) {
+				return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path in test mode: %s", cleanTarget)
+			}
+		}
+
+		realHome := GetRealHostUserHome()
+		if realHome != "" {
+			realHomeGemini := filepath.Clean(filepath.Join(realHome, ".gemini"))
+			if cleanTarget == realHomeGemini || strings.HasPrefix(cleanTarget, realHomeGemini+string(os.PathSeparator)) ||
+				resolvedTarget == realHomeGemini || strings.HasPrefix(resolvedTarget, realHomeGemini+string(os.PathSeparator)) {
+				return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path in test mode: %s", cleanTarget)
+			}
+		}
+
+		forbiddenDirsMu.RLock()
+		for forbidden := range forbiddenWriteDirs {
+			if cleanTarget == forbidden || strings.HasPrefix(cleanTarget, forbidden+string(os.PathSeparator)) ||
+				resolvedTarget == forbidden || strings.HasPrefix(resolvedTarget, forbidden+string(os.PathSeparator)) {
+				forbiddenDirsMu.RUnlock()
+				return fmt.Errorf("[FAIL-CLOSED GUARD] refusing write to protected production path in test mode: %s", cleanTarget)
+			}
+		}
+		forbiddenDirsMu.RUnlock()
+
+		sandbox := GetSyntheticSandboxRoot()
+		inSandbox := sandbox != "" && (cleanTarget == sandbox || strings.HasPrefix(cleanTarget, sandbox+string(os.PathSeparator)))
+
+		nativeDir := GetNativeAgyDir()
+		inNativeDir := nativeDir != "" && (cleanTarget == nativeDir || strings.HasPrefix(cleanTarget, nativeDir+string(os.PathSeparator)))
+
+		if !inSandbox && !inNativeDir {
+			return fmt.Errorf("[FAIL-CLOSED GUARD] native token write in test mode must target synthetic sandbox or isolated native dir: %s", cleanTarget)
+		}
+	}
+
+	canonicalTokenFile := GetAgyTokenFile()
+	if canonicalTokenFile == "" {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] canonical native token file is unconfigured")
+	}
+	canonicalAbs, err := filepath.Abs(expandUser(canonicalTokenFile))
+	if err != nil {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] failed to resolve canonical native token path %q: %w", canonicalTokenFile, err)
+	}
+	cleanCanonical := filepath.Clean(canonicalAbs)
+	cleanLock := cleanCanonical + ".lock"
+	canonicalDir := filepath.Dir(cleanCanonical)
+
+	isCanonical := false
+	if cleanTarget == cleanCanonical || cleanTarget == cleanLock {
+		isCanonical = true
+	} else if filepath.Dir(cleanTarget) == canonicalDir {
+		base := filepath.Base(cleanTarget)
+		canonicalBase := filepath.Base(cleanCanonical)
+		if strings.HasPrefix(base, canonicalBase+".") && !strings.Contains(base, "..") {
+			isCanonical = true
+		}
+	}
+
+	if !isCanonical {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing native token write to non-canonical path: %s", cleanTarget)
+	}
+
+	resolvedCanonicalDir := resolvePathSymlinks(canonicalDir)
+	if resolvedCanonicalDir == "" {
+		resolvedCanonicalDir = canonicalDir
+	}
+
+	if resolvedTarget != resolvedCanonicalDir && !strings.HasPrefix(resolvedTarget, resolvedCanonicalDir+string(os.PathSeparator)) {
+		return fmt.Errorf("[FAIL-CLOSED GUARD] refusing native token write through symlink escaping canonical directory: %s -> %s", cleanTarget, resolvedTarget)
+	}
+
+	for _, sysPrefix := range []string{"/usr", "/bin", "/sbin", "/etc", "/var"} {
+		if resolvedTarget == sysPrefix || strings.HasPrefix(resolvedTarget, sysPrefix+string(os.PathSeparator)) {
+			return fmt.Errorf("[FAIL-CLOSED GUARD] refusing native token write redirecting to system directory: %s", resolvedTarget)
+		}
+	}
+
+	return nil
+}
+
 // AssertSafeReadPath ensures test code does not accidentally read real production state.
 func AssertSafeReadPath(path string) error {
 	if !IsTestMode() || path == "" {

@@ -44,7 +44,9 @@ func EnsureDirs() error {
 // WithFileLock acquires both an in-memory RWMutex and a POSIX flock on the stable sidecar lock file.
 func WithFileLock(path string, exclusive bool, fn func() error) error {
 	if err := config.AssertSafeWritePath(path); err != nil {
-		return err
+		if tokenErr := config.AssertSafeNativeTokenWrite(path); tokenErr != nil {
+			return err
+		}
 	}
 
 	mu := getPathMutex(path)
@@ -113,7 +115,9 @@ func ReadPoolUnlocked(path string) (*Pool, error) {
 // AtomicJSONWrite writes data to a file atomically via temp file with mode 0600 and fsync.
 func AtomicJSONWrite(path string, data any) error {
 	if err := config.AssertSafeWritePath(path); err != nil {
-		return err
+		if tokenErr := config.AssertSafeNativeTokenWrite(path); tokenErr != nil {
+			return err
+		}
 	}
 
 	dir := filepath.Dir(path)

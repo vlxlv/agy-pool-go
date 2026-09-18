@@ -10,6 +10,7 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
+	"github.com/vlxlv/agy-pool-go/internal/storage"
 	_ "modernc.org/sqlite"
 )
 
@@ -510,5 +511,115 @@ func TestRunAgyDirect_ResolvesManagedNativeBinary(t *testing.T) {
 		if capturedArgv[i] != expectedArgs[i] {
 			t.Errorf("arg[%d] mismatch: expected %q, got %q", i, expectedArgs[i], capturedArgv[i])
 		}
+	}
+}
+
+// F & H. RunAgyWithLB valid sync path executes native agy and preserves privacy
+func TestRunAgyWithLB_ValidSyncExecutesAgy(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{
+		ID:          "acc_1",
+		Name:        "Main",
+		Email:       "user@example.com",
+		AccessToken: "valid-access-token",
+	}
+	pool.Accounts = []*storage.Account{acc}
+	pool.ActiveAccountID = &acc.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeAgy := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(fakeAgy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics.SetAgyBinaryFinder(func() string { return fakeAgy })
+	defer diagnostics.SetAgyBinaryFinder(nil)
+
+	var execCalled bool
+	oldExec := ExecHandler
+	defer func() { ExecHandler = oldExec }()
+	ExecHandler = func(binary string, argv []string, env []string) error {
+		execCalled = true
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"run", "--", "-p", "hello"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected code 0 on valid sync, got %d (stderr: %s)", code, stderr.String())
+	}
+	if !execCalled {
+		t.Fatalf("expected ExecHandler to be called on valid sync")
+	}
+
+	// Verify token file was written
+	tokenFile := config.GetAgyTokenFile()
+	if _, err := os.Stat(tokenFile); err != nil {
+		t.Fatalf("expected token file %s to exist after sync: %v", tokenFile, err)
+	}
+}
+
+// G & H. RunAgyWithLB failed sync path aborts without exec and preserves privacy
+func TestRunAgyWithLB_SyncFailureAborts(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	secretToken := "confidential-token-secret-999"
+	secretEmail := "super-confidential@secret-corp.internal"
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{
+		ID:          "acc_1",
+		Name:        "Main",
+		Email:       secretEmail,
+		AccessToken: secretToken,
+	}
+	pool.Accounts = []*storage.Account{acc}
+	pool.ActiveAccountID = &acc.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make token path a directory so writing fails
+	if err := os.MkdirAll(config.GetAgyTokenFile(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeAgy := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(fakeAgy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics.SetAgyBinaryFinder(func() string { return fakeAgy })
+	defer diagnostics.SetAgyBinaryFinder(nil)
+
+	var execCalled bool
+	oldExec := ExecHandler
+	defer func() { ExecHandler = oldExec }()
+	ExecHandler = func(string, []string, []string) error {
+		execCalled = true
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"run", "--", "-p", "hello"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit code on sync failure, got 0")
+	}
+	if execCalled {
+		t.Fatalf("CRITICAL: ExecHandler was called despite sync failure!")
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "Failed to synchronize native agy credentials") {
+		t.Fatalf("expected sync failure error in stderr, got: %s", stderrStr)
+	}
+	if strings.Contains(stderrStr, secretToken) {
+		t.Fatalf("token secret leaked in stderr: %s", stderrStr)
+	}
+	if strings.Contains(stderrStr, secretEmail) {
+		t.Fatalf("email leaked in stderr: %s", stderrStr)
 	}
 }
