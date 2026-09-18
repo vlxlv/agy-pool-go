@@ -438,6 +438,11 @@ func TestLoginFlow(t *testing.T) {
 
 func TestVerifyAccount(t *testing.T) {
 	setupIsolatedTestDir(t)
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		fraction := 0.8
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
 
 	pool := storage.NewEmptyPool()
 	vURL := "https://accounts.google.com/verify?id=xyz"

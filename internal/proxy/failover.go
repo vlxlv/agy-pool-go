@@ -25,12 +25,6 @@ func RecordSuccess(account *storage.Account, isGeneration bool) {
 			stored.GenCount = &hits
 			stored.LastUsedAt = &now
 		}
-		if stored.Status == "validation_required" || stored.Status == "auth_error" {
-			stored.Status = ""
-			stored.ValidationURL = nil
-			stored.RateLimitedUntil = nil
-		}
-
 		activeID := ""
 		if pool.ActiveAccountID != nil {
 			activeID = *pool.ActiveAccountID

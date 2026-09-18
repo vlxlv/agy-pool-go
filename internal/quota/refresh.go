@@ -340,6 +340,9 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, quotaDa
 	return errors.New("model response contained no quota information")
 }
 
+// finalizeAndPersistQuota persists quota telemetry without changing auth state.
+// Quota health and auth/verification restriction are orthogonal: a successful
+// quota probe is not proof that verification or re-authentication completed.
 func finalizeAndPersistQuota(account *storage.Account, quotaData *storage.QuotaState) (*storage.QuotaState, error) {
 	recomputeCompatQuota(quotaData)
 	nowSec := time.Now().Unix()
@@ -348,11 +351,6 @@ func finalizeAndPersistQuota(account *storage.Account, quotaData *storage.QuotaS
 	err := storage.PoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
 		if stored != nil {
-			if stored.Status == "validation_required" || stored.Status == "auth_error" {
-				stored.Status = ""
-				stored.ValidationURL = nil
-				stored.RateLimitedUntil = nil
-			}
 			stored.LastQuota = quotaData
 		}
 		return nil

@@ -199,8 +199,11 @@ func TestQueryQuota_PartialResponseMergesKnownWindows(t *testing.T) {
 	BackendURLBaseProvider = func() string { return ts.URL }
 	TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
 
+	validationURL := "https://accounts.google.com/verify?id=partial"
 	acc := &storage.Account{
-		ID: "acc-partial",
+		ID:            "acc-partial",
+		Status:        "validation_required",
+		ValidationURL: &validationURL,
 		LastQuota: &storage.QuotaState{
 			Gemini5H: &storage.QuotaWindow{
 				Fraction:  floatPtr(0.60),
@@ -226,6 +229,59 @@ func TestQueryQuota_PartialResponseMergesKnownWindows(t *testing.T) {
 	}
 	if res.GeminiWeekly == nil || *res.GeminiWeekly.Fraction != 0.92 {
 		t.Errorf("expected preserved weekly fraction 0.92, got %+v", res.GeminiWeekly)
+	}
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored.Status != "validation_required" {
+		t.Fatalf("status = %q, want validation_required", stored.Status)
+	}
+	if stored.ValidationURL == nil || *stored.ValidationURL != validationURL {
+		t.Fatalf("validation URL = %v, want %q", stored.ValidationURL, validationURL)
+	}
+}
+
+func TestQueryQuota_PreservesAuthRestrictions(t *testing.T) {
+	setupQuotaTestDir(t)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"groups":[{"buckets":[{"bucketId":"gemini-5h-user","remainingFraction":0.7,"window":"5h"}]}]}`)
+	}))
+	defer ts.Close()
+
+	BackendURLBaseProvider = func() string { return ts.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
+
+	for _, status := range []string{"validation_required", "auth_error"} {
+		t.Run(status, func(t *testing.T) {
+			validationURL := "https://accounts.google.com/verify?id=" + status
+			acc := &storage.Account{ID: "restricted-" + status, Status: status, ValidationURL: &validationURL}
+			pool := &storage.Pool{Accounts: []*storage.Account{acc}}
+			if err := storage.SavePool(pool); err != nil {
+				t.Fatalf("SavePool failed: %v", err)
+			}
+
+			if _, err := QueryQuota(acc); err != nil {
+				t.Fatalf("QueryQuota failed: %v", err)
+			}
+			storedPool, err := storage.LoadPool()
+			if err != nil {
+				t.Fatalf("LoadPool failed: %v", err)
+			}
+			stored := storage.FindAccount(storedPool, acc)
+			if stored.Status != status {
+				t.Fatalf("status = %q, want %q", stored.Status, status)
+			}
+			if stored.ValidationURL == nil || *stored.ValidationURL != validationURL {
+				t.Fatalf("validation URL = %v, want %q", stored.ValidationURL, validationURL)
+			}
+			if stored.LastQuota == nil || stored.LastQuota.Gemini5H == nil || stored.LastQuota.Gemini5H.Fraction == nil || *stored.LastQuota.Gemini5H.Fraction != 0.7 {
+				t.Fatalf("quota was not updated: %+v", stored.LastQuota)
+			}
+		})
 	}
 }
 
