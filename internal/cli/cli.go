@@ -263,13 +263,6 @@ func resolveContextForCmd(args []string) (*daemon.InstanceContext, []string, err
 	return ctx, rem, nil
 }
 
-func safeSelector(target string) string {
-	if strings.Contains(target, "@") {
-		return "the selected account"
-	}
-	return target
-}
-
 func redactUserURL(raw string) (string, bool) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {

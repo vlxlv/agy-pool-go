@@ -2,9 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -56,6 +60,35 @@ func TestCP1DRequiredCommandFailures(t *testing.T) {
 				t.Fatal("expected safe error on stderr")
 			}
 		})
+	}
+}
+
+func TestCP1DRunSyncFailureDoesNotExec(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{ID: "acc_1", AccessToken: "access-secret"}
+	pool.Accounts = []*storage.Account{acc}
+	pool.ActiveAccountID = &acc.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(config.GetAgyTokenFile(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeAgy := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(fakeAgy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics.SetAgyBinaryFinder(func() string { return fakeAgy })
+	var execCalled bool
+	oldExec := ExecHandler
+	t.Cleanup(func() { ExecHandler = oldExec; diagnostics.SetAgyBinaryFinder(nil) })
+	ExecHandler = func(string, []string, []string) error { execCalled = true; return nil }
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"run", "--", "-p", "hello"}, nil, &stdout, &stderr)
+	if code == 0 || execCalled || strings.Contains(stderr.String(), "access-secret") {
+		t.Fatalf("code=%d exec=%v stderr=%q", code, execCalled, stderr.String())
 	}
 }
 

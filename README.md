@@ -85,7 +85,8 @@ agy --mode accept-edits --dangerously-skip-permissions
 To bypass the pool and execute native Antigravity directly against upstream Google:
 
 ```bash
-# Explicit bypass: routes directly to native Antigravity without agy-pool
+# Explicit bypass: runs native Antigravity directly with its current native credentials
+# No CLI Base synchronization or agy-pool routing is performed.
 agy-raw -p "direct prompt"
 
 # Or using the agy-orig alias

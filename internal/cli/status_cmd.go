@@ -116,7 +116,7 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 			if idx >= 1 && idx <= len(accList) {
 				accList = []*storage.Account{accList[idx-1]}
 			} else {
-				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, safeSelector(target), clrReset)
+				fmt.Fprintf(stdout, "%s[Error] The selected account was not found.%s\n", clrRed, clrReset)
 				return 0
 			}
 		} else {
@@ -130,7 +130,7 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 			if found != nil {
 				accList = []*storage.Account{found}
 			} else {
-				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, safeSelector(target), clrReset)
+				fmt.Fprintf(stdout, "%s[Error] The selected account was not found.%s\n", clrRed, clrReset)
 				return 0
 			}
 		}

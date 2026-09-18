@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -179,6 +180,28 @@ func TestRefreshToken_MissingRefreshToken(t *testing.T) {
 	_, err := RefreshToken(acc)
 	if err == nil || err.Error() != "Missing refresh_token" {
 		t.Fatalf("expected 'Missing refresh_token', got %v", err)
+	}
+}
+
+func TestRefreshToken_UpstreamFailureDoesNotLeakBody(t *testing.T) {
+	setupIsolatedTestDir(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","description":"raw-provider-body-marker access-secret"}`))
+	}))
+	defer server.Close()
+	oldURL := TokenURL
+	TokenURL = server.URL
+	t.Cleanup(func() { TokenURL = oldURL })
+	acc := &storage.Account{ID: "acc_1", RefreshToken: "refresh-secret"}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RefreshToken(acc)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400") || strings.Contains(err.Error(), "raw-provider-body-marker") || strings.Contains(err.Error(), "access-secret") || strings.Contains(err.Error(), "refresh-secret") {
+		t.Fatalf("unsafe refresh error: %v", err)
 	}
 }
 

@@ -59,7 +59,7 @@ func TestRenameCommand(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected exit 1 on account not found, got %d", code)
 	}
-	if !strings.Contains(stdout.String(), "[Error] Account 'nonexistent' not found.") {
+	if !strings.Contains(stdout.String(), "[Error] The selected account was not found.") {
 		t.Errorf("expected not found error, got: %s", stdout.String())
 	}
 }
@@ -139,7 +139,7 @@ func TestListAccounts_EmptyAndPopulated(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0 on list target not found, got %d", code)
 	}
-	if !strings.Contains(stdout.String(), "[Error] Account 'nonexistent' not found.") {
+	if !strings.Contains(stdout.String(), "[Error] The selected account was not found.") {
 		t.Errorf("expected not found error on stdout, got: %s", stdout.String())
 	}
 }

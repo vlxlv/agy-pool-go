@@ -228,6 +228,155 @@ func TestWriteAndSyncAgyTokenFile(t *testing.T) {
 	}
 }
 
+func TestSyncActiveAgyTokenFile_RefreshFailureLeavesFileUnchanged(t *testing.T) {
+	setupIsolatedTestDir(t)
+	oldRefresh, oldWriter := tokenRefresher, tokenFileWriter
+	t.Cleanup(func() { tokenRefresher, tokenFileWriter = oldRefresh, oldWriter })
+	expired := float64(time.Now().Unix() - 60)
+	stale := &storage.Account{ID: "acc_1", AccessToken: "access-secret", RefreshToken: "refresh-secret", TokenExpiry: &expired}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{stale}
+	pool.ActiveAccountID = &stale.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAgyTokenFile(stale); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(config.GetAgyTokenFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenRefresher = func(*storage.Account) (string, error) { return "", errors.New("token refresh failed (HTTP 400)") }
+	tokenFileWriter = func(*storage.Account) error { t.Fatal("writer called after refresh failure"); return nil }
+	_, err = SyncActiveAgyTokenFile()
+	if err == nil || strings.Contains(err.Error(), "access-secret") || strings.Contains(err.Error(), "refresh-secret") {
+		t.Fatalf("unexpected refresh error: %v", err)
+	}
+	after, err := os.ReadFile(config.GetAgyTokenFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("native token file changed after refresh failure")
+	}
+}
+
+func TestSyncActiveAgyTokenFile_WriterFailure(t *testing.T) {
+	setupIsolatedTestDir(t)
+	oldRefresh, oldWriter := tokenRefresher, tokenFileWriter
+	t.Cleanup(func() { tokenRefresher, tokenFileWriter = oldRefresh, oldWriter })
+	acc := &storage.Account{ID: "acc_1", AccessToken: "access-secret"}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{acc}
+	pool.ActiveAccountID = &acc.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	tokenFileWriter = func(*storage.Account) error { return errors.New("injected writer failure") }
+	synced, err := SyncActiveAgyTokenFile()
+	if synced || err == nil {
+		t.Fatalf("synced=%v err=%v, want failure", synced, err)
+	}
+}
+
+func TestSwitchAccount_RefreshFailureKeepsPreviousActive(t *testing.T) {
+	setupIsolatedTestDir(t)
+	oldRefresh, oldWriter := tokenRefresher, tokenFileWriter
+	t.Cleanup(func() { tokenRefresher, tokenFileWriter = oldRefresh, oldWriter })
+	first := &storage.Account{ID: "acc_1", AccessToken: "first-access"}
+	secondExpiry := float64(time.Now().Unix() - 60)
+	second := &storage.Account{ID: "acc_2", AccessToken: "", RefreshToken: "refresh-secret", TokenExpiry: &secondExpiry}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{first, second}
+	pool.ActiveAccountID = &first.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAgyTokenFile(first); err != nil {
+		t.Fatal(err)
+	}
+	tokenRefresher = func(*storage.Account) (string, error) { return "", errors.New("token refresh failed (HTTP 400)") }
+	_, err := SwitchAccount("acc_2")
+	if err == nil || strings.Contains(err.Error(), "access-secret") || strings.Contains(err.Error(), "refresh-secret") {
+		t.Fatalf("unexpected switch error: %v", err)
+	}
+	loaded, loadErr := storage.LoadPool()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_1" {
+		t.Fatalf("active account changed: %v", loaded.ActiveAccountID)
+	}
+	data, readErr := os.ReadFile(config.GetAgyTokenFile())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if bytes.Contains(data, []byte("second")) || !bytes.Contains(data, []byte("first-access")) {
+		t.Fatalf("native token changed: %s", data)
+	}
+}
+
+func TestSwitchAccount_WriterFailureKeepsPreviousActive(t *testing.T) {
+	setupIsolatedTestDir(t)
+	oldRefresh, oldWriter := tokenRefresher, tokenFileWriter
+	t.Cleanup(func() { tokenRefresher, tokenFileWriter = oldRefresh, oldWriter })
+	first := &storage.Account{ID: "acc_1", AccessToken: "first-access"}
+	second := &storage.Account{ID: "acc_2", AccessToken: "second-access"}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{first, second}
+	pool.ActiveAccountID = &first.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAgyTokenFile(first); err != nil {
+		t.Fatal(err)
+	}
+	tokenFileWriter = func(*storage.Account) error { return errors.New("injected writer failure") }
+	if _, err := SwitchAccount("acc_2"); err == nil {
+		t.Fatal("expected switch failure")
+	}
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_1" {
+		t.Fatalf("active account changed: %v", loaded.ActiveAccountID)
+	}
+	data, err := os.ReadFile(config.GetAgyTokenFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("first-access")) || bytes.Contains(data, []byte("second-access")) {
+		t.Fatalf("native token changed: %s", data)
+	}
+}
+
+func TestRemoveAccount_ReplacementSyncFailureKeepsPool(t *testing.T) {
+	setupIsolatedTestDir(t)
+	oldRefresh, oldWriter := tokenRefresher, tokenFileWriter
+	t.Cleanup(func() { tokenRefresher, tokenFileWriter = oldRefresh, oldWriter })
+	first := &storage.Account{ID: "acc_1", AccessToken: "first-access"}
+	second := &storage.Account{ID: "acc_2", AccessToken: ""}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{first, second}
+	pool.ActiveAccountID = &first.ID
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	tokenRefresher = func(*storage.Account) (string, error) { return "", errors.New("refresh failed") }
+	if _, err := RemoveAccount("acc_1"); err == nil {
+		t.Fatal("expected replacement sync failure")
+	}
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Accounts) != 2 || loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_1" {
+		t.Fatalf("pool changed: %+v", loaded)
+	}
+}
+
 func TestRemoveAccount(t *testing.T) {
 	setupIsolatedTestDir(t)
 
@@ -435,6 +584,32 @@ func TestLoginFlow(t *testing.T) {
 	}
 	if acc.AccessToken != "login-at-123" {
 		t.Fatalf("acc access_token = %q, want 'login-at-123'", acc.AccessToken)
+	}
+}
+
+func TestLogin_NativeSyncFailureIsObservable(t *testing.T) {
+	setupIsolatedTestDir(t)
+	oldWriter := tokenFileWriter
+	t.Cleanup(func() { tokenFileWriter = oldWriter })
+	tokenFileWriter = func(*storage.Account) error { return errors.New("injected native writer failure") }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "access-secret", "refresh_token": "refresh-secret",
+			"id_token": "", "expires_in": 3600,
+		})
+	}))
+	defer server.Close()
+	acc, err := Login(context.Background(), LoginOptions{
+		TokenEndpoint: server.URL,
+		BrowserOpener: func(string) error { return nil },
+		PromptFn:      func(string) (string, error) { return "code", nil },
+		Timeout:       2 * time.Second, PortRange: [2]int{18600, 18650},
+	})
+	if err == nil || acc == nil || !strings.Contains(err.Error(), "native agy synchronization failed") {
+		t.Fatalf("account=%v err=%v, want degraded login error", acc, err)
+	}
+	if strings.Contains(err.Error(), "access-secret") || strings.Contains(err.Error(), "refresh-secret") || strings.Contains(err.Error(), "@") {
+		t.Fatalf("login error leaked sensitive data: %v", err)
 	}
 }
 

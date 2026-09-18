@@ -134,7 +134,7 @@ func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer) {
 			if idx >= 1 && idx <= len(accList) {
 				accList = []*storage.Account{accList[idx-1]}
 			} else {
-				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
+				fmt.Fprintf(stdout, "%s[Error] The selected account was not found.%s\n", clrRed, clrReset)
 				return
 			}
 		} else {
@@ -148,7 +148,7 @@ func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer) {
 			if found != nil {
 				accList = []*storage.Account{found}
 			} else {
-				fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
+				fmt.Fprintf(stdout, "%s[Error] The selected account was not found.%s\n", clrRed, clrReset)
 				return
 			}
 		}
@@ -527,7 +527,7 @@ func RenameAccount(target, name string, stdout, stderr io.Writer) bool {
 
 	acc, err := accounts.RenameAccount(target, name)
 	if err != nil || acc == nil {
-		fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, safeSelector(target), clrReset)
+		fmt.Fprintf(stdout, "%s[Error] The selected account was not found.%s\n", clrRed, clrReset)
 		return false
 	}
 	return true

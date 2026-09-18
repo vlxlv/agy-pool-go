@@ -198,6 +198,31 @@ func PersistAccountFields(account *storage.Account, updateTokens, updateStatus, 
 }
 
 // RefreshToken refreshes the access token using refresh_token if close to expiry.
+func safeProviderReason(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return ""
+	}
+	code := envelope.Error.Code
+	if code == "" {
+		code = envelope.Error.Error
+	}
+	if code == "" {
+		return ""
+	}
+	switch code {
+	case "invalid_grant", "invalid_client", "invalid_request", "unauthorized_client", "access_denied":
+		return ": " + code
+	default:
+		return ""
+	}
+}
+
 func RefreshToken(account *storage.Account) (string, error) {
 	if account == nil {
 		return "", errors.New("nil account")
@@ -286,7 +311,7 @@ func RefreshToken(account *storage.Account) (string, error) {
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("token refresh failed HTTP %d: %s", resp.StatusCode, string(respBody))
+			return fmt.Errorf("token refresh failed (HTTP %d%s)", resp.StatusCode, safeProviderReason(respBody))
 		}
 
 		var res struct {
