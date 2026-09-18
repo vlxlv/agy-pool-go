@@ -1,13 +1,18 @@
 package cli
 
 import (
+	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
@@ -682,5 +687,70 @@ func handleMigrateLegacy(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "%s✓ Successfully migrated %d account(s) to %s%s\n", clrGreen, res.AccountsCount, res.TargetFile, clrReset)
 	fmt.Fprintf(stdout, "%sSource file %s remains untouched.%s\n", clrDim, res.SourcePath, clrReset)
+	return 0
+}
+
+// LoginCmd runs the OAuth login flow for local and SSH/headless environments.
+func LoginCmd(stdin io.Reader, stdout, stderr io.Writer) int {
+	return LoginCmdWithOptions(stdin, stdout, stderr, accounts.LoginOptions{})
+}
+
+// LoginCmdWithOptions runs the login flow with optional overrides for testing.
+func LoginCmdWithOptions(stdin io.Reader, stdout, stderr io.Writer, extraOpts accounts.LoginOptions) int {
+	var browserOpened bool
+	opener := extraOpts.BrowserOpener
+	if opener == nil && LoginOpener != nil {
+		opener = LoginOpener
+	}
+	wrappedOpener := func(targetURL string) error {
+		var err error
+		if opener != nil {
+			err = opener(targetURL)
+		} else {
+			err = accounts.DefaultBrowserOpener(targetURL)
+		}
+		if err == nil {
+			browserOpened = true
+		}
+		return err
+	}
+
+	opts := extraOpts
+	opts.Stdout = stdout
+	opts.BrowserOpener = wrappedOpener
+
+	if opts.PromptFn == nil {
+		opts.PromptFn = func(authURL string) (string, error) {
+			if browserOpened {
+				return "", nil
+			}
+			fmt.Fprintln(stdout, "")
+			fmt.Fprintln(stdout, "Paste the authorization code or callback URL:")
+			fmt.Fprint(stdout, "> ")
+			scanner := bufio.NewScanner(stdin)
+			if scanner.Scan() {
+				return strings.TrimSpace(scanner.Text()), nil
+			}
+			if err := scanner.Err(); err != nil {
+				return "", err
+			}
+			return "", nil
+		}
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	acc, err := accounts.Login(ctx, opts)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintf(stderr, "\n%s[Error] Login cancelled.%s\n", clrRed, clrReset)
+			return 130
+		}
+		fmt.Fprintf(stderr, "%s[Error] Login failed: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "\n%s✓ Successfully authenticated as %s%s\n", clrGreen, accounts.DisplayAccountName(acc), clrReset)
 	return 0
 }

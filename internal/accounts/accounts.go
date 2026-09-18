@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -453,6 +454,7 @@ type LoginOptions struct {
 	BrowserOpener func(url string) error
 	PortRange     [2]int // inclusive start, end
 	Timeout       time.Duration
+	Stdout        io.Writer
 }
 
 func findFreePort(start, end int) (int, error) {
@@ -467,14 +469,30 @@ func findFreePort(start, end int) (int, error) {
 	return 0, fmt.Errorf("no free port available in range %d-%d", start, end)
 }
 
-func defaultBrowserOpener(targetURL string) error {
+// DefaultBrowserOpener attempts to open the target URL in the system default browser.
+func DefaultBrowserOpener(targetURL string) error {
 	for _, opener := range []string{"termux-open-url", "termux-open", "xdg-open", "open"} {
+		if opener == "xdg-open" || opener == "open" {
+			if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+				continue
+			}
+		}
 		if path, err := exec.LookPath(opener); err == nil {
 			cmd := exec.Command(path, targetURL)
 			cmd.Stdout = nil
 			cmd.Stderr = nil
 			if err := cmd.Start(); err == nil {
-				return nil
+				done := make(chan error, 1)
+				go func() { done <- cmd.Wait() }()
+				select {
+				case err := <-done:
+					if err != nil {
+						continue
+					}
+					return nil
+				case <-time.After(100 * time.Millisecond):
+					return nil
+				}
 			}
 		}
 	}
@@ -493,7 +511,7 @@ func Login(ctx context.Context, opts LoginOptions) (*storage.Account, error) {
 	}
 	opener := opts.BrowserOpener
 	if opener == nil {
-		opener = defaultBrowserOpener
+		opener = DefaultBrowserOpener
 	}
 	startPort := opts.PortRange[0]
 	endPort := opts.PortRange[1]
@@ -570,7 +588,19 @@ func Login(ctx context.Context, opts LoginOptions) (*storage.Account, error) {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	_ = opener(authURL)
+	openerErr := opener(authURL)
+	if openerErr == nil {
+		if opts.Stdout != nil {
+			fmt.Fprintln(opts.Stdout, "Opening browser for Google authentication...")
+			fmt.Fprintln(opts.Stdout, "Waiting for authorization...")
+		}
+	} else {
+		if opts.Stdout != nil {
+			fmt.Fprintln(opts.Stdout, "Could not open a browser automatically.")
+			fmt.Fprintln(opts.Stdout, "Open this URL:")
+			fmt.Fprintln(opts.Stdout, authURL)
+		}
+	}
 
 	// If prompt function provided, run it concurrently
 	if opts.PromptFn != nil {

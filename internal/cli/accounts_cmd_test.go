@@ -2,7 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/vlxlv/agy-pool-go/internal/accounts"
+	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -403,5 +411,405 @@ func TestListAccounts_ResponsiveWidths(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func setupMockOAuthTokenServer(t *testing.T, expectedCode, userEmail, accessToken, refreshToken string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.FormValue("code") != expectedCode {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+			return
+		}
+		payloadJSON, _ := json.Marshal(map[string]any{"email": userEmail})
+		payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
+		mockJWT := fmt.Sprintf("eyJhbGciOiJub25lIn0.%s.", payloadB64)
+		resp := map[string]any{
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
+			"id_token":      mockJWT,
+			"expires_in":    3600,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	return server
+}
+
+func TestLogin_BrowserOpenerSucceeds_HTTPCallbackSucceeds(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	server := setupMockOAuthTokenServer(t, "browser-code-123", "browser_user@gmail.com", "at-browser-123", "rt-browser-123")
+	defer server.Close()
+
+	authChan := make(chan string, 1)
+	origOpener := LoginOpener
+	LoginOpener = func(targetURL string) error {
+		select {
+		case authChan <- targetURL:
+		default:
+		}
+		return nil
+	}
+	defer func() { LoginOpener = origOpener }()
+
+	go func() {
+		authURL := <-authChan
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return
+		}
+		redirectURI := u.Query().Get("redirect_uri")
+		time.Sleep(20 * time.Millisecond)
+		resp, err := http.Get(redirectURI + "?code=browser-code-123")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := LoginCmdWithOptions(strings.NewReader(""), &stdout, &stderr, accounts.LoginOptions{
+		TokenEndpoint: server.URL,
+		Timeout:       5 * time.Second,
+		PortRange:     [2]int{18250, 18300},
+	})
+	if code != 0 {
+		t.Fatalf("LoginCmd failed (exit %d), stderr: %s", code, stderr.String())
+	}
+
+	outStr := stdout.String()
+	if !strings.Contains(outStr, "Opening browser for Google authentication...") {
+		t.Errorf("expected opening browser message, got: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Waiting for authorization...") {
+		t.Errorf("expected waiting for auth message, got: %s", outStr)
+	}
+	if strings.Contains(outStr, "Could not open a browser automatically.") {
+		t.Errorf("unexpected failure message: %s", outStr)
+	}
+	if strings.Contains(outStr, "Paste the authorization code or callback URL:") {
+		t.Errorf("unexpected manual prompt in browser flow: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Successfully authenticated as Account 1") {
+		t.Errorf("expected success message with display name, got: %s", outStr)
+	}
+	if strings.Contains(outStr, "browser_user@gmail.com") {
+		t.Errorf("real email leaked in output: %s", outStr)
+	}
+
+	pool, err := storage.LoadPool()
+	if err != nil || len(pool.Accounts) != 1 {
+		t.Fatalf("expected 1 account in pool, got err=%v, count=%d", err, len(pool.Accounts))
+	}
+	if pool.Accounts[0].Email != "browser_user@gmail.com" || pool.Accounts[0].AccessToken != "at-browser-123" {
+		t.Fatalf("account mismatch in pool: %+v", pool.Accounts[0])
+	}
+}
+
+func TestLogin_BrowserOpenerFails_ManualRawCodeSucceeds(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	server := setupMockOAuthTokenServer(t, "manual-raw-code-456", "manual_user@gmail.com", "at-manual-456", "rt-manual-456")
+	defer server.Close()
+
+	origOpener := LoginOpener
+	LoginOpener = func(targetURL string) error {
+		return errors.New("headless: no X11 DISPLAY")
+	}
+	defer func() { LoginOpener = origOpener }()
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("manual-raw-code-456\n")
+
+	code := LoginCmdWithOptions(stdin, &stdout, &stderr, accounts.LoginOptions{
+		TokenEndpoint: server.URL,
+		Timeout:       5 * time.Second,
+		PortRange:     [2]int{18301, 18350},
+	})
+	if code != 0 {
+		t.Fatalf("LoginCmd failed (exit %d), stderr: %s", code, stderr.String())
+	}
+
+	outStr := stdout.String()
+	if !strings.Contains(outStr, "Could not open a browser automatically.") {
+		t.Errorf("expected opener failed message, got: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Open this URL:\nhttps://accounts.google.com/o/oauth2/v2/auth?") {
+		t.Errorf("expected auth URL, got: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Paste the authorization code or callback URL:\n> ") {
+		t.Errorf("expected prompt message, got: %s", outStr)
+	}
+	if strings.Contains(outStr, "Opening browser for Google authentication...") {
+		t.Errorf("unexpected browser opened message, got: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Successfully authenticated as Account 1") {
+		t.Errorf("expected success message with display name, got: %s", outStr)
+	}
+	if strings.Contains(outStr, "manual_user@gmail.com") {
+		t.Errorf("real email leaked in output: %s", outStr)
+	}
+
+	pool, err := storage.LoadPool()
+	if err != nil || len(pool.Accounts) != 1 {
+		t.Fatalf("expected 1 account in pool, got err=%v, count=%d", err, len(pool.Accounts))
+	}
+	if pool.Accounts[0].Email != "manual_user@gmail.com" || pool.Accounts[0].AccessToken != "at-manual-456" {
+		t.Fatalf("account mismatch in pool: %+v", pool.Accounts[0])
+	}
+}
+
+func TestLogin_BrowserOpenerFails_PastedCallbackURLSucceeds(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	server := setupMockOAuthTokenServer(t, "pasted-url-code-789", "pasted_user@gmail.com", "at-pasted-789", "rt-pasted-789")
+	defer server.Close()
+
+	origOpener := LoginOpener
+	LoginOpener = func(targetURL string) error {
+		return errors.New("headless: no browser installed")
+	}
+	defer func() { LoginOpener = origOpener }()
+
+	var stdout, stderr bytes.Buffer
+	pastedURL := "http://localhost:8085/auth/callback?code=pasted-url-code-789&scope=email\n"
+	stdin := strings.NewReader(pastedURL)
+
+	code := LoginCmdWithOptions(stdin, &stdout, &stderr, accounts.LoginOptions{
+		TokenEndpoint: server.URL,
+		Timeout:       5 * time.Second,
+		PortRange:     [2]int{18351, 18400},
+	})
+	if code != 0 {
+		t.Fatalf("LoginCmd failed (exit %d), stderr: %s", code, stderr.String())
+	}
+
+	outStr := stdout.String()
+	if !strings.Contains(outStr, "Could not open a browser automatically.") {
+		t.Errorf("expected opener failed message, got: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Paste the authorization code or callback URL:\n> ") {
+		t.Errorf("expected prompt message, got: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Successfully authenticated as Account 1") {
+		t.Errorf("expected success message with display name, got: %s", outStr)
+	}
+	if strings.Contains(outStr, "pasted_user@gmail.com") {
+		t.Errorf("real email leaked in output: %s", outStr)
+	}
+
+	pool, err := storage.LoadPool()
+	if err != nil || len(pool.Accounts) != 1 {
+		t.Fatalf("expected 1 account in pool, got err=%v, count=%d", err, len(pool.Accounts))
+	}
+	if pool.Accounts[0].Email != "pasted_user@gmail.com" || pool.Accounts[0].AccessToken != "at-pasted-789" {
+		t.Fatalf("account mismatch in pool: %+v", pool.Accounts[0])
+	}
+}
+
+func TestLogin_Timeout(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	origOpener := LoginOpener
+	LoginOpener = func(targetURL string) error {
+		return errors.New("headless: no browser")
+	}
+	defer func() { LoginOpener = origOpener }()
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("") // EOF immediately
+
+	code := LoginCmdWithOptions(stdin, &stdout, &stderr, accounts.LoginOptions{
+		Timeout:   50 * time.Millisecond,
+		PortRange: [2]int{18401, 18450},
+	})
+	if code != 1 {
+		t.Fatalf("expected exit code 1 on timeout, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "login timed out or cancelled") {
+		t.Errorf("expected timeout error in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestLogin_OAuthCallbackError(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	authChan := make(chan string, 1)
+	origOpener := LoginOpener
+	LoginOpener = func(targetURL string) error {
+		select {
+		case authChan <- targetURL:
+		default:
+		}
+		return nil
+	}
+	defer func() { LoginOpener = origOpener }()
+
+	go func() {
+		authURL := <-authChan
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return
+		}
+		redirectURI := u.Query().Get("redirect_uri")
+		time.Sleep(20 * time.Millisecond)
+		resp, err := http.Get(redirectURI + "?error=access_denied")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := LoginCmdWithOptions(strings.NewReader(""), &stdout, &stderr, accounts.LoginOptions{
+		Timeout:   5 * time.Second,
+		PortRange: [2]int{18451, 18500},
+	})
+	if code != 1 {
+		t.Fatalf("expected exit code 1 on OAuth error, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "OAuth callback error: access_denied") {
+		t.Errorf("expected access_denied in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestLogin_NoTokenOrSecretLeakage(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	secretToken := auth.GetClientSecret()
+	accessToken := "leaked-at-secret-12345"
+	refreshToken := "leaked-rt-secret-67890"
+
+	server := setupMockOAuthTokenServer(t, "code-leak-check", "leak_check@gmail.com", accessToken, refreshToken)
+	defer server.Close()
+
+	origOpener := LoginOpener
+	LoginOpener = func(targetURL string) error {
+		return errors.New("headless")
+	}
+	defer func() { LoginOpener = origOpener }()
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("code-leak-check\n")
+
+	code := LoginCmdWithOptions(stdin, &stdout, &stderr, accounts.LoginOptions{
+		TokenEndpoint: server.URL,
+		Timeout:       5 * time.Second,
+		PortRange:     [2]int{18501, 18550},
+	})
+	if code != 0 {
+		t.Fatalf("LoginCmd failed, exit %d", code)
+	}
+
+	combinedOutput := stdout.String() + "\n" + stderr.String()
+	if strings.Contains(combinedOutput, secretToken) {
+		t.Errorf("client secret leaked in output: %s", combinedOutput)
+	}
+	if strings.Contains(combinedOutput, accessToken) {
+		t.Errorf("access token leaked in output: %s", combinedOutput)
+	}
+	if strings.Contains(combinedOutput, refreshToken) {
+		t.Errorf("refresh token leaked in output: %s", combinedOutput)
+	}
+	if strings.Contains(combinedOutput, "eyJhbGciOiJub25l") {
+		t.Errorf("JWT / id token leaked in output: %s", combinedOutput)
+	}
+	if strings.Contains(combinedOutput, "leak_check@gmail.com") {
+		t.Errorf("real email leaked in output: %s", combinedOutput)
+	}
+	if !strings.Contains(stdout.String(), "Successfully authenticated as Account 1") {
+		t.Errorf("expected display name in success output, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "https://accounts.google.com/o/oauth2/v2/auth?") {
+		t.Errorf("expected auth URL in stdout, got: %s", stdout.String())
+	}
+}
+
+func TestLogin_ExistingAccountUpdate(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	// 1. Seed pool with existing account having a friendly name "Work"
+	now := time.Now().Unix() - 1000
+	initialPool := storage.NewEmptyPool()
+	initialPool.Accounts = []*storage.Account{
+		{
+			ID:           "acc_existing_1",
+			Name:         "Work",
+			Email:        "existing_user@gmail.com",
+			AccessToken:  "old-access-token",
+			RefreshToken: "old-refresh-token",
+			RequestCount: 77,
+			CreatedAt:    &now,
+			UpdatedAt:    &now,
+		},
+	}
+	initialPool.ActiveAccountID = &initialPool.Accounts[0].ID
+	if err := storage.SavePool(initialPool); err != nil {
+		t.Fatalf("failed to save initial pool: %v", err)
+	}
+
+	// 2. Perform login with same email
+	server := setupMockOAuthTokenServer(t, "update-code-999", "existing_user@gmail.com", "new-access-token-999", "new-refresh-token-999")
+	defer server.Close()
+
+	origOpener := LoginOpener
+	LoginOpener = func(targetURL string) error {
+		return errors.New("headless")
+	}
+	defer func() { LoginOpener = origOpener }()
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("update-code-999\n")
+
+	code := LoginCmdWithOptions(stdin, &stdout, &stderr, accounts.LoginOptions{
+		TokenEndpoint: server.URL,
+		Timeout:       5 * time.Second,
+		PortRange:     [2]int{18551, 18600},
+	})
+	if code != 0 {
+		t.Fatalf("LoginCmd failed, exit %d: %s", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Successfully authenticated as Work") {
+		t.Errorf("expected friendly name 'Work' in success output, got: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "existing_user@gmail.com") {
+		t.Errorf("real email leaked in output: %s", stdout.String())
+	}
+
+	// 3. Verify pool state
+	pool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("failed to load pool: %v", err)
+	}
+	if len(pool.Accounts) != 1 {
+		t.Fatalf("expected exactly 1 account in pool (update in-place), got %d accounts", len(pool.Accounts))
+	}
+	updatedAcc := pool.Accounts[0]
+	if updatedAcc.ID != "acc_existing_1" {
+		t.Errorf("account ID changed from acc_existing_1 to %s", updatedAcc.ID)
+	}
+	if updatedAcc.Name != "Work" {
+		t.Errorf("friendly name was lost: %s", updatedAcc.Name)
+	}
+	if updatedAcc.AccessToken != "new-access-token-999" {
+		t.Errorf("access token not updated: %s", updatedAcc.AccessToken)
+	}
+	if updatedAcc.RefreshToken != "new-refresh-token-999" {
+		t.Errorf("refresh token not updated: %s", updatedAcc.RefreshToken)
+	}
+	if updatedAcc.RequestCount != 77 {
+		t.Errorf("request count was reset: %d", updatedAcc.RequestCount)
+	}
+	if updatedAcc.CreatedAt == nil || *updatedAcc.CreatedAt != now {
+		t.Errorf("created_at was overwritten: %v", updatedAcc.CreatedAt)
 	}
 }

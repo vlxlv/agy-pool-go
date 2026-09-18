@@ -1,8 +1,10 @@
 package accounts
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -770,5 +772,76 @@ func TestImportReplaceAtomicity(t *testing.T) {
 	}
 	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_1" {
 		t.Fatalf("active account modified after failed replace: %v", loaded.ActiveAccountID)
+	}
+}
+
+func TestLogin_StatusOutput(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mockJWT := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJzdGF0dXNfdXNlckBnbWFpbC5jb20ifQ."
+		resp := map[string]any{
+			"access_token":  "status-at-123",
+			"refresh_token": "status-rf-456",
+			"id_token":      mockJWT,
+			"expires_in":    3600,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	// 1. Browser opener succeeds
+	var stdoutSuccess bytes.Buffer
+	optsSuccess := LoginOptions{
+		TokenEndpoint: server.URL,
+		BrowserOpener: func(url string) error { return nil },
+		PromptFn: func(authURL string) (string, error) {
+			return "valid-code", nil
+		},
+		Timeout:   5 * time.Second,
+		PortRange: [2]int{18140, 18190},
+		Stdout:    &stdoutSuccess,
+	}
+
+	acc, err := Login(context.Background(), optsSuccess)
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+	if acc.Email != "status_user@gmail.com" {
+		t.Fatalf("unexpected email: %s", acc.Email)
+	}
+	if !strings.Contains(stdoutSuccess.String(), "Opening browser for Google authentication...\nWaiting for authorization...") {
+		t.Fatalf("missing success status, got: %q", stdoutSuccess.String())
+	}
+	if strings.Contains(stdoutSuccess.String(), "Could not open a browser automatically.") {
+		t.Fatalf("unexpected failure message in success output: %q", stdoutSuccess.String())
+	}
+
+	// 2. Browser opener fails
+	var stdoutFail bytes.Buffer
+	optsFail := LoginOptions{
+		TokenEndpoint: server.URL,
+		BrowserOpener: func(url string) error { return errors.New("headless failure") },
+		PromptFn: func(authURL string) (string, error) {
+			return "valid-code", nil
+		},
+		Timeout:   5 * time.Second,
+		PortRange: [2]int{18191, 18240},
+		Stdout:    &stdoutFail,
+	}
+
+	acc2, err := Login(context.Background(), optsFail)
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+	if acc2.Email != "status_user@gmail.com" {
+		t.Fatalf("unexpected email: %s", acc2.Email)
+	}
+	if !strings.Contains(stdoutFail.String(), "Could not open a browser automatically.\nOpen this URL:\nhttps://accounts.google.com/o/oauth2/v2/auth?") {
+		t.Fatalf("missing fail status or auth URL, got: %q", stdoutFail.String())
+	}
+	if strings.Contains(stdoutFail.String(), "Opening browser for Google authentication...") {
+		t.Fatalf("unexpected browser opening message in failure output: %q", stdoutFail.String())
 	}
 }

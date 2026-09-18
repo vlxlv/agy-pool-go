@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +33,9 @@ var defaultExec = func(binary string, argv []string, env []string) error {
 
 // ExecHandler allows replacing syscall.Exec for test isolation.
 var ExecHandler = defaultExec
+
+// LoginOpener allows replacing browser opener for test isolation.
+var LoginOpener func(url string) error
 
 // Main executes CLI commands and returns the process exit code.
 func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -75,8 +77,7 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "login", "add":
-		_, _ = accounts.Login(context.Background(), accounts.LoginOptions{})
-		return 0
+		return LoginCmd(stdin, stdout, stderr)
 	case "import-current":
 		_, _ = accounts.ImportCurrent()
 		return 0
