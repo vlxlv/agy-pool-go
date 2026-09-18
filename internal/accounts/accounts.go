@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -119,45 +118,47 @@ func formatISOExpiry(ts float64) string {
 }
 
 // WriteAgyTokenFile writes the given account credentials into the native agy token file.
-func WriteAgyTokenFile(account *storage.Account) error {
+// tokenRefresher and tokenFileWriter are replaceable only for focused failure-injection tests.
+var tokenRefresher = auth.RefreshToken
+var tokenFileWriter = writeAgyTokenFile
+
+func writeAgyTokenFile(account *storage.Account) error {
 	if account == nil {
 		return errors.New("nil account")
 	}
 	if err := storage.EnsureDirs(); err != nil {
 		return err
 	}
-
 	tokenFile := config.GetAgyTokenFile()
 	if err := config.AssertSafeWritePath(tokenFile); err != nil {
-		return err
-	}
-	lockFile := tokenFile + ".lock"
-	if err := config.AssertSafeWritePath(lockFile); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
 		return fmt.Errorf("failed to create agy-cli directory: %w", err)
 	}
-
 	expiryTS := time.Now().Unix() + 3600
 	if account.TokenExpiry != nil && *account.TokenExpiry > 0 {
 		expiryTS = int64(*account.TokenExpiry)
 	}
-
 	payload := map[string]any{
 		"token": map[string]any{
-			"access_token":  account.AccessToken,
-			"token_type":    "Bearer",
-			"refresh_token": account.RefreshToken,
-			"expiry":        formatISOExpiry(float64(expiryTS)),
+			"access_token": account.AccessToken, "token_type": "Bearer",
+			"refresh_token": account.RefreshToken, "expiry": formatISOExpiry(float64(expiryTS)),
 		},
-		"auth_method": "consumer",
-		"id_token":    account.IDToken,
+		"auth_method": "consumer", "id_token": account.IDToken,
 	}
+	return storage.AtomicJSONWrite(tokenFile, payload)
+}
 
-	return storage.WithFileLock(lockFile, true, func() error {
-		return storage.AtomicJSONWrite(tokenFile, payload)
-	})
+func WriteAgyTokenFile(account *storage.Account) error {
+	if account == nil {
+		return errors.New("nil account")
+	}
+	lockFile := config.GetAgyTokenFile() + ".lock"
+	if err := config.AssertSafeWritePath(lockFile); err != nil {
+		return err
+	}
+	return storage.WithFileLock(lockFile, true, func() error { return writeAgyTokenFile(account) })
 }
 
 // SyncActiveAgyTokenFile synchronizes native agy's compatibility token with the current active account.
@@ -193,8 +194,12 @@ func SyncActiveAgyTokenFile() (bool, error) {
 				return nil
 			}
 
-			// Attempt refresh if near expiry
-			_, _ = auth.RefreshToken(account)
+			// Refresh only when credentials are absent or near expiry; never write after failure.
+			if account.AccessToken == "" || (account.TokenExpiry != nil && *account.TokenExpiry-float64(time.Now().Unix()) <= 120) {
+				if _, err := tokenRefresher(account); err != nil {
+					return fmt.Errorf("failed to refresh active account %s: %w", account.ID, err)
+				}
+			}
 
 			// Re-verify active account did not change during refresh
 			refreshedPool, err := storage.LoadPool()
@@ -202,25 +207,8 @@ func SyncActiveAgyTokenFile() (bool, error) {
 				return err
 			}
 			if refreshedPool.ActiveAccountID != nil && *refreshedPool.ActiveAccountID == activeID {
-				expiryTS := time.Now().Unix() + 3600
-				if account.TokenExpiry != nil && *account.TokenExpiry > 0 {
-					expiryTS = int64(*account.TokenExpiry)
-				}
-				payload := map[string]any{
-					"token": map[string]any{
-						"access_token":  account.AccessToken,
-						"token_type":    "Bearer",
-						"refresh_token": account.RefreshToken,
-						"expiry":        formatISOExpiry(float64(expiryTS)),
-					},
-					"auth_method": "consumer",
-					"id_token":    account.IDToken,
-				}
-				if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
-					return err
-				}
-				if err := storage.AtomicJSONWrite(tokenFile, payload); err != nil {
-					return err
+				if err := tokenFileWriter(account); err != nil {
+					return fmt.Errorf("failed to write native agy token: %w", err)
 				}
 				synced = true
 				return nil
@@ -232,10 +220,50 @@ func SyncActiveAgyTokenFile() (bool, error) {
 	return synced, err
 }
 
+func syncAccountToAgy(account *storage.Account) error {
+	if account == nil {
+		return errors.New("nil account")
+	}
+	if account.AccessToken == "" || (account.TokenExpiry != nil && *account.TokenExpiry-float64(time.Now().Unix()) <= 120) {
+		if _, err := tokenRefresher(account); err != nil {
+			return fmt.Errorf("failed to refresh account %s: %w", account.ID, err)
+		}
+	}
+	if err := tokenFileWriter(account); err != nil {
+		return fmt.Errorf("failed to write native agy token for account %s: %w", account.ID, err)
+	}
+	return nil
+}
+
 // RemoveAccount removes an account from the pool by target selector.
 func RemoveAccount(target string) (*storage.Account, error) {
 	var removed *storage.Account
-	err := storage.PoolTransaction(func(pool *storage.Pool) error {
+	var replacement *storage.Account
+	var wasActive bool
+	pool, err := storage.LoadPool()
+	if err != nil {
+		return nil, err
+	}
+	found := FindAccountByTarget(pool.Accounts, target)
+	if found == nil {
+		return nil, fmt.Errorf("account '%s' not found", target)
+	}
+	if pool.ActiveAccountID != nil && *pool.ActiveAccountID == found.ID {
+		wasActive = true
+		for _, candidate := range pool.Accounts {
+			if candidate.ID != found.ID {
+				replacement = candidate
+				break
+			}
+		}
+		if replacement != nil {
+			if err := syncAccountToAgy(replacement); err != nil {
+				return nil, fmt.Errorf("cannot remove active account: replacement synchronization failed: %w", err)
+			}
+		}
+	}
+
+	err = storage.PoolTransaction(func(pool *storage.Pool) error {
 		found := FindAccountByTarget(pool.Accounts, target)
 		if found == nil {
 			return fmt.Errorf("account '%s' not found", target)
@@ -261,10 +289,16 @@ func RemoveAccount(target string) (*storage.Account, error) {
 		return nil
 	})
 	if err != nil {
+		if wasActive && replacement != nil {
+			_ = syncAccountToAgy(found)
+		}
 		return nil, err
 	}
 
-	_, _ = SyncActiveAgyTokenFile()
+	if wasActive && replacement == nil {
+		// There is no replacement CLI Base; leave the native file untouched for raw mode.
+		return removed, nil
+	}
 	return removed, nil
 }
 
@@ -280,7 +314,6 @@ func SwitchAccount(target string) (*storage.Account, error) {
 
 	prober, _ := getQuotaProber()
 	isAuto := target == "" || target == "auto"
-
 	if isAuto && prober != nil {
 		for _, acc := range pool.Accounts {
 			q, err := prober(acc)
@@ -289,57 +322,65 @@ func SwitchAccount(target string) (*storage.Account, error) {
 				_ = auth.PersistAccountFields(acc, true, true, true)
 			}
 		}
+		pool, err = storage.LoadPool()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var selected *storage.Account
-	err = storage.PoolTransaction(func(p *storage.Pool) error {
-		if len(p.Accounts) == 0 {
-			return errors.New("account pool is empty")
+	if isAuto {
+		nowTS := float64(time.Now().Unix())
+		selected = pool.Accounts[0]
+		score := func(a *storage.Account) (int, float64) {
+			if a.Status == "validation_required" || a.Status == "auth_error" {
+				return -2, 0
+			}
+			if a.RateLimitedUntil != nil && *a.RateLimitedUntil > nowTS {
+				return -1, 0
+			}
+			frac := 0.0
+			if a.LastQuota != nil && a.LastQuota.RemainingFraction != nil {
+				frac = *a.LastQuota.RemainingFraction
+			}
+			return 1, frac
 		}
-		if isAuto {
-			nowTS := float64(time.Now().Unix())
-			sorted := make([]*storage.Account, len(p.Accounts))
-			copy(sorted, p.Accounts)
-
-			sort.SliceStable(sorted, func(i, j int) bool {
-				score := func(a *storage.Account) (int, float64) {
-					if a.Status == "validation_required" || a.Status == "auth_error" {
-						return -2, 0.0
-					}
-					if a.RateLimitedUntil != nil && *a.RateLimitedUntil > nowTS {
-						return -1, 0.0
-					}
-					var frac float64
-					if a.LastQuota != nil && a.LastQuota.RemainingFraction != nil {
-						frac = *a.LastQuota.RemainingFraction
-					}
-					return 1, frac
-				}
-
-				tierI, fracI := score(sorted[i])
-				tierJ, fracJ := score(sorted[j])
-				if tierI != tierJ {
-					return tierI > tierJ
-				}
-				return fracI > fracJ
-			})
-			selected = sorted[0]
-		} else {
-			selected = FindAccountByTarget(p.Accounts, target)
-			if selected == nil {
-				return fmt.Errorf("account '%s' not found", target)
+		for _, candidate := range pool.Accounts[1:] {
+			bestTier, bestFrac := score(selected)
+			candidateTier, candidateFrac := score(candidate)
+			if candidateTier > bestTier || (candidateTier == bestTier && candidateFrac > bestFrac) {
+				selected = candidate
 			}
 		}
+	} else {
+		selected = FindAccountByTarget(pool.Accounts, target)
+		if selected == nil {
+			return nil, fmt.Errorf("account '%s' not found", target)
+		}
+	}
 
-		p.ActiveAccountID = &selected.ID
-		return nil
-	})
-	if err != nil {
+	var previous *storage.Account
+	if pool.ActiveAccountID != nil {
+		previous = FindAccountByTarget(pool.Accounts, *pool.ActiveAccountID)
+	}
+	if err := syncAccountToAgy(selected); err != nil {
 		return nil, err
 	}
 
-	_, _ = auth.RefreshToken(selected)
-	_, _ = SyncActiveAgyTokenFile()
+	err = storage.PoolTransaction(func(p *storage.Pool) error {
+		current := FindAccountByTarget(p.Accounts, selected.ID)
+		if current == nil {
+			return fmt.Errorf("account '%s' no longer exists", selected.ID)
+		}
+		p.ActiveAccountID = &current.ID
+		return nil
+	})
+	if err != nil {
+		if previous != nil {
+			_ = syncAccountToAgy(previous)
+		}
+		return nil, err
+	}
 	return selected, nil
 }
 
@@ -739,7 +780,9 @@ func Login(ctx context.Context, opts LoginOptions) (*storage.Account, error) {
 		}
 	}
 
-	_, _ = SyncActiveAgyTokenFile()
+	if _, err := SyncActiveAgyTokenFile(); err != nil {
+		return account, fmt.Errorf("authentication succeeded but native agy synchronization failed: %w", err)
+	}
 	return account, nil
 }
 

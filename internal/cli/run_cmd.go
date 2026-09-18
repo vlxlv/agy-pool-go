@@ -146,8 +146,11 @@ func RunAgyWithLB(extraArgs []string, stdout, stderr io.Writer) int {
 	gatewayURL := fmt.Sprintf("http://%s:%d", ctx.ListenHost, ctx.ListenPort)
 	env = append(env, "CLOUD_CODE_URL="+gatewayURL)
 
-	// 5. Sync active agy token
-	_, _ = accounts.SyncActiveAgyTokenFile()
+	// 5. Sync active agy token; pooled execution requires CLI Base identity.
+	if _, err := accounts.SyncActiveAgyTokenFile(); err != nil {
+		fmt.Fprintf(stderr, "%s[Error] Failed to synchronize native agy credentials: %v%s\n", clrRed, err, clrReset)
+		return 1
+	}
 
 	// 6. Find native agy binary
 	agyPath, _, err := diagnostics.ResolveNativeAgyBinary()

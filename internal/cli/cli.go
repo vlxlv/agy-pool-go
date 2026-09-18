@@ -108,14 +108,18 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "usage: agy-pool remove [-h] target\nagy-pool remove: error: the following arguments are required: target\n")
 			return 2
 		}
-		RemoveAccount(args[1], stdout, stderr)
+		if !RemoveAccount(args[1], stdout, stderr) {
+			return 1
+		}
 		return 0
 	case "switch":
 		target := "auto"
 		if len(args) > 1 {
 			target = args[1]
 		}
-		SwitchAccount(target, stdout, stderr)
+		if !SwitchAccount(target, stdout, stderr) {
+			return 1
+		}
 		return 0
 	case "export", "backup":
 		return handleExport(args[1:], stdout, stderr)

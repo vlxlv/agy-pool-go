@@ -232,8 +232,8 @@ func TestRemoveAccount(t *testing.T) {
 	setupIsolatedTestDir(t)
 
 	pool := storage.NewEmptyPool()
-	acc1 := &storage.Account{ID: "acc_1", Email: "1@gmail.com"}
-	acc2 := &storage.Account{ID: "acc_2", Email: "2@gmail.com"}
+	acc1 := &storage.Account{ID: "acc_1", Email: "1@gmail.com", AccessToken: "token-acc-1"}
+	acc2 := &storage.Account{ID: "acc_2", Email: "2@gmail.com", AccessToken: "token-acc-2"}
 	pool.Accounts = []*storage.Account{acc1, acc2}
 	pool.ActiveAccountID = &acc1.ID
 	if err := storage.SavePool(pool); err != nil {
@@ -268,14 +268,16 @@ func TestSwitchAccount(t *testing.T) {
 	frac2 := 0.8
 	pool := storage.NewEmptyPool()
 	acc1 := &storage.Account{
-		ID:        "acc_1",
-		Email:     "1@gmail.com",
-		LastQuota: &storage.QuotaState{RemainingFraction: &frac1},
+		ID:          "acc_1",
+		Email:       "1@gmail.com",
+		AccessToken: "token-acc-1",
+		LastQuota:   &storage.QuotaState{RemainingFraction: &frac1},
 	}
 	acc2 := &storage.Account{
-		ID:        "acc_2",
-		Email:     "2@gmail.com",
-		LastQuota: &storage.QuotaState{RemainingFraction: &frac2},
+		ID:          "acc_2",
+		Email:       "2@gmail.com",
+		AccessToken: "token-acc-2",
+		LastQuota:   &storage.QuotaState{RemainingFraction: &frac2},
 	}
 	pool.Accounts = []*storage.Account{acc1, acc2}
 	pool.ActiveAccountID = &acc1.ID
@@ -660,9 +662,9 @@ func TestRemoveAccountRepairsActiveAndRRCursor(t *testing.T) {
 	// 1. Setup 3 accounts: acc_1, acc_2, acc_3
 	p := storage.NewEmptyPool()
 	p.Accounts = []*storage.Account{
-		{ID: "acc_1", Email: "first@example.com"},
-		{ID: "acc_2", Email: "second@example.com"},
-		{ID: "acc_3", Email: "third@example.com"},
+		{ID: "acc_1", Email: "first@example.com", AccessToken: "token-acc-1"},
+		{ID: "acc_2", Email: "second@example.com", AccessToken: "token-acc-2"},
+		{ID: "acc_3", Email: "third@example.com", AccessToken: "token-acc-3"},
 	}
 	p.ActiveAccountID = &p.Accounts[0].ID
 	p.RoundRobinLastAccountID = &p.Accounts[1].ID

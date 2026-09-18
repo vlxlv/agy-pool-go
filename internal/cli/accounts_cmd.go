@@ -534,28 +534,30 @@ func RenameAccount(target, name string, stdout, stderr io.Writer) bool {
 }
 
 // RemoveAccount removes an account from the pool.
-func RemoveAccount(target string, stdout, stderr io.Writer) {
+func RemoveAccount(target string, stdout, stderr io.Writer) bool {
 	acc, err := accounts.RemoveAccount(target)
 	if err != nil || acc == nil {
-		fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
-		return
+		fmt.Fprintf(stderr, "%s[Error] Could not remove account '%s': %v%s\n", clrRed, target, err, clrReset)
+		return false
 	}
 	fmt.Fprintf(stdout, "%s✓ Removed account %s from pool.%s\n", clrGreen, accounts.DisplayAccountName(acc), clrReset)
+	return true
 }
 
 // SwitchAccount switches the active account in the pool.
-func SwitchAccount(target string, stdout, stderr io.Writer) {
+func SwitchAccount(target string, stdout, stderr io.Writer) bool {
 	pool, _ := storage.LoadPool()
 	if pool == nil || len(pool.Accounts) == 0 {
-		fmt.Fprintf(stdout, "%s[Error] Account pool is empty.%s\n", clrRed, clrReset)
-		return
+		fmt.Fprintf(stderr, "%s[Error] Account pool is empty.%s\n", clrRed, clrReset)
+		return false
 	}
 	acc, err := accounts.SwitchAccount(target)
 	if err != nil || acc == nil {
-		fmt.Fprintf(stdout, "%s[Error] Account '%s' not found.%s\n", clrRed, target, clrReset)
-		return
+		fmt.Fprintf(stderr, "%s[Error] Could not switch account '%s': %v%s\n", clrRed, target, err, clrReset)
+		return false
 	}
 	fmt.Fprintf(stdout, "%s✓ Switched CLI base account to: %s%s%s\n", clrGreen, clrBold, accounts.DisplayAccountName(acc), clrReset)
+	return true
 }
 
 func handleExport(args []string, stdout, stderr io.Writer) int {
