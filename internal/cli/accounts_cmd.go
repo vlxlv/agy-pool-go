@@ -222,8 +222,16 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			fmt.Fprintf(stdout, "    • Gemini Weekly: %s[░░░░░░░░░░]  Authentication Failure%s\n", clrRed, clrReset)
 			fmt.Fprintf(stdout, "    %s↳ Token expired or revoked. Re-authenticate account.%s\n", clrRed, clrReset)
 		} else {
-			fmt.Fprintf(stdout, "    • Gemini 5-Hour: %s  (Resets %s)\n", g5Bar, g5Reset)
-			fmt.Fprintf(stdout, "    • Gemini Weekly: %s  (Resets %s)\n", gwBar, gwReset)
+			if q5Frac == nil {
+				fmt.Fprintln(stdout, "    • Gemini 5-Hour: [----------]  unknown")
+			} else {
+				fmt.Fprintf(stdout, "    • Gemini 5-Hour: %s  (Resets %s)\n", g5Bar, g5Reset)
+			}
+			if gwFrac == nil {
+				fmt.Fprintln(stdout, "    • Gemini Weekly: [----------]  unknown")
+			} else {
+				fmt.Fprintf(stdout, "    • Gemini Weekly: %s  (Resets %s)\n", gwBar, gwReset)
+			}
 			fmt.Fprintf(stdout, "    • Quota age: %s\n", quota.FormatQuotaAge(acc, float64(nowTS)))
 
 			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
@@ -289,40 +297,42 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
-			g5Pct := "  N/A "
-			if q5Frac != nil {
-				g5Pct = fmt.Sprintf("%5.1f%%", *q5Frac*100.0)
-			}
-			g5Reset := quota.FormatCompactRemainingTime(reset5)
-			r5Str := "reset " + g5Reset
-			if g5Reset == "ready" || g5Reset == "N/A" {
-				r5Str = g5Reset
-			}
-			nonBar5 := 18 + len(r5Str)
-			barW5 := chooseBarWidth(width, nonBar5, 10, 4)
-			if barW5 > 0 {
-				g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
-				fmt.Fprintf(stdout, "      5H %s %s  %s\n", g5Pct, g5Bar, r5Str)
+			if q5Frac == nil {
+				fmt.Fprintln(stdout, "      5H    --  unknown")
 			} else {
-				fmt.Fprintf(stdout, "      5H %s  %s\n", g5Pct, r5Str)
+				g5Pct := fmt.Sprintf("%5.1f%%", *q5Frac*100.0)
+				g5Reset := quota.FormatCompactRemainingTime(reset5)
+				r5Str := "reset " + g5Reset
+				if g5Reset == "ready" || g5Reset == "N/A" {
+					r5Str = g5Reset
+				}
+				nonBar5 := 18 + len(r5Str)
+				barW5 := chooseBarWidth(width, nonBar5, 10, 4)
+				if barW5 > 0 {
+					g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
+					fmt.Fprintf(stdout, "      5H %s %s  %s\n", g5Pct, g5Bar, r5Str)
+				} else {
+					fmt.Fprintf(stdout, "      5H %s  %s\n", g5Pct, r5Str)
+				}
 			}
 
-			gwPct := "  N/A "
-			if gwFrac != nil {
-				gwPct = fmt.Sprintf("%5.1f%%", *gwFrac*100.0)
-			}
-			gwReset := quota.FormatCompactRemainingTime(reset7)
-			r7Str := "reset " + gwReset
-			if gwReset == "ready" || gwReset == "N/A" {
-				r7Str = gwReset
-			}
-			nonBar7 := 18 + len(r7Str)
-			barW7 := chooseBarWidth(width, nonBar7, 10, 4)
-			if barW7 > 0 {
-				gwBar := quota.RenderBlockProgressBar(gwFrac, barW7)
-				fmt.Fprintf(stdout, "      WK %s %s  %s\n", gwPct, gwBar, r7Str)
+			if gwFrac == nil {
+				fmt.Fprintln(stdout, "      WK    --  unknown")
 			} else {
-				fmt.Fprintf(stdout, "      WK %s  %s\n", gwPct, r7Str)
+				gwPct := fmt.Sprintf("%5.1f%%", *gwFrac*100.0)
+				gwReset := quota.FormatCompactRemainingTime(reset7)
+				r7Str := "reset " + gwReset
+				if gwReset == "ready" || gwReset == "N/A" {
+					r7Str = gwReset
+				}
+				nonBar7 := 18 + len(r7Str)
+				barW7 := chooseBarWidth(width, nonBar7, 10, 4)
+				if barW7 > 0 {
+					gwBar := quota.RenderBlockProgressBar(gwFrac, barW7)
+					fmt.Fprintf(stdout, "      WK %s %s  %s\n", gwPct, gwBar, r7Str)
+				} else {
+					fmt.Fprintf(stdout, "      WK %s  %s\n", gwPct, r7Str)
+				}
 			}
 
 			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
@@ -386,34 +396,36 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
-			g5Pct := " N/A"
-			if q5Frac != nil {
-				pctVal := int(math.Round(*q5Frac * 100.0))
-				g5Pct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
-			}
-			g5Reset := quota.FormatCompactRemainingTime(reset5)
-			nonBar5 := 10 + len(g5Reset)
-			barW5 := chooseBarWidth(width, nonBar5, 10, 4)
-			if barW5 > 0 {
-				g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
-				fmt.Fprintf(stdout, "5H %s %s  %s\n", g5Pct, g5Bar, g5Reset)
+			if q5Frac == nil {
+				fmt.Fprintln(stdout, "5H  --  unknown")
 			} else {
-				fmt.Fprintf(stdout, "5H %s  %s\n", g5Pct, g5Reset)
+				pctVal := int(math.Round(*q5Frac * 100.0))
+				g5Pct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				g5Reset := quota.FormatCompactRemainingTime(reset5)
+				nonBar5 := 10 + len(g5Reset)
+				barW5 := chooseBarWidth(width, nonBar5, 10, 4)
+				if barW5 > 0 {
+					g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
+					fmt.Fprintf(stdout, "5H %s %s  %s\n", g5Pct, g5Bar, g5Reset)
+				} else {
+					fmt.Fprintf(stdout, "5H %s  %s\n", g5Pct, g5Reset)
+				}
 			}
 
-			gwPct := " N/A"
-			if gwFrac != nil {
-				pctVal := int(math.Round(*gwFrac * 100.0))
-				gwPct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
-			}
-			gwReset := quota.FormatCompactRemainingTime(reset7)
-			nonBar7 := 10 + len(gwReset)
-			barW7 := chooseBarWidth(width, nonBar7, 10, 4)
-			if barW7 > 0 {
-				gwBar := quota.RenderBlockProgressBar(gwFrac, barW7)
-				fmt.Fprintf(stdout, "WK %s %s  %s\n", gwPct, gwBar, gwReset)
+			if gwFrac == nil {
+				fmt.Fprintln(stdout, "WK  --  unknown")
 			} else {
-				fmt.Fprintf(stdout, "WK %s  %s\n", gwPct, gwReset)
+				pctVal := int(math.Round(*gwFrac * 100.0))
+				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				gwReset := quota.FormatCompactRemainingTime(reset7)
+				nonBar7 := 10 + len(gwReset)
+				barW7 := chooseBarWidth(width, nonBar7, 10, 4)
+				if barW7 > 0 {
+					gwBar := quota.RenderBlockProgressBar(gwFrac, barW7)
+					fmt.Fprintf(stdout, "WK %s %s  %s\n", gwPct, gwBar, gwReset)
+				} else {
+					fmt.Fprintf(stdout, "WK %s  %s\n", gwPct, gwReset)
+				}
 			}
 
 			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
@@ -484,21 +496,23 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
-			g5Pct := " N/A"
-			if q5Frac != nil {
+			if q5Frac == nil {
+				fmt.Fprintln(stdout, "5H -- unknown")
+			} else {
 				pctVal := int(math.Round(*q5Frac * 100.0))
-				g5Pct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				g5Pct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				g5Reset := quota.FormatCompactRemainingTime(reset5)
+				fmt.Fprintf(stdout, "5H %s  %s\n", g5Pct, g5Reset)
 			}
-			g5Reset := quota.FormatCompactRemainingTime(reset5)
-			fmt.Fprintf(stdout, "5H %s  %s\n", g5Pct, g5Reset)
 
-			gwPct := " N/A"
-			if gwFrac != nil {
+			if gwFrac == nil {
+				fmt.Fprintln(stdout, "WK -- unknown")
+			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
-				gwPct = fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				gwReset := quota.FormatCompactRemainingTime(reset7)
+				fmt.Fprintf(stdout, "WK %s  %s\n", gwPct, gwReset)
 			}
-			gwReset := quota.FormatCompactRemainingTime(reset7)
-			fmt.Fprintf(stdout, "WK %s  %s\n", gwPct, gwReset)
 
 			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
 				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))

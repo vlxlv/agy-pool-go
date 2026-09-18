@@ -387,6 +387,48 @@ func TestListCmd_CompactAndPrivacy(t *testing.T) {
 	}
 }
 
+func TestQuotaUnknownIsExplicitAcrossLayouts(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{{ID: "acc_1", Name: "UnknownQuota", RequestCount: 1035}}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, width := range []int{120, 80, 50, 35} {
+		var out bytes.Buffer
+		ListAccountsWithWidth("", width, &out, &bytes.Buffer{})
+		text := stripANSI(out.String())
+		if strings.Contains(text, "100%") || strings.Contains(text, "████") || strings.Contains(text, "━━━━") {
+			t.Fatalf("width %d rendered unknown quota as full: %q", width, text)
+		}
+		if !strings.Contains(text, "unknown") || !strings.Contains(text, "--") {
+			t.Fatalf("width %d omitted unknown quota marker: %q", width, text)
+		}
+	}
+}
+
+func TestQuotaPartialWindowsDisplayIndependently(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+	fiveHour, weekly := 0.72, 0.52
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{
+		{ID: "acc_1", Name: "FiveHourOnly", LastQuota: &storage.QuotaState{Gemini5H: &storage.QuotaWindow{Fraction: &fiveHour}}},
+		{ID: "acc_2", Name: "WeeklyOnly", LastQuota: &storage.QuotaState{GeminiWeekly: &storage.QuotaWindow{Fraction: &weekly}}},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	ListAccountsWithWidth("", 80, &out, &bytes.Buffer{})
+	text := stripANSI(out.String())
+	if !strings.Contains(text, "72.0%") || !strings.Contains(text, "52.0%") || strings.Count(text, "unknown") < 2 {
+		t.Fatalf("partial windows were not displayed independently: %q", text)
+	}
+}
+
 func TestQuotaCmd_ContainsProgressBars(t *testing.T) {
 	_, cleanup := setupCLITestEnv(t)
 	defer cleanup()

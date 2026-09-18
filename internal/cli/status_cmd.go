@@ -177,11 +177,11 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 		}
 
 		hits := a.GetHits()
-		q5Str := "N/A"
+		q5Str := "--"
 		if q5Frac != nil {
 			q5Str = fmt.Sprintf("%.1f%%", *q5Frac*100)
 		}
-		gwStr := "N/A"
+		gwStr := "--"
 		if gwFrac != nil {
 			gwStr = fmt.Sprintf("%.1f%%", *gwFrac*100)
 		}
