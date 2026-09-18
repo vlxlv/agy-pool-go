@@ -1034,8 +1034,7 @@
       "acc_eligible_high",
       "acc_eligible_low",
       "acc_depleted",
-      "acc_cooldown",
-      "acc_restricted"
+      "acc_cooldown"
     ]
   },
   {

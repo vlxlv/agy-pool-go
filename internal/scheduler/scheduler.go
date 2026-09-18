@@ -40,7 +40,12 @@ func IsReserveCapacity(capState quota.CapacityState) bool {
 	return false
 }
 
-// OrderCandidates orders account candidates according to the specified strategy and reference time.
+// IsRestricted reports whether an account is blocked from generation routing.
+func IsRestricted(acc *storage.Account) bool {
+	return acc != nil && (acc.Status == "validation_required" || acc.Status == "auth_error")
+}
+
+// OrderCandidates orders generation candidates according to the specified strategy.
 func OrderCandidates(candidates []*storage.Account, strategy string, pool *storage.Pool, now float64) []*storage.Account {
 	if len(candidates) == 0 {
 		return nil
@@ -49,15 +54,12 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 	var eligible []*storage.Account
 	var depleted []*storage.Account
 	var cooldown []*storage.Account
-	var restricted []*storage.Account
 
 	for _, acc := range candidates {
-		if acc == nil {
+		if acc == nil || IsRestricted(acc) {
 			continue
 		}
-		if acc.Status == "validation_required" || acc.Status == "auth_error" {
-			restricted = append(restricted, acc)
-		} else if acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > now {
+		if acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > now {
 			cooldown = append(cooldown, acc)
 		} else {
 			capState := quota.ComputeCapacityState(acc, now)
@@ -193,11 +195,10 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		return hitsA < hitsB
 	})
 
-	result := make([]*storage.Account, 0, len(eligible)+len(depleted)+len(cooldown)+len(restricted))
+	result := make([]*storage.Account, 0, len(eligible)+len(depleted)+len(cooldown))
 	result = append(result, eligible...)
 	result = append(result, depleted...)
 	result = append(result, cooldown...)
-	result = append(result, restricted...)
 	return result
 }
 

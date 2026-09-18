@@ -498,6 +498,42 @@ func TestMaxQuota_ReserveHeadroom_UnknownMissingWindow(t *testing.T) {
 }
 
 // Test L: max_quota only; least_used and round_robin remain unchanged
+func TestRestrictedAccountsExcludedFromAllStrategies(t *testing.T) {
+	now := float64(1000)
+	ready := &storage.Account{ID: "ready", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0.9)}}
+	reserve := &storage.Account{ID: "reserve", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0.1)}}
+	depleted := &storage.Account{ID: "depleted", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0)}}
+	cooldownUntil := now + 100
+	cooldown := &storage.Account{ID: "cooldown", RateLimitedUntil: &cooldownUntil, LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0.9)}}
+	validation := &storage.Account{ID: "validation", Status: "validation_required", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(1)}}
+	authError := &storage.Account{ID: "auth", Status: "auth_error", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(1)}}
+	all := []*storage.Account{ready, reserve, depleted, cooldown, validation, authError}
+
+	lastID := "ready"
+	for _, strategy := range []string{config.StrategyMaxQuota, config.StrategyLeastUsed, config.StrategyRoundRobin} {
+		t.Run(strategy, func(t *testing.T) {
+			pool := &storage.Pool{RoundRobinLastAccountID: &lastID}
+			ordered := OrderCandidates(all, strategy, pool, now)
+			for _, acc := range ordered {
+				if IsRestricted(acc) {
+					t.Fatalf("restricted account %q returned for %s", acc.ID, strategy)
+				}
+			}
+
+			eligible := []*storage.Account{ready, reserve, depleted, cooldown}
+			want := OrderCandidates(eligible, strategy, pool, now)
+			if len(ordered) != len(want) {
+				t.Fatalf("got %d candidates, want %d", len(ordered), len(want))
+			}
+			for i := range want {
+				if ordered[i].ID != want[i].ID {
+					t.Fatalf("candidate %d = %q, want %q", i, ordered[i].ID, want[i].ID)
+				}
+			}
+		})
+	}
+}
+
 func TestMaxQuota_ReserveHeadroom_LeastUsedAndRoundRobinUnchanged(t *testing.T) {
 	now := 1789560000.0
 

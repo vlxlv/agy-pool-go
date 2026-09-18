@@ -15,6 +15,48 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
+func TestGeneration_AllAccountsRestricted_NoUpstreamRequest(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+
+	var upstreamHits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	BackendHostProvider = func() string { return u.Host }
+	BackendURLProvider = func() string { return upstream.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) {
+		t.Fatalf("restricted account %s was considered for dispatch", account.ID)
+		return "", nil
+	}
+
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{
+		{ID: "validation", Status: "validation_required"},
+		{ID: "auth", Status: "auth_error"},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	handler := NewHandler()
+	req := httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if got := atomic.LoadInt32(&upstreamHits); got != 0 {
+		t.Fatalf("upstream received %d requests, want 0", got)
+	}
+}
+
 func TestExplicitFailover_429(t *testing.T) {
 	setupIsolatedTestDir(t)
 	resetProviders()

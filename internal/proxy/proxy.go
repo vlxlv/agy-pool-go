@@ -626,6 +626,9 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	var lastError error
 	attempt := 0
 	for _, acc := range candidates {
+		if isGeneration && scheduler.IsRestricted(acc) {
+			continue
+		}
 		attempt++
 		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, selectionAuditCtx)
 		if outcome.Err != nil {
