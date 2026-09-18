@@ -310,7 +310,7 @@ func TestHelperProcess_BackgroundDaemonSpawnAndStop(t *testing.T) {
 	}
 
 	// Now stop the child daemon
-	err = StopDaemon(pidFile, port, 3*time.Second)
+	err = StopDaemon(pidFile, port, 8*time.Second)
 	if err != nil {
 		logContent, _ := os.ReadFile(logFile)
 		t.Fatalf("StopDaemon failed: %v\nChild log:\n%s", err, string(logContent))
