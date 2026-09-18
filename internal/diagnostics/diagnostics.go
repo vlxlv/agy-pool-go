@@ -737,6 +737,28 @@ func RunDoctor(out io.Writer) bool {
 					clrYellow, clrReset)
 				warningsFound++
 			}
+
+			nativeState, _ := accounts.InspectNativeAgyIdentity(pool)
+			switch nativeState {
+			case accounts.NativeIdentityMatch:
+				fmt.Fprintf(out, "  %s✓%s Native Identity: Matches CLI Base (%s)\n", clrGreen, clrReset, accounts.DisplayAccountName(storage.FindAccount(pool, &storage.Account{ID: *pool.ActiveAccountID})))
+			case accounts.NativeIdentityMismatchKnown:
+				fmt.Fprintf(out, "  %s✖%s Native Identity: Mismatch with CLI Base\n", clrRed, clrReset)
+				fmt.Fprintf(out, "    %s↳ Re-run switch or login for the CLI Base credentials.%s\n", clrDim, clrReset)
+				warningsFound++
+			case accounts.NativeIdentityMismatchUnknown:
+				fmt.Fprintf(out, "  %s✖%s Native Identity: Does not match a known pool account\n", clrRed, clrReset)
+				fmt.Fprintf(out, "    %s↳ Re-run switch or login for the CLI Base credentials.%s\n", clrDim, clrReset)
+				warningsFound++
+			case accounts.NativeIdentityMissing:
+				fmt.Fprintf(out, "  %s✖%s Native Identity: Native credential file missing\n", clrRed, clrReset)
+				warningsFound++
+			case accounts.NativeIdentityUnknown:
+				fmt.Fprintf(out, "  %s?%s Native Identity: Unable to determine safely\n", clrYellow, clrReset)
+				warningsFound++
+			case accounts.NativeIdentityNoActive:
+				fmt.Fprintf(out, "  %s?%s Native Identity: No CLI Base account configured\n", clrBlue, clrReset)
+			}
 		}
 	} else {
 		fmt.Fprintf(out, "  %s○%s Account Pool: No account pool file found yet (%s)\n",

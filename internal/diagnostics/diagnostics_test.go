@@ -3,7 +3,10 @@ package diagnostics
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +111,88 @@ func TestBinaryDiscoveryAndRecursionProtection(t *testing.T) {
 	v := GetInstalledAgyVersion()
 	if v != "1.2.3" {
 		t.Fatalf("expected version 1.2.3, got %q", v)
+	}
+}
+
+func TestRunDoctor_NativeIdentityStates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		email string
+		want  string
+	}{
+		{"matching", "match@example.com", "Matches CLI Base"},
+		{"known mismatch", "other@example.com", "Mismatch with CLI Base"},
+		{"unknown identity", "", "Unable to determine safely"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, cleanup := setupDoctorTestEnv(t)
+			defer cleanup()
+			SetAgyBinaryFinder(func() string { return "/bin/true" })
+			SetTLSProber(func(string, time.Duration) error { return nil })
+			activeID := "acc_1"
+			pool := &storage.Pool{ActiveAccountID: &activeID, Accounts: []*storage.Account{
+				{ID: "acc_1", Name: "Main", Email: "match@example.com"},
+				{ID: "acc_2", Name: "Other", Email: "other@example.com"},
+			}}
+			if err := storage.SavePool(pool); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "matching" || tc.name == "known mismatch" || tc.name == "unknown identity" {
+				claims := ""
+				if tc.email != "" {
+					payload, _ := json.Marshal(map[string]string{"email": tc.email})
+					claims = "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(payload) + "."
+				}
+				data, _ := json.Marshal(map[string]any{"id_token": claims})
+				if err := os.MkdirAll(filepath.Dir(config.GetAgyTokenFile()), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(config.GetAgyTokenFile(), data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out bytes.Buffer
+			if !RunDoctor(&out) {
+				t.Fatalf("doctor failed: %s", out.String())
+			}
+			text := out.String()
+			if !strings.Contains(text, tc.want) {
+				t.Fatalf("missing %q in output: %s", tc.want, text)
+			}
+			if strings.Contains(text, "@example.com") {
+				t.Fatalf("email leaked: %s", text)
+			}
+		})
+	}
+}
+
+func TestRunDoctor_NativeIdentityMissingAndMalformed(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("malformed=%t", malformed), func(t *testing.T) {
+			_, cleanup := setupDoctorTestEnv(t)
+			defer cleanup()
+			SetAgyBinaryFinder(func() string { return "/bin/true" })
+			SetTLSProber(func(string, time.Duration) error { return nil })
+			activeID := "acc_1"
+			if err := storage.SavePool(&storage.Pool{ActiveAccountID: &activeID, Accounts: []*storage.Account{{ID: "acc_1", Name: "Main", Email: "user@example.com"}}}); err != nil {
+				t.Fatal(err)
+			}
+			want := "Native credential file missing"
+			if malformed {
+				if err := os.MkdirAll(filepath.Dir(config.GetAgyTokenFile()), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(config.GetAgyTokenFile(), []byte("raw-provider-body-marker user@example.com"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				want = "Unable to determine safely"
+			}
+			var out bytes.Buffer
+			RunDoctor(&out)
+			if !strings.Contains(out.String(), want) || strings.Contains(out.String(), "raw-provider-body-marker") || strings.Contains(out.String(), "user@example.com") {
+				t.Fatalf("unsafe doctor output: %s", out.String())
+			}
+		})
 	}
 }
 

@@ -112,6 +112,57 @@ func FindAccountByTarget(accounts []*storage.Account, target string) *storage.Ac
 	return nil
 }
 
+type NativeIdentityState string
+
+const (
+	NativeIdentityMatch           NativeIdentityState = "match"
+	NativeIdentityMismatchKnown   NativeIdentityState = "mismatch_known"
+	NativeIdentityMismatchUnknown NativeIdentityState = "mismatch_unknown"
+	NativeIdentityMissing         NativeIdentityState = "missing"
+	NativeIdentityUnknown         NativeIdentityState = "unknown"
+	NativeIdentityNoActive        NativeIdentityState = "no_active"
+)
+
+// InspectNativeAgyIdentity compares the native token's non-secret email claim
+// with the active pool account without returning or logging credential contents.
+func InspectNativeAgyIdentity(pool *storage.Pool) (NativeIdentityState, error) {
+	if pool == nil || pool.ActiveAccountID == nil || *pool.ActiveAccountID == "" {
+		return NativeIdentityNoActive, nil
+	}
+	active := FindAccountByTarget(pool.Accounts, *pool.ActiveAccountID)
+	if active == nil {
+		return NativeIdentityNoActive, nil
+	}
+
+	data, err := os.ReadFile(config.GetAgyTokenFile())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NativeIdentityMissing, nil
+		}
+		return NativeIdentityUnknown, errors.New("native credential file cannot be read")
+	}
+	var raw struct {
+		IDToken string `json:"id_token"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return NativeIdentityUnknown, errors.New("native credential file is malformed")
+	}
+	claims := auth.DecodeJWTPayload(raw.IDToken)
+	email, _ := claims["email"].(string)
+	if email == "" {
+		return NativeIdentityUnknown, nil
+	}
+	for _, account := range pool.Accounts {
+		if account != nil && account.Email == email {
+			if account.ID == active.ID {
+				return NativeIdentityMatch, nil
+			}
+			return NativeIdentityMismatchKnown, nil
+		}
+	}
+	return NativeIdentityMismatchUnknown, nil
+}
+
 func formatISOExpiry(ts float64) string {
 	t := time.Unix(int64(ts), 0).UTC()
 	return t.Format("2006-01-02T15:04:05+00:00")
