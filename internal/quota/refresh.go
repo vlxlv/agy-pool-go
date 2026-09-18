@@ -38,6 +38,7 @@ var (
 	refreshMu       sync.Mutex
 	refreshInFlight = make(map[string]bool)
 	refreshRetry    = make(map[string]retryEntry)
+	poolTransaction = storage.PoolTransaction
 )
 
 type retryEntry struct {
@@ -208,7 +209,7 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (*storage.
 				nowSec := time.Now().Unix()
 				quotaData.UpdatedAt = &nowSec
 
-				_ = storage.PoolTransaction(func(pool *storage.Pool) error {
+				if err := poolTransaction(func(pool *storage.Pool) error {
 					stored := storage.FindAccount(pool, account)
 					if stored != nil {
 						stored.Status = status
@@ -220,7 +221,9 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (*storage.
 						stored.LastQuota = quotaData
 					}
 					return nil
-				})
+				}); err != nil {
+					return nil, fmt.Errorf("failed to persist %s state for account %s: %w", status, account.ID, err)
+				}
 				account.Status = status
 				if vURL != "" {
 					account.ValidationURL = &vURL

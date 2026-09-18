@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -55,6 +56,87 @@ func TestGeneration_AllAccountsRestricted_NoUpstreamRequest(t *testing.T) {
 	if got := atomic.LoadInt32(&upstreamHits); got != 0 {
 		t.Fatalf("upstream received %d requests, want 0", got)
 	}
+}
+
+func TestLifecyclePersistenceErrorsAreObservable(t *testing.T) {
+	setupIsolatedTestDir(t)
+	original := poolTransaction
+	t.Cleanup(func() { poolTransaction = original })
+	injected := errors.New("injected persistence failure")
+	poolTransaction = func(func(*storage.Pool) error) error { return injected }
+	acc := &storage.Account{ID: "acc_1"}
+
+	if err := RecordValidationError(acc, nil); !errors.Is(err, injected) {
+		t.Fatalf("validation persistence error = %v, want injected error", err)
+	}
+	if err := RecordAuthError(acc); !errors.Is(err, injected) {
+		t.Fatalf("auth persistence error = %v, want injected error", err)
+	}
+	if _, err := RecordQuotaError(acc, nil); !errors.Is(err, injected) {
+		t.Fatalf("quota persistence error = %v, want injected error", err)
+	}
+	if err := RecordSuccess(acc, true); !errors.Is(err, injected) {
+		t.Fatalf("success persistence error = %v, want injected error", err)
+	}
+}
+
+func TestValidationPersistenceFailureStillFailsOverWithoutReplay(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+
+	var firstHits, secondHits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Authorization"), "acc_1") {
+			atomic.AddInt32(&firstHits, 1)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"message":"validation_required"}}`))
+			return
+		}
+		atomic.AddInt32(&secondHits, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"ok"}`))
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+	BackendHostProvider = func() string { return u.Host }
+	BackendURLProvider = func() string { return upstream.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) { return "token-" + account.ID, nil }
+
+	var calls int32
+	original := poolTransaction
+	t.Cleanup(func() { poolTransaction = original })
+	poolTransaction = func(fn func(*storage.Pool) error) error {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return errors.New("injected persistence failure")
+		}
+		return fn(loadPoolForTest(t))
+	}
+
+	frac := 0.9
+	first := &storage.Account{ID: "acc_1", LastQuota: &storage.QuotaState{RemainingFraction: &frac}}
+	second := &storage.Account{ID: "acc_2", LastQuota: &storage.QuotaState{RemainingFraction: &frac}}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{first, second}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler()
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader("{}")))
+	if w.Code != http.StatusOK || atomic.LoadInt32(&firstHits) != 1 || atomic.LoadInt32(&secondHits) != 1 {
+		t.Fatalf("status=%d first=%d second=%d, want 200/1/1", w.Code, firstHits, secondHits)
+	}
+}
+
+func loadPoolForTest(t *testing.T) *storage.Pool {
+	t.Helper()
+	pool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pool
 }
 
 func TestExplicitFailover_429(t *testing.T) {
@@ -484,7 +566,10 @@ func TestRecordQuotaError_429Atomicity(t *testing.T) {
 	headers.Set("Retry-After", "120")
 
 	// Call RecordQuotaError
-	delay := RecordQuotaError(acc, headers)
+	delay, err := RecordQuotaError(acc, headers)
+	if err != nil {
+		t.Fatalf("RecordQuotaError failed: %v", err)
+	}
 	if delay != 120 {
 		t.Fatalf("expected delay 120, got %d", delay)
 	}

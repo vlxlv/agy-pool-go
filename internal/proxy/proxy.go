@@ -756,7 +756,9 @@ func (h *Handler) dispatchAccount(
 	if err != nil {
 		logMessage("PROXY WARN", fmt.Sprintf("Token refresh failed for %s: %v. Switching to next account...", accounts.DisplayAccountName(acc), err))
 		notifyAudit(401, "TokenRefreshFailed")
-		RecordAuthError(acc)
+		if persistErr := RecordAuthError(acc); persistErr != nil {
+			logMessage("PROXY WARN", "failed to persist auth restriction; continuing failover")
+		}
 		return DispatchOutcome{
 			Action: ActionFailoverNext,
 			Reason: "TokenRefreshFailed",
@@ -838,35 +840,56 @@ func (h *Handler) dispatchAccount(
 
 		// Failover on Google Security Validation Required
 		if auth.IsValidationError(statusCode, errBody) {
-			RecordValidationError(acc, errBody)
+			persistErr := RecordValidationError(acc, errBody)
+			if persistErr != nil {
+				logMessage("PROXY WARN", "failed to persist validation restriction; continuing failover")
+			}
 			logMessage("FAILOVER", fmt.Sprintf("Account %s requires account verification! Auto-switching to next account...", dispName))
 			notifyAudit(statusCode, "ValidationError")
-			return DispatchOutcome{
+			outcome := DispatchOutcome{
 				Action: ActionFailoverNext,
 				Reason: "ExplicitRetryableUpstreamResponse:ValidationError",
 			}
+			if persistErr != nil {
+				outcome.Err = persistErr
+			}
+			return outcome
 		}
 
 		// Failover on 429 or 403 quota exhaustion
 		if quota.IsQuotaError(statusCode, errBody) {
-			delay := RecordQuotaError(acc, resp.Header)
+			delay, persistErr := RecordQuotaError(acc, resp.Header)
+			if persistErr != nil {
+				logMessage("PROXY WARN", "failed to persist quota cooldown; continuing failover")
+			}
 			logMessage("FAILOVER", fmt.Sprintf("Account %s hit rate limit/quota error! Cooldown %ds. Auto-switching to next account...", dispName, delay))
 			notifyAudit(statusCode, "QuotaExhausted")
-			return DispatchOutcome{
+			outcome := DispatchOutcome{
 				Action: ActionFailoverNext,
 				Reason: "ExplicitRetryableUpstreamResponse:QuotaExhausted",
 			}
+			if persistErr != nil {
+				outcome.Err = persistErr
+			}
+			return outcome
 		}
 
 		// Failover on 401 or recognized auth failure
 		if auth.IsAuthError(statusCode, errBody) {
-			RecordAuthError(acc)
+			persistErr := RecordAuthError(acc)
+			if persistErr != nil {
+				logMessage("PROXY WARN", "failed to persist auth restriction; continuing failover")
+			}
 			logMessage("FAILOVER", fmt.Sprintf("Account %s auth/permission failure! Auto-switching to next account...", dispName))
 			notifyAudit(statusCode, "AuthFailure")
-			return DispatchOutcome{
+			outcome := DispatchOutcome{
 				Action: ActionFailoverNext,
 				Reason: "ExplicitRetryableUpstreamResponse:AuthFailure",
 			}
+			if persistErr != nil {
+				outcome.Err = persistErr
+			}
+			return outcome
 		}
 
 		// Ordinary upstream error (400, 404, 500, etc.): Forward directly, DO NOT REPLAY!
@@ -892,7 +915,9 @@ func (h *Handler) dispatchAccount(
 	isStream := isSSE || strings.Contains(respContentType, "text/event-stream")
 
 	if isStream {
-		RecordSuccess(acc, isGeneration)
+		if persistErr := RecordSuccess(acc, isGeneration); persistErr != nil {
+			logMessage("PROXY WARN", "failed to persist success bookkeeping")
+		}
 		streamErr := SendStream(committer, statusCode, resp.Header, resp.Body)
 		if streamErr != nil {
 			return DispatchOutcome{
@@ -922,7 +947,9 @@ func (h *Handler) dispatchAccount(
 		}
 	}
 
-	RecordSuccess(acc, isGeneration)
+	if persistErr := RecordSuccess(acc, isGeneration); persistErr != nil {
+		logMessage("PROXY WARN", "failed to persist success bookkeeping")
+	}
 	SendBuffered(committer, statusCode, resp.Header, respBody)
 	return DispatchOutcome{
 		Action: ActionTerminal,

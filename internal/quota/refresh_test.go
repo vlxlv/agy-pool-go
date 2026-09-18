@@ -2,6 +2,7 @@ package quota
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -517,6 +518,31 @@ func TestQueryQuota_ValidationError(t *testing.T) {
 	reloaded, _ := storage.LoadPool()
 	if reloaded.Accounts[0].Status != "validation_required" {
 		t.Errorf("persisted status mismatch: %s", reloaded.Accounts[0].Status)
+	}
+}
+
+func TestQueryQuota_RestrictionPersistenceFailure(t *testing.T) {
+	setupQuotaTestDir(t)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"message":"VALIDATION_REQUIRED"}}`))
+	}))
+	defer ts.Close()
+	BackendURLBaseProvider = func() string { return ts.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) { return "tok", nil }
+
+	acc := &storage.Account{ID: "val-acc"}
+	if err := storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}}); err != nil {
+		t.Fatal(err)
+	}
+	original := poolTransaction
+	t.Cleanup(func() { poolTransaction = original })
+	injected := errors.New("injected persistence failure")
+	poolTransaction = func(func(*storage.Pool) error) error { return injected }
+
+	if result, err := QueryQuota(acc); result != nil || !errors.Is(err, injected) {
+		t.Fatalf("result=%v err=%v, want persistence error and no success result", result, err)
 	}
 }
 
