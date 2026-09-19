@@ -128,7 +128,7 @@ func TestListAccounts_EmptyAndPopulated(t *testing.T) {
 		t.Fatalf("expected exit 0 on quota, got %d", code)
 	}
 	qOut := stdout.String()
-	if !strings.Contains(qOut, "Personal") || !strings.Contains(qOut, "Hits: 42") || !strings.Contains(qOut, "[CLI Base]") {
+	if !strings.Contains(qOut, "Personal") || !strings.Contains(qOut, "hits 42") || !strings.Contains(qOut, "CLI Base") {
 		t.Errorf("expected dashboard cards in quota output, got: %s", qOut)
 	}
 
@@ -342,29 +342,38 @@ func TestListAccounts_ResponsiveWidths(t *testing.T) {
 				if !strings.Contains(cleanOutput, "Antigravity Multi-Account Pool") {
 					t.Errorf("width %d: missing wide banner", w)
 				}
-				if !strings.Contains(cleanOutput, "[1] Main") || !strings.Contains(cleanOutput, "[CLI Base]") || !strings.Contains(cleanOutput, "Hits: 1035") {
+				if !strings.Contains(cleanOutput, "Main · CLI Base") || !strings.Contains(cleanOutput, "hits 1035") {
 					t.Errorf("width %d: wide title line mismatch:\n%s", w, output)
 				}
-				if !strings.Contains(cleanOutput, "• Gemini 5-Hour:") || !strings.Contains(cleanOutput, "• Gemini Weekly:") {
-					t.Errorf("width %d: wide quota lines missing", w)
+				if !regexp.MustCompile(`5H\s+████████████████████\s+100%\s+resets in 4h5[67]m`).MatchString(cleanOutput) {
+					t.Errorf("width %d: wide 5H line mismatch:\n%s", w, cleanOutput)
+				}
+				if !regexp.MustCompile(`WK\s+██████████░░░░░░░░░░\s+50%\s+resets in 5d1[456]h`).MatchString(cleanOutput) {
+					t.Errorf("width %d: wide WK line mismatch:\n%s", w, cleanOutput)
+				}
+				if !strings.Contains(cleanOutput, "quota age") {
+					t.Errorf("width %d: wide quota age missing", w)
+				}
+				if !strings.Contains(cleanOutput, "Backup · Ready") || !strings.Contains(cleanOutput, "hits 2110") {
+					t.Errorf("width %d: wide account 2 mismatch:\n%s", w, cleanOutput)
 				}
 
 			case w >= 60:
 				// Compact layout: 60-95
-				if !strings.Contains(cleanOutput, "[1] Main · CLI Base") {
+				if !strings.Contains(cleanOutput, "Main · CLI Base · hits 1035") {
 					t.Errorf("width %d: compact title line mismatch:\n%s", w, cleanOutput)
 				}
-				if !regexp.MustCompile(`5H\s+100\.0%\s+██████████\s+reset 4h5[67]m`).MatchString(cleanOutput) {
+				if !regexp.MustCompile(`5H\s+100%\s+██████████\s+reset 4h5[67]m`).MatchString(cleanOutput) {
 					t.Errorf("width %d: compact 5H line mismatch:\n%s", w, cleanOutput)
 				}
-				if !regexp.MustCompile(`WK\s+49\.9%\s+█████░░░░░\s+reset 5d1[45]h`).MatchString(cleanOutput) {
+				if !regexp.MustCompile(`WK\s+50%\s+█████░░░░░\s+reset 5d1[456]h`).MatchString(cleanOutput) {
 					t.Errorf("width %d: compact WK line mismatch:\n%s", w, cleanOutput)
 				}
-				if !regexp.MustCompile(`age 2m3[45]s · hits 1035`).MatchString(cleanOutput) {
+				if !regexp.MustCompile(`age 2m3[45]s`).MatchString(cleanOutput) {
 					t.Errorf("width %d: compact metadata line mismatch:\n%s", w, cleanOutput)
 				}
 				// Verify account 2
-				if !strings.Contains(cleanOutput, "[2] Backup · Ready") {
+				if !strings.Contains(cleanOutput, "Backup · Ready · hits 2110") {
 					t.Errorf("width %d: compact account 2 title mismatch:\n%s", w, cleanOutput)
 				}
 
@@ -811,5 +820,281 @@ func TestLogin_ExistingAccountUpdate(t *testing.T) {
 	}
 	if updatedAcc.CreatedAt == nil || *updatedAcc.CreatedAt != now {
 		t.Errorf("created_at was overwritten: %v", updatedAcc.CreatedAt)
+	}
+}
+
+func TestQuotaDashboard_EdgeCasesAndLayouts(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	up12 := now - 12
+	frac100 := 1.0
+	frac21 := 0.21
+	frac75 := 0.75
+
+	// Reset times in minutes, hours, days
+	resetMin := time.Now().Add(45*time.Minute + 30*time.Second).Format(time.RFC3339)
+	resetHour := time.Now().Add(4*time.Hour + 59*time.Minute + 30*time.Second).Format(time.RFC3339)
+	resetDay := time.Now().Add(5*24*time.Hour + 14*time.Hour + 30*time.Second).Format(time.RFC3339)
+
+	accFull := &storage.Account{
+		ID:           "acc_full",
+		Name:         "Main",
+		Status:       "ready",
+		RequestCount: 2395,
+		LastQuota: &storage.QuotaState{
+			UpdatedAt:    &up12,
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac100, ResetTime: resetHour},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac21, ResetTime: resetDay},
+		},
+	}
+
+	acc5HOnly := &storage.Account{
+		ID:           "acc_5h_only",
+		Name:         "FiveHourOnly",
+		Status:       "ready",
+		RequestCount: 150,
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{Fraction: &frac75, ResetTime: resetMin},
+		},
+	}
+
+	accWKOnly := &storage.Account{
+		ID:           "acc_wk_only",
+		Name:         "WeeklyOnly",
+		Status:       "ready",
+		RequestCount: 200,
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac21, ResetTime: resetDay},
+		},
+	}
+
+	accUnknown := &storage.Account{
+		ID:           "acc_unknown",
+		Name:         "UnknownAccount",
+		Status:       "ready",
+		RequestCount: 0,
+		LastQuota:    nil,
+	}
+
+	accRestricted := &storage.Account{
+		ID:           "acc_restricted",
+		Name:         "RestrictedAcc",
+		Status:       "validation_required",
+		RequestCount: 42,
+	}
+
+	accAuthErr := &storage.Account{
+		ID:           "acc_auth_err",
+		Name:         "AuthErrAcc",
+		Status:       "auth_error",
+		RequestCount: 99,
+	}
+
+	accLongAndLarge := &storage.Account{
+		ID:           "acc_long_large",
+		Name:         "SuperLongAccountNameExceedingNormalTerminalWidthBoundariesEasily",
+		Status:       "ready",
+		RequestCount: 12345678,
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac100, ResetTime: resetHour},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac21, ResetTime: resetDay},
+		},
+	}
+
+	activeID := "acc_full"
+	pool := &storage.Pool{
+		Version:         1,
+		ActiveAccountID: &activeID,
+		Strategy:        config.StrategyMaxQuota,
+		Accounts: []*storage.Account{
+			accFull,
+			acc5HOnly,
+			accWKOnly,
+			accUnknown,
+			accRestricted,
+			accAuthErr,
+			accLongAndLarge,
+		},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save test pool: %v", err)
+	}
+
+	testWidths := []int{120, 96, 95, 80, 60, 59, 50, 40, 39, 35}
+
+	for _, w := range testWidths {
+		t.Run(fmt.Sprintf("Width_%d", w), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			ListAccountsWithWidth("", w, &stdout, &stderr)
+
+			output := stdout.String()
+			lines := strings.Split(output, "\n")
+
+			for lineIdx, line := range lines {
+				vLen := visibleRuneLength(line)
+				if w >= 40 && vLen > w {
+					t.Errorf("width %d: line %d exceeds terminal width (%d > %d):\n%s", w, lineIdx, vLen, w, line)
+				}
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "hits" || trimmed == "Hits:" || regexp.MustCompile(`^(hits\s+\d+|\d+\s+hits)$`).MatchString(trimmed) {
+					t.Errorf("width %d: hits wrapped onto its own line:\n%s", w, line)
+				}
+			}
+
+			clean := stripANSI(output)
+
+			// 1. Full dual-window verification
+			if !strings.Contains(clean, "Main · CLI Base") {
+				t.Errorf("width %d: missing Main · CLI Base", w)
+			}
+			if !strings.Contains(clean, "hits 2395") && !strings.Contains(clean, "2395 hits") {
+				t.Errorf("width %d: missing hit count 2395", w)
+			}
+
+			// 2. Partial known/unknown verification
+			if !strings.Contains(clean, "FiveHourOnly") {
+				t.Errorf("width %d: missing FiveHourOnly account", w)
+			}
+			if !strings.Contains(clean, "WeeklyOnly") {
+				t.Errorf("width %d: missing WeeklyOnly account", w)
+			}
+			if !strings.Contains(clean, "WK -- unknown") {
+				t.Errorf("width %d: FiveHourOnly missing explicit WK -- unknown", w)
+			}
+			if !strings.Contains(clean, "5H -- unknown") {
+				t.Errorf("width %d: WeeklyOnly missing explicit 5H -- unknown", w)
+			}
+
+			// 3. Both unknown verification
+			if !strings.Contains(clean, "UnknownAccount") {
+				t.Errorf("width %d: missing UnknownAccount", w)
+			}
+
+			// 4. Restricted account state verification
+			if w >= 40 {
+				if !strings.Contains(clean, "Action Required (Verify needed)") {
+					t.Errorf("width %d: missing Action Required marker for restricted account", w)
+				}
+				if !strings.Contains(clean, "Auth Failure (Re-authenticate)") {
+					t.Errorf("width %d: missing Auth Failure marker", w)
+				}
+			} else {
+				if !strings.Contains(clean, "Verify Needed") {
+					t.Errorf("width %d: missing Verify Needed marker for very narrow", w)
+				}
+				if !strings.Contains(clean, "Auth Error") {
+					t.Errorf("width %d: missing Auth Error marker for very narrow", w)
+				}
+			}
+
+			// 5. Reset duration formatting verification
+			if !strings.Contains(clean, "4h59m") {
+				t.Errorf("width %d: missing 4h59m reset duration", w)
+			}
+			if !strings.Contains(clean, "5d14h") {
+				t.Errorf("width %d: missing 5d14h reset duration", w)
+			}
+			if !strings.Contains(clean, "45m") {
+				t.Errorf("width %d: missing 45m reset duration", w)
+			}
+
+			// 6. Large hits count verification
+			if !strings.Contains(clean, "12345678") {
+				t.Errorf("width %d: missing large hit count 12345678", w)
+			}
+
+			// Layout-specific checks
+			switch {
+			case w >= 96:
+				if !strings.Contains(clean, "5H  ████████████████████ 100%   resets in 4h59m") {
+					t.Errorf("width %d: wide 5H line format mismatch:\n%s", w, clean)
+				}
+				if !strings.Contains(clean, "WK  ████░░░░░░░░░░░░░░░░  21%   resets in 5d14h") {
+					t.Errorf("width %d: wide WK line format mismatch:\n%s", w, clean)
+				}
+				if !strings.Contains(clean, "quota age") {
+					t.Errorf("width %d: wide quota age missing", w)
+				}
+
+			case w >= 60:
+				if !strings.Contains(clean, "Main · CLI Base · hits 2395") {
+					t.Errorf("width %d: compact header format mismatch:\n%s", w, clean)
+				}
+				if !strings.Contains(clean, "5H 100% ██████████  reset 4h59m") {
+					t.Errorf("width %d: compact 5H line format mismatch:\n%s", w, clean)
+				}
+				if !strings.Contains(clean, "WK  21% ██░░░░░░░░  reset 5d14h") {
+					t.Errorf("width %d: compact WK line format mismatch:\n%s", w, clean)
+				}
+				if !strings.Contains(clean, "age") {
+					t.Errorf("width %d: compact age missing", w)
+				}
+
+			case w >= 40:
+				if !strings.Contains(clean, "5H 100% ██████████  4h59m") {
+					t.Errorf("width %d: mobile 5H line format mismatch:\n%s", w, clean)
+				}
+				if !strings.Contains(clean, "WK  21% ██░░░░░░░░  5d14h") {
+					t.Errorf("width %d: mobile WK line format mismatch:\n%s", w, clean)
+				}
+
+			default:
+				if !strings.Contains(clean, "5H 100%  4h59m") {
+					t.Errorf("width %d: very narrow 5H line format mismatch:\n%s", w, clean)
+				}
+				if !strings.Contains(clean, "WK  21%  5d14h") {
+					t.Errorf("width %d: very narrow WK line format mismatch:\n%s", w, clean)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderRepresentativeWidths(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	up12 := now - 12
+	frac100 := 1.0
+	frac21 := 0.21
+
+	resetHour := time.Now().Add(4*time.Hour + 59*time.Minute).Format(time.RFC3339)
+	resetDay := time.Now().Add(5*24*time.Hour + 14*time.Hour).Format(time.RFC3339)
+
+	acc := &storage.Account{
+		ID:           "acc_main",
+		Name:         "Main",
+		Status:       "ready",
+		RequestCount: 2395,
+		LastQuota: &storage.QuotaState{
+			UpdatedAt:    &up12,
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac100, ResetTime: resetHour},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac21, ResetTime: resetDay},
+		},
+	}
+	accUnknown := &storage.Account{
+		ID:           "acc_unknown",
+		Name:         "Secondary",
+		Status:       "ready",
+		RequestCount: 10,
+		LastQuota:    nil,
+	}
+
+	activeID := "acc_main"
+	pool := &storage.Pool{
+		Version:         1,
+		ActiveAccountID: &activeID,
+		Strategy:        config.StrategyMaxQuota,
+		Accounts:        []*storage.Account{acc, accUnknown},
+	}
+	_ = storage.SavePool(pool)
+
+	for _, w := range []int{120, 80, 50, 35} {
+		var out bytes.Buffer
+		ListAccountsWithWidth("", w, &out, &bytes.Buffer{})
+		t.Logf("\n=== WIDTH %d ===\n%s", w, stripANSI(out.String()))
 	}
 }

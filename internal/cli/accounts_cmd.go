@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
@@ -48,6 +49,20 @@ func chooseBarWidth(lineWidth, nonBarLen, maxDesired, minUseful int) int {
 		return available
 	}
 	return 0
+}
+
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 // ListAccounts renders the account pool dashboard with responsive layout based on terminal width.
@@ -194,51 +209,88 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			continue
 		}
 
-		q := acc.LastQuota
-		q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
-		reset5, reset7 := extractResetTimes(acc, q, nowTS)
-
-		g5Reset := quota.FormatRemainingTime(reset5)
-		gwReset := quota.FormatRemainingTime(reset7)
-
-		g5Bar := quota.RenderProgressBar(q5Frac, 10)
-		gwBar := quota.RenderProgressBar(gwFrac, 10)
-
-		state, stateClr := getAccountState(acc, pool, nowTS)
-		marker := fmt.Sprintf("%s%s%s", stateClr, state, clrReset)
-		hits := acc.GetHits()
 		dispName := accounts.DisplayAccountName(acc)
+		state, stateClr := getAccountState(acc, pool, nowTS)
+		hits := acc.GetHits()
 
-		fmt.Fprintf(stdout, "%s[%d] %s%s  [%s]  Hits: %d\n", clrBold, i+1, dispName, clrReset, marker, hits)
+		right := fmt.Sprintf("hits %d", hits)
+		rightLen := len(right)
+		targetCol := 64
+
+		suffixLen := utf8.RuneCountInString(" · ") + utf8.RuneCountInString(state)
+		maxLeftLen := targetCol - 2 - rightLen - 2
+		if utf8.RuneCountInString(dispName)+suffixLen > maxLeftLen {
+			avail := maxLeftLen - suffixLen
+			if avail > 3 {
+				dispName = truncateRunes(dispName, avail)
+			}
+		}
+
+		leftVisible := 2 + utf8.RuneCountInString(dispName) + suffixLen
+		spaces := targetCol - leftVisible - rightLen
+		if spaces < 2 {
+			spaces = 2
+		}
+
+		fmt.Fprintf(stdout, "  %s%s%s · %s%s%s%s%s\n",
+			clrBold, dispName, clrReset,
+			stateClr, state, clrReset,
+			strings.Repeat(" ", spaces),
+			right)
 
 		status := acc.Status
 		if status == "validation_required" {
-			fmt.Fprintf(stdout, "    • Gemini 5-Hour: %s[░░░░░░░░░░]  Action Required (Blocked)%s\n", clrYellow, clrReset)
-			fmt.Fprintf(stdout, "    • Gemini Weekly: %s[░░░░░░░░░░]  Action Required (Blocked)%s\n", clrYellow, clrReset)
-			fmt.Fprintf(stdout, "    %s↳ Google requires security verification for this account.%s\n", clrYellow, clrReset)
-			fmt.Fprintf(stdout, "      Run %sagy-pool verify %d%s to unlock in browser.\n", clrBold, i+1, clrReset)
+			fmt.Fprintf(stdout, "  %sAction Required (Verify needed)%s\n", clrYellow, clrReset)
+			fmt.Fprintf(stdout, "  Run: agy-pool verify %d\n", i+1)
 		} else if status == "auth_error" {
-			fmt.Fprintf(stdout, "    • Gemini 5-Hour: %s[░░░░░░░░░░]  Authentication Failure%s\n", clrRed, clrReset)
-			fmt.Fprintf(stdout, "    • Gemini Weekly: %s[░░░░░░░░░░]  Authentication Failure%s\n", clrRed, clrReset)
-			fmt.Fprintf(stdout, "    %s↳ Token expired or revoked. Re-authenticate account.%s\n", clrRed, clrReset)
+			fmt.Fprintf(stdout, "  %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
 		} else {
+			q := acc.LastQuota
+			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			reset5, reset7 := extractResetTimes(acc, q, nowTS)
+
 			if q5Frac == nil {
-				fmt.Fprintln(stdout, "    • Gemini 5-Hour: [----------]  unknown")
+				fmt.Fprintln(stdout, "  5H -- unknown")
 			} else {
-				fmt.Fprintf(stdout, "    • Gemini 5-Hour: %s  (Resets %s)\n", g5Bar, g5Reset)
+				pctVal := int(math.Round(*q5Frac * 100.0))
+				g5Pct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				g5Bar := quota.RenderBlockProgressBar(q5Frac, 20)
+				g5Reset := quota.FormatCompactRemainingTime(reset5)
+				r5Str := "resets in " + g5Reset
+				if g5Reset == "ready" || g5Reset == "N/A" {
+					r5Str = g5Reset
+				}
+				fmt.Fprintf(stdout, "  5H  %s %s   %s\n", g5Bar, g5Pct, r5Str)
 			}
+
 			if gwFrac == nil {
-				fmt.Fprintln(stdout, "    • Gemini Weekly: [----------]  unknown")
+				fmt.Fprintln(stdout, "  WK -- unknown")
 			} else {
-				fmt.Fprintf(stdout, "    • Gemini Weekly: %s  (Resets %s)\n", gwBar, gwReset)
+				pctVal := int(math.Round(*gwFrac * 100.0))
+				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				gwBar := quota.RenderBlockProgressBar(gwFrac, 20)
+				gwReset := quota.FormatCompactRemainingTime(reset7)
+				r7Str := "resets in " + gwReset
+				if gwReset == "ready" || gwReset == "N/A" {
+					r7Str = gwReset
+				}
+				fmt.Fprintf(stdout, "  WK  %s %s   %s\n", gwBar, gwPct, r7Str)
 			}
-			fmt.Fprintf(stdout, "    • Quota age: %s\n", quota.FormatQuotaAge(acc, float64(nowTS)))
 
 			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
-				tpBar := quota.RenderProgressBar(q.ThirdParty5H.Fraction, 10)
-				tpReset := quota.FormatRemainingTime(q.ThirdParty5H.ResetTime)
-				fmt.Fprintf(stdout, "    • Claude/GPT 5h: %s  (Resets %s)\n", tpBar, tpReset)
+				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				tpBar := quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, 20)
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
+				rTpStr := "resets in " + tpReset
+				if tpReset == "ready" || tpReset == "N/A" {
+					rTpStr = tpReset
+				}
+				fmt.Fprintf(stdout, "  3P  %s %s   %s\n", tpBar, tpPct, rTpStr)
 			}
+
+			ageStr := quota.FormatQuotaAge(acc, float64(nowTS))
+			fmt.Fprintf(stdout, "  quota age %s\n", ageStr)
 		}
 
 		if i < len(accList)-1 {
@@ -274,86 +326,89 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 		state, stateClr := getAccountState(acc, pool, nowTS)
 		hits := acc.GetHits()
 
-		prefix := fmt.Sprintf("  [%d] ", i+1)
-		suffix := fmt.Sprintf(" · %s", state)
-		fullLen := len(prefix) + len(dispName) + len(suffix)
-		if fullLen > width {
-			maxNameLen := width - len(prefix) - len(suffix)
-			if maxNameLen > 3 && len(dispName) > maxNameLen {
-				dispName = dispName[:maxNameLen-1] + "…"
+		suffix := fmt.Sprintf(" · %s · hits %d", state, hits)
+		suffixLen := utf8.RuneCountInString(suffix)
+		if 2+utf8.RuneCountInString(dispName)+suffixLen > width {
+			avail := width - 2 - suffixLen
+			if avail > 3 {
+				dispName = truncateRunes(dispName, avail)
 			}
 		}
 
-		fmt.Fprintf(stdout, "%s%s%s%s · %s%s%s\n", prefix, clrBold, dispName, clrReset, stateClr, state, clrReset)
+		fmt.Fprintf(stdout, "  %s%s%s · %s%s%s · hits %d\n",
+			clrBold, dispName, clrReset, stateClr, state, clrReset, hits)
 
 		status := acc.Status
 		if status == "validation_required" {
-			fmt.Fprintf(stdout, "      %sAction Required (Verify needed)%s\n", clrYellow, clrReset)
-			fmt.Fprintf(stdout, "      Run: agy-pool verify %d\n", i+1)
+			fmt.Fprintf(stdout, "  %sAction Required (Verify needed)%s\n", clrYellow, clrReset)
+			fmt.Fprintf(stdout, "  Run: agy-pool verify %d\n", i+1)
 		} else if status == "auth_error" {
-			fmt.Fprintf(stdout, "      %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
+			fmt.Fprintf(stdout, "  %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
 		} else {
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
 			if q5Frac == nil {
-				fmt.Fprintln(stdout, "      5H    --  unknown")
+				fmt.Fprintln(stdout, "  5H -- unknown")
 			} else {
-				g5Pct := fmt.Sprintf("%5.1f%%", *q5Frac*100.0)
+				pctVal := int(math.Round(*q5Frac * 100.0))
+				g5Pct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				g5Reset := quota.FormatCompactRemainingTime(reset5)
 				r5Str := "reset " + g5Reset
 				if g5Reset == "ready" || g5Reset == "N/A" {
 					r5Str = g5Reset
 				}
-				nonBar5 := 18 + len(r5Str)
+				nonBar5 := 12 + len(r5Str)
 				barW5 := chooseBarWidth(width, nonBar5, 10, 4)
 				if barW5 > 0 {
 					g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
-					fmt.Fprintf(stdout, "      5H %s %s  %s\n", g5Pct, g5Bar, r5Str)
+					fmt.Fprintf(stdout, "  5H %s %s  %s\n", g5Pct, g5Bar, r5Str)
 				} else {
-					fmt.Fprintf(stdout, "      5H %s  %s\n", g5Pct, r5Str)
+					fmt.Fprintf(stdout, "  5H %s  %s\n", g5Pct, r5Str)
 				}
 			}
 
 			if gwFrac == nil {
-				fmt.Fprintln(stdout, "      WK    --  unknown")
+				fmt.Fprintln(stdout, "  WK -- unknown")
 			} else {
-				gwPct := fmt.Sprintf("%5.1f%%", *gwFrac*100.0)
+				pctVal := int(math.Round(*gwFrac * 100.0))
+				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				gwReset := quota.FormatCompactRemainingTime(reset7)
 				r7Str := "reset " + gwReset
 				if gwReset == "ready" || gwReset == "N/A" {
 					r7Str = gwReset
 				}
-				nonBar7 := 18 + len(r7Str)
+				nonBar7 := 12 + len(r7Str)
 				barW7 := chooseBarWidth(width, nonBar7, 10, 4)
 				if barW7 > 0 {
 					gwBar := quota.RenderBlockProgressBar(gwFrac, barW7)
-					fmt.Fprintf(stdout, "      WK %s %s  %s\n", gwPct, gwBar, r7Str)
+					fmt.Fprintf(stdout, "  WK %s %s  %s\n", gwPct, gwBar, r7Str)
 				} else {
-					fmt.Fprintf(stdout, "      WK %s  %s\n", gwPct, r7Str)
+					fmt.Fprintf(stdout, "  WK %s  %s\n", gwPct, r7Str)
 				}
 			}
 
 			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
-				tpPct := fmt.Sprintf("%5.1f%%", *q.ThirdParty5H.Fraction*100.0)
+				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
 				rTpStr := "reset " + tpReset
 				if tpReset == "ready" || tpReset == "N/A" {
 					rTpStr = tpReset
 				}
-				nonBarTp := 18 + len(rTpStr)
+				nonBarTp := 12 + len(rTpStr)
 				barWTp := chooseBarWidth(width, nonBarTp, 10, 4)
 				if barWTp > 0 {
 					tpBar := quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, barWTp)
-					fmt.Fprintf(stdout, "      3P %s %s  %s\n", tpPct, tpBar, rTpStr)
+					fmt.Fprintf(stdout, "  3P %s %s  %s\n", tpPct, tpBar, rTpStr)
 				} else {
-					fmt.Fprintf(stdout, "      3P %s  %s\n", tpPct, rTpStr)
+					fmt.Fprintf(stdout, "  3P %s  %s\n", tpPct, rTpStr)
 				}
 			}
 
 			ageStr := quota.FormatQuotaAge(acc, float64(nowTS))
-			fmt.Fprintf(stdout, "      age %s · hits %d\n", ageStr, hits)
+			fmt.Fprintf(stdout, "  age %s\n", ageStr)
 		}
 
 		if i < len(accList)-1 {
@@ -375,11 +430,11 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 		hits := acc.GetHits()
 
 		suffix := fmt.Sprintf(" · %s", state)
-		fullLen := len(dispName) + len(suffix)
-		if fullLen > width {
-			maxNameLen := width - len(suffix)
-			if maxNameLen > 3 && len(dispName) > maxNameLen {
-				dispName = dispName[:maxNameLen-1] + "…"
+		suffixLen := utf8.RuneCountInString(suffix)
+		if utf8.RuneCountInString(dispName)+suffixLen > width {
+			avail := width - suffixLen
+			if avail > 3 {
+				dispName = truncateRunes(dispName, avail)
 			}
 		}
 
@@ -397,7 +452,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
 			if q5Frac == nil {
-				fmt.Fprintln(stdout, "5H  --  unknown")
+				fmt.Fprintln(stdout, "5H -- unknown")
 			} else {
 				pctVal := int(math.Round(*q5Frac * 100.0))
 				g5Pct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -413,7 +468,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 			}
 
 			if gwFrac == nil {
-				fmt.Fprintln(stdout, "WK  --  unknown")
+				fmt.Fprintln(stdout, "WK -- unknown")
 			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -475,11 +530,11 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 		hits := acc.GetHits()
 
 		suffix := fmt.Sprintf(" · %s", state)
-		fullLen := len(dispName) + len(suffix)
-		if fullLen > width {
-			maxNameLen := width - len(suffix)
-			if maxNameLen > 3 && len(dispName) > maxNameLen {
-				dispName = dispName[:maxNameLen-1] + "…"
+		suffixLen := utf8.RuneCountInString(suffix)
+		if utf8.RuneCountInString(dispName)+suffixLen > width {
+			avail := width - suffixLen
+			if avail > 3 {
+				dispName = truncateRunes(dispName, avail)
 			}
 		}
 

@@ -424,7 +424,7 @@ func TestQuotaPartialWindowsDisplayIndependently(t *testing.T) {
 	var out bytes.Buffer
 	ListAccountsWithWidth("", 80, &out, &bytes.Buffer{})
 	text := stripANSI(out.String())
-	if !strings.Contains(text, "72.0%") || !strings.Contains(text, "52.0%") || strings.Count(text, "unknown") < 2 {
+	if !strings.Contains(text, "72%") || !strings.Contains(text, "52%") || strings.Count(text, "unknown") < 2 {
 		t.Fatalf("partial windows were not displayed independently: %q", text)
 	}
 }
@@ -461,20 +461,20 @@ func TestQuotaCmd_ContainsProgressBars(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0 on quota, got %d", code)
 	}
-	out := stdout.String()
+	cleanOut := stripANSI(stdout.String())
 
 	// Must contain full quota dashboard elements
 	for _, expected := range []string{
 		"Antigravity Multi-Account Pool",
 		"QuotaTest",
-		"Hits: 88",
-		"Gemini 5-Hour:",
-		"Gemini Weekly:",
-		"70.0%",
-		"━",
+		"hits 88",
+		"5H",
+		"WK",
+		"70%",
+		"██████████████░░░░░░",
 	} {
-		if !strings.Contains(out, expected) {
-			t.Errorf("quota output missing expected dashboard element %q\nGot: %s", expected, out)
+		if !strings.Contains(cleanOut, expected) {
+			t.Errorf("quota output missing expected dashboard element %q\nGot: %s", expected, cleanOut)
 		}
 	}
 
