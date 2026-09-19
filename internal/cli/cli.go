@@ -95,6 +95,8 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ListCmd(stdout, stderr, args[1:]...)
 	case "quota":
 		return QuotaCmd(stdout, stderr, args[1:]...)
+	case "top", "watch", "monitor":
+		return TopCmd(stdin, stdout, stderr, args[1:]...)
 	case "strategy", "strat":
 		target := ""
 		if len(args) > 1 {
@@ -181,19 +183,20 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "uninstall":
 		return handleUninstall(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,run} ...\n")
+		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
 		return 2
 	}
 }
 
 func printHelp(out io.Writer) {
-	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,version,run} ...\n\n")
+	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n\n")
 	fmt.Fprintf(out, "Antigravity Multi-Account Pool & Load Balancer for Termux & Linux\n\n")
 	fmt.Fprintf(out, "Examples:\n")
 	fmt.Fprintf(out, "  agy-pool login            Add/login a new Google account\n")
 	fmt.Fprintf(out, "  agy-pool list             List accounts in rotation pool (compact)\n")
 	fmt.Fprintf(out, "  agy-pool quota            Display per-account quota progress bars and reset countdowns\n")
+	fmt.Fprintf(out, "  agy-pool top              Interactive real-time quota & activity monitor dashboard\n")
 	fmt.Fprintf(out, "  agy-pool status           Show gateway process and runtime summary\n")
 	fmt.Fprintf(out, "  agy-pool strategy         View or change load balancing strategy\n")
 	fmt.Fprintf(out, "  agy-pool rename 1 \"Work\"  Set friendly label for an account\n")

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,15 +26,16 @@ const StaleRuntimeThreshold = 60 * time.Second
 
 // RuntimeStats represents a snapshot of the daemon Go runtime, memory, and observability metrics.
 type RuntimeStats struct {
-	PID        int       `json:"pid"`
-	StartedAt  time.Time `json:"started_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	Goroutines int       `json:"goroutines"`
-	AllocBytes uint64    `json:"alloc_bytes"`
-	HeapBytes  uint64    `json:"heap_bytes"`
-	SysBytes   uint64    `json:"sys_bytes"`
-	NumGC      uint32    `json:"num_gc"`
-	GoVersion  string    `json:"go_version"`
+	PID        int              `json:"pid"`
+	StartedAt  time.Time        `json:"started_at"`
+	UpdatedAt  time.Time        `json:"updated_at"`
+	Goroutines int              `json:"goroutines"`
+	AllocBytes uint64           `json:"alloc_bytes"`
+	HeapBytes  uint64           `json:"heap_bytes"`
+	SysBytes   uint64           `json:"sys_bytes"`
+	NumGC      uint32           `json:"num_gc"`
+	GoVersion  string           `json:"go_version"`
+	InFlight   map[string]int64 `json:"in_flight,omitempty"`
 
 	observability.Snapshot
 }
@@ -58,6 +60,7 @@ func CollectRuntimeStats(pid int, startedAt time.Time) RuntimeStats {
 		SysBytes:   m.Sys,
 		NumGC:      m.NumGC,
 		GoVersion:  runtime.Version(),
+		InFlight:   observability.GetAllInFlightGenerations(),
 		Snapshot:   observability.GetSnapshot(),
 	}
 }
@@ -165,4 +168,150 @@ func FormatGoVersion(v string) string {
 		return "Go " + strings.TrimSpace(vTrim[2:])
 	}
 	return vTrim
+}
+
+// RuntimeStatsFlushThrottle defines the minimum interval between disk writes during rapid in-flight transitions (100-250ms).
+const RuntimeStatsFlushThrottle = 200 * time.Millisecond
+
+// RuntimeStatsWriter manages periodic and coalesced writes of daemon runtime statistics.
+type RuntimeStatsWriter struct {
+	PID         int
+	StartTime   time.Time
+	RuntimeFile string
+	Throttle    time.Duration
+	Periodic    time.Duration
+	WriteFunc   func(string, RuntimeStats) error
+	CollectFunc func(int, time.Time) RuntimeStats
+
+	triggerCh chan struct{}
+	doneCh    chan struct{}
+	cancel    context.CancelFunc
+}
+
+// StartRuntimeStatsWriter starts a background writer that flushes runtime stats periodically and on in-flight changes,
+// coalescing rapid in-flight updates within the throttle window.
+func StartRuntimeStatsWriter(
+	ctx context.Context,
+	pid int,
+	startTime time.Time,
+	runtimeFile string,
+	throttle time.Duration,
+	periodic time.Duration,
+) *RuntimeStatsWriter {
+	if throttle <= 0 {
+		throttle = RuntimeStatsFlushThrottle
+	}
+	if periodic <= 0 {
+		periodic = 1 * time.Second
+	}
+
+	subCtx, cancel := context.WithCancel(ctx)
+	w := &RuntimeStatsWriter{
+		PID:         pid,
+		StartTime:   startTime,
+		RuntimeFile: runtimeFile,
+		Throttle:    throttle,
+		Periodic:    periodic,
+		WriteFunc:   WriteRuntimeStats,
+		CollectFunc: CollectRuntimeStats,
+		triggerCh:   make(chan struct{}, 1),
+		doneCh:      make(chan struct{}),
+		cancel:      cancel,
+	}
+
+	go w.run(subCtx)
+	return w
+}
+
+// Trigger notifies the writer that an in-flight change occurred.
+func (w *RuntimeStatsWriter) Trigger() {
+	select {
+	case w.triggerCh <- struct{}{}:
+	default:
+	}
+}
+
+// Done returns a channel that is closed when the writer goroutine has terminated.
+func (w *RuntimeStatsWriter) Done() <-chan struct{} {
+	return w.doneCh
+}
+
+// Stop cancels the writer context and waits for the writer goroutine to terminate.
+func (w *RuntimeStatsWriter) Stop() {
+	w.cancel()
+	<-w.doneCh
+}
+
+func (w *RuntimeStatsWriter) run(ctx context.Context) {
+	defer close(w.doneCh)
+
+	ticker := time.NewTicker(w.Periodic)
+	defer ticker.Stop()
+
+	var coalesceTimer *time.Timer
+	defer func() {
+		if coalesceTimer != nil {
+			coalesceTimer.Stop()
+		}
+	}()
+
+	lastWrite := time.Now()
+	pendingWrite := false
+
+	flush := func() {
+		pendingWrite = false
+		lastWrite = time.Now()
+		stats := w.CollectFunc(w.PID, w.StartTime)
+		_ = w.WriteFunc(w.RuntimeFile, stats)
+	}
+
+	for {
+		var timerCh <-chan time.Time
+		if coalesceTimer != nil {
+			timerCh = coalesceTimer.C
+		}
+
+		select {
+		case <-ctx.Done():
+			if coalesceTimer != nil {
+				coalesceTimer.Stop()
+				coalesceTimer = nil
+			}
+			if pendingWrite {
+				flush()
+			}
+			return
+
+		case <-ticker.C:
+			if coalesceTimer != nil {
+				coalesceTimer.Stop()
+				coalesceTimer = nil
+			}
+			flush()
+
+		case <-timerCh:
+			coalesceTimer = nil
+			flush()
+
+		case <-w.triggerCh:
+			now := time.Now()
+			elapsed := now.Sub(lastWrite)
+			if elapsed >= w.Throttle {
+				if coalesceTimer != nil {
+					coalesceTimer.Stop()
+					coalesceTimer = nil
+				}
+				flush()
+			} else {
+				pendingWrite = true
+				if coalesceTimer == nil {
+					waitDur := w.Throttle - elapsed
+					if waitDur < 5*time.Millisecond {
+						waitDur = 5 * time.Millisecond
+					}
+					coalesceTimer = time.NewTimer(waitDur)
+				}
+			}
+		}
+	}
 }

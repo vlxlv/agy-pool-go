@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/proxy"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
@@ -181,22 +182,10 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 		}
 	}()
 
-	// 5b. Start periodic runtime stats updater
-	runtimeTickerDone := make(chan struct{})
-	go func() {
-		defer close(runtimeTickerDone)
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-serverCtx.Done():
-				return
-			case <-ticker.C:
-				currentStats := CollectRuntimeStats(currentPID, startTime)
-				_ = WriteRuntimeStats(runtimeFile, currentStats)
-			}
-		}
-	}()
+	// 5b. Start periodic runtime stats updater with bounded coalescing (200ms throttle)
+	statsWriter := StartRuntimeStatsWriter(serverCtx, currentPID, startTime, runtimeFile, RuntimeStatsFlushThrottle, 1*time.Second)
+	observability.SetOnInFlightChange(statsWriter.Trigger)
+	defer observability.SetOnInFlightChange(nil)
 
 	// 6. Create HTTP server
 	server := &http.Server{
@@ -231,7 +220,7 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 		defer shutdownCancel()
 		_ = server.Shutdown(shutdownCtx)
 		<-refresherDone
-		<-runtimeTickerDone
+		<-statsWriter.Done()
 		return nil
 	}
 }

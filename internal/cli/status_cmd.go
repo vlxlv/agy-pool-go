@@ -205,6 +205,12 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 
 // QuotaCmd renders the dedicated full quota dashboard with progress bars and reset countdowns.
 func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
+	for _, a := range args {
+		if a == "-w" || a == "--watch" {
+			return TopCmd(os.Stdin, stdout, stderr, args...)
+		}
+	}
+
 	_, rem, err := resolveContextForCmd(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
@@ -227,6 +233,12 @@ func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
 
 // StatusCmd checks daemon status and displays gateway and runtime summary only.
 func StatusCmd(stdout, stderr io.Writer, args ...string) int {
+	for _, a := range args {
+		if a == "-w" || a == "--watch" {
+			return TopCmd(os.Stdin, stdout, stderr, args...)
+		}
+	}
+
 	ctx, rem, err := resolveContextForCmd(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)

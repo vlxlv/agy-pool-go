@@ -692,6 +692,11 @@ func (h *Handler) dispatchAccount(
 	attempt int,
 	auditCtx *SelectionAuditContext,
 ) DispatchOutcome {
+	if isGeneration && acc != nil && acc.ID != "" {
+		done := observability.StartInFlightGeneration(acc.ID)
+		defer done()
+	}
+
 	dispName := accounts.DisplayAccountName(acc)
 
 	var frozenEvent *RoutingEvent

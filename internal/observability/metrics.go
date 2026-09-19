@@ -2,6 +2,7 @@ package observability
 
 import (
 	"strconv"
+	"sync"
 	"sync/atomic"
 )
 
@@ -59,6 +60,7 @@ func Reset() {
 	globalMetrics.AuthRefreshFailure.Store(0)
 	globalMetrics.PersistenceErrors.Store(0)
 	globalMetrics.NoReplayPrevented.Store(0)
+	ResetInFlight()
 }
 
 // GetSnapshot returns a point-in-time snapshot of all observability counters.
@@ -169,4 +171,87 @@ func FormatNumber(n uint64) string {
 		out = append(out, in[i:i+3]...)
 	}
 	return string(out)
+}
+
+var (
+	inFlightMu       sync.RWMutex
+	inFlightCounts   = make(map[string]int64)
+	onInFlightChange func()
+)
+
+// SetOnInFlightChange registers a callback invoked whenever an in-flight generation starts or finishes.
+func SetOnInFlightChange(fn func()) {
+	inFlightMu.Lock()
+	onInFlightChange = fn
+	inFlightMu.Unlock()
+}
+
+// StartInFlightGeneration increments the in-flight count for accountID and returns a done function to decrement it.
+// Decrementing via the returned function is idempotent (protected by sync.Once).
+func StartInFlightGeneration(accountID string) func() {
+	if accountID == "" {
+		return func() {}
+	}
+	inFlightMu.Lock()
+	inFlightCounts[accountID]++
+	fn := onInFlightChange
+	inFlightMu.Unlock()
+
+	if fn != nil {
+		fn()
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			inFlightMu.Lock()
+			if val, ok := inFlightCounts[accountID]; ok {
+				if val <= 1 {
+					delete(inFlightCounts, accountID)
+				} else {
+					inFlightCounts[accountID] = val - 1
+				}
+			}
+			fn2 := onInFlightChange
+			inFlightMu.Unlock()
+
+			if fn2 != nil {
+				fn2()
+			}
+		})
+	}
+}
+
+// GetInFlightGeneration returns the current in-flight generation request count for an account.
+func GetInFlightGeneration(accountID string) int64 {
+	inFlightMu.RLock()
+	defer inFlightMu.RUnlock()
+	return inFlightCounts[accountID]
+}
+
+// GetAllInFlightGenerations returns a map snapshot of all accounts with positive in-flight requests.
+// Returns nil if no requests are in flight.
+func GetAllInFlightGenerations() map[string]int64 {
+	inFlightMu.RLock()
+	defer inFlightMu.RUnlock()
+	if len(inFlightCounts) == 0 {
+		return nil
+	}
+	res := make(map[string]int64, len(inFlightCounts))
+	for k, v := range inFlightCounts {
+		if v > 0 {
+			res[k] = v
+		}
+	}
+	if len(res) == 0 {
+		return nil
+	}
+	return res
+}
+
+// ResetInFlight resets all in-flight counts to zero.
+func ResetInFlight() {
+	inFlightMu.Lock()
+	inFlightCounts = make(map[string]int64)
+	inFlightMu.Unlock()
 }

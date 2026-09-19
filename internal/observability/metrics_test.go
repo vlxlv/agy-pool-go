@@ -106,3 +106,95 @@ func TestFormatNumber(t *testing.T) {
 		}
 	}
 }
+
+func TestInFlightTracking_ConcurrentLifecycle(t *testing.T) {
+	Reset()
+
+	if inFlight := GetInFlightGeneration("acc1"); inFlight != 0 {
+		t.Fatalf("expected initial in-flight to be 0, got %d", inFlight)
+	}
+	if all := GetAllInFlightGenerations(); all != nil {
+		t.Fatalf("expected initial GetAllInFlightGenerations to be nil, got %+v", all)
+	}
+
+	done1 := StartInFlightGeneration("acc1")
+	if inFlight := GetInFlightGeneration("acc1"); inFlight != 1 {
+		t.Fatalf("expected in-flight 1, got %d", inFlight)
+	}
+
+	done2 := StartInFlightGeneration("acc1")
+	if inFlight := GetInFlightGeneration("acc1"); inFlight != 2 {
+		t.Fatalf("expected in-flight 2, got %d", inFlight)
+	}
+
+	all := GetAllInFlightGenerations()
+	if all == nil || all["acc1"] != 2 {
+		t.Fatalf("expected GetAllInFlightGenerations to have acc1=2, got %+v", all)
+	}
+
+	// Decrement once
+	done1()
+	if inFlight := GetInFlightGeneration("acc1"); inFlight != 1 {
+		t.Fatalf("expected in-flight 1 after done1, got %d", inFlight)
+	}
+
+	// Idempotent: done1 called again should not decrement further
+	done1()
+	if inFlight := GetInFlightGeneration("acc1"); inFlight != 1 {
+		t.Fatalf("expected in-flight still 1 after duplicate done1, got %d", inFlight)
+	}
+
+	// Decrement second
+	done2()
+	if inFlight := GetInFlightGeneration("acc1"); inFlight != 0 {
+		t.Fatalf("expected in-flight 0 after done2, got %d", inFlight)
+	}
+	if all := GetAllInFlightGenerations(); all != nil {
+		t.Fatalf("expected GetAllInFlightGenerations to be nil after all done, got %+v", all)
+	}
+
+	// Concurrency test: 50 goroutines
+	var wg sync.WaitGroup
+	var changeCalls int
+	var changeMu sync.Mutex
+	SetOnInFlightChange(func() {
+		changeMu.Lock()
+		changeCalls++
+		changeMu.Unlock()
+	})
+	defer SetOnInFlightChange(nil)
+
+	const count = 50
+	dones := make([]func(), count)
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			dones[idx] = StartInFlightGeneration("acc_concurrent")
+		}(i)
+	}
+	wg.Wait()
+
+	if inFlight := GetInFlightGeneration("acc_concurrent"); inFlight != count {
+		t.Fatalf("expected in-flight %d, got %d", count, inFlight)
+	}
+
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			dones[idx]()
+		}(i)
+	}
+	wg.Wait()
+
+	if inFlight := GetInFlightGeneration("acc_concurrent"); inFlight != 0 {
+		t.Fatalf("expected in-flight to return to 0, got %d", inFlight)
+	}
+
+	changeMu.Lock()
+	if changeCalls < count*2 {
+		t.Errorf("expected at least %d change callback calls, got %d", count*2, changeCalls)
+	}
+	changeMu.Unlock()
+}
