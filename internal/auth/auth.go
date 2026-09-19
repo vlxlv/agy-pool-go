@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -299,18 +300,22 @@ func RefreshToken(account *storage.Account) (string, error) {
 			"grant_type":    {"refresh_token"},
 		}
 
+		observability.RecordAuthRefreshAttempt()
 		resp, err := HTTPClient.PostForm(TokenURL, form)
 		if err != nil {
+			observability.RecordAuthRefreshFailure()
 			return fmt.Errorf("token refresh network request failed: %w", err)
 		}
 		defer resp.Body.Close()
 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
+			observability.RecordAuthRefreshFailure()
 			return fmt.Errorf("failed to read token refresh response: %w", err)
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			observability.RecordAuthRefreshFailure()
 			return fmt.Errorf("token refresh failed (HTTP %d%s)", resp.StatusCode, safeProviderReason(respBody))
 		}
 
@@ -320,10 +325,12 @@ func RefreshToken(account *storage.Account) (string, error) {
 			ExpiresIn    float64 `json:"expires_in"`
 		}
 		if err := json.Unmarshal(respBody, &res); err != nil {
+			observability.RecordAuthRefreshFailure()
 			return fmt.Errorf("failed to parse token refresh JSON: %w", err)
 		}
 
 		if res.AccessToken == "" {
+			observability.RecordAuthRefreshFailure()
 			return errors.New("Token refresh failed: No access_token returned")
 		}
 
@@ -345,6 +352,7 @@ func RefreshToken(account *storage.Account) (string, error) {
 			return fmt.Errorf("failed to persist refreshed tokens: %w", err)
 		}
 
+		observability.RecordAuthRefreshSuccess()
 		refreshedToken = res.AccessToken
 		return nil
 	})

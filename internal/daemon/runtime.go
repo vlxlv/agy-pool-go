@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -22,7 +23,7 @@ var (
 // StaleRuntimeThreshold defines when a runtime snapshot is considered stale.
 const StaleRuntimeThreshold = 60 * time.Second
 
-// RuntimeStats represents a snapshot of the daemon Go runtime and memory metrics.
+// RuntimeStats represents a snapshot of the daemon Go runtime, memory, and observability metrics.
 type RuntimeStats struct {
 	PID        int       `json:"pid"`
 	StartedAt  time.Time `json:"started_at"`
@@ -33,9 +34,11 @@ type RuntimeStats struct {
 	SysBytes   uint64    `json:"sys_bytes"`
 	NumGC      uint32    `json:"num_gc"`
 	GoVersion  string    `json:"go_version"`
+
+	observability.Snapshot
 }
 
-// CollectRuntimeStats captures a snapshot of the current process's Go runtime and memory.
+// CollectRuntimeStats captures a snapshot of the current process's Go runtime, memory, and counters.
 func CollectRuntimeStats(pid int, startedAt time.Time) RuntimeStats {
 	if pid <= 0 {
 		pid = os.Getpid()
@@ -55,6 +58,7 @@ func CollectRuntimeStats(pid int, startedAt time.Time) RuntimeStats {
 		SysBytes:   m.Sys,
 		NumGC:      m.NumGC,
 		GoVersion:  runtime.Version(),
+		Snapshot:   observability.GetSnapshot(),
 	}
 }
 

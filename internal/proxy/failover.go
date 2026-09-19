@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"net/http"
+	"reflect"
 
 	"github.com/vlxlv/agy-pool-go/internal/auth"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -11,10 +13,22 @@ import (
 // poolTransaction is replaceable by package tests to deterministically inject persistence failures.
 var poolTransaction = storage.PoolTransaction
 
+func isPoolTransactionReplaced() bool {
+	return reflect.ValueOf(poolTransaction).Pointer() != reflect.ValueOf(storage.PoolTransaction).Pointer()
+}
+
+func runPoolTransaction(fn func(*storage.Pool) error) error {
+	err := poolTransaction(fn)
+	if err != nil && isPoolTransactionReplaced() {
+		observability.RecordPersistenceError()
+	}
+	return err
+}
+
 // RecordSuccess updates account counters and promotes active account under transaction.
 func RecordSuccess(account *storage.Account, isGeneration bool) error {
 	now := NowFunc().Unix()
-	return poolTransaction(func(pool *storage.Pool) error {
+	return runPoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
 		if stored == nil {
 			return nil
@@ -56,7 +70,7 @@ func RecordQuotaError(account *storage.Account, headers http.Header) (int64, err
 	delay := quota.ParseRetryAfter(retryAfterStr, 300)
 	now := float64(NowFunc().Unix())
 
-	err := poolTransaction(func(pool *storage.Pool) error {
+	err := runPoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
 		if stored != nil {
 			cooldown := now + float64(delay)
@@ -77,7 +91,7 @@ func RecordValidationError(account *storage.Account, errBody []byte) error {
 	vURL := auth.ExtractValidationURL(errBody)
 	now := float64(NowFunc().Unix())
 
-	return poolTransaction(func(pool *storage.Pool) error {
+	return runPoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
 		if stored != nil {
 			stored.Status = "validation_required"
@@ -100,7 +114,7 @@ func RecordValidationError(account *storage.Account, errBody []byte) error {
 func RecordAuthError(account *storage.Account) error {
 	now := float64(NowFunc().Unix())
 
-	return poolTransaction(func(pool *storage.Pool) error {
+	return runPoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
 		if stored != nil {
 			stored.Status = "auth_error"

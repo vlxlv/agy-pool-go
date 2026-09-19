@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 )
 
 var (
@@ -205,11 +206,13 @@ func LoadPool() (*Pool, error) {
 // If mutator returns an error or panics, the transaction is rolled back and state is untouched.
 func PoolTransaction(mutator func(pool *Pool) error) error {
 	if err := EnsureDirs(); err != nil {
+		observability.RecordPersistenceError()
 		return err
 	}
 
 	sdb, err := GetStateDB()
 	if err != nil {
+		observability.RecordPersistenceError()
 		return err
 	}
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/auth"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
@@ -539,6 +540,15 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if isGeneration {
+		observability.RecordGenerationRequest()
+		for _, a := range pool.Accounts {
+			if scheduler.IsRestricted(a) {
+				observability.RecordRestrictedSkip()
+			}
+		}
+	}
+
 	now := float64(NowFunc().Unix())
 	strategy := pool.Strategy
 	if strategy == "" {
@@ -625,12 +635,26 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	var lastError error
 	attempt := 0
+	hasFailedOver := false
 	for _, acc := range candidates {
 		if isGeneration && scheduler.IsRestricted(acc) {
 			continue
 		}
 		attempt++
+		if isGeneration {
+			observability.RecordRoutingDecision()
+			if attempt > 1 {
+				observability.RecordFailoverAttempt()
+				hasFailedOver = true
+			}
+		}
 		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, selectionAuditCtx)
+		if isGeneration && (outcome.Reason == "TerminalSuccess" || outcome.Reason == "CommittedStreamSuccess") {
+			observability.RecordGenerationSuccess()
+			if hasFailedOver {
+				observability.RecordFailoverSuccess()
+			}
+		}
 		if outcome.Err != nil {
 			lastError = outcome.Err
 		}
@@ -809,6 +833,7 @@ func (h *Handler) dispatchAccount(
 		dispName := accounts.DisplayAccountName(acc)
 		logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: %v", r.Method, pathBase, dispName, err))
 		notifyAudit(502, "AmbiguousTransportFailure")
+		observability.RecordNoReplayPrevented()
 
 		// Ambiguous transport failure: DO NOT REPLAY!
 		if IsTimeoutError(err) {
@@ -920,6 +945,7 @@ func (h *Handler) dispatchAccount(
 		}
 		streamErr := SendStream(committer, statusCode, resp.Header, resp.Body)
 		if streamErr != nil {
+			observability.RecordNoReplayPrevented()
 			return DispatchOutcome{
 				Action: ActionTerminal,
 				Reason: "CommittedStreamTruncated",
@@ -935,6 +961,7 @@ func (h *Handler) dispatchAccount(
 	respBody, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: read error: %v", r.Method, pathBase, dispName, readErr))
+		observability.RecordNoReplayPrevented()
 		if IsTimeoutError(readErr) {
 			http.Error(committer, "Upstream request failed", http.StatusGatewayTimeout)
 		} else {

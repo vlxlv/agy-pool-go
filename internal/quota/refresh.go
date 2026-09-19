@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -40,6 +42,10 @@ var (
 	refreshRetry    = make(map[string]retryEntry)
 	poolTransaction = storage.PoolTransaction
 )
+
+func isPoolTransactionReplaced() bool {
+	return reflect.ValueOf(poolTransaction).Pointer() != reflect.ValueOf(storage.PoolTransaction).Pointer()
+}
 
 type retryEntry struct {
 	attempt int
@@ -125,10 +131,19 @@ func QueryQuota(account *storage.Account) (*storage.QuotaState, error) {
 }
 
 // QueryQuotaContext refreshes cached quota with context support.
-func QueryQuotaContext(ctx context.Context, account *storage.Account) (*storage.QuotaState, error) {
+func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *storage.QuotaState, err error) {
 	if account == nil {
 		return nil, errors.New("account is required")
 	}
+
+	observability.RecordQuotaRefreshAttempt()
+	defer func() {
+		if err != nil {
+			observability.RecordQuotaRefreshFailure()
+		} else {
+			observability.RecordQuotaRefreshSuccess()
+		}
+	}()
 
 	// Fail-closed guard: prevent real external requests in test mode without an explicit mock backend
 	if BackendURLBaseProvider == nil && config.IsTestMode() {
@@ -222,6 +237,9 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (*storage.
 					}
 					return nil
 				}); err != nil {
+					if isPoolTransactionReplaced() {
+						observability.RecordPersistenceError()
+					}
 					return nil, fmt.Errorf("failed to persist %s state for account %s: %w", status, account.ID, err)
 				}
 				account.Status = status

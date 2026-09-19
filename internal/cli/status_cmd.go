@@ -13,6 +13,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -226,10 +227,18 @@ func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
 
 // StatusCmd checks daemon status and displays gateway and runtime summary only.
 func StatusCmd(stdout, stderr io.Writer, args ...string) int {
-	ctx, _, err := resolveContextForCmd(args)
+	ctx, rem, err := resolveContextForCmd(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Failed to resolve instance: %v%s\n", clrRed, err, clrReset)
 		return 1
+	}
+
+	verbose := false
+	for _, a := range rem {
+		if a == "-v" || a == "--verbose" {
+			verbose = true
+			break
+		}
 	}
 
 	fmt.Fprintf(stdout, "agy-pool v%s\n\n", config.Version)
@@ -274,10 +283,37 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 				fmt.Fprintf(stdout, "Runtime : %s | Goroutines: %d\n", goVer, stats.Goroutines)
 				fmt.Fprintf(stdout, "Memory  : Alloc %s | Heap %s | Sys %s\n", allocStr, heapStr, sysStr)
 				fmt.Fprintf(stdout, "GC      : %d cycles\n", stats.NumGC)
+
+				if verbose {
+					fmt.Fprintf(stdout, "\n  %sRuntime Counters%s\n", clrBold, clrReset)
+					fmt.Fprintf(stdout, "    %-18s %6s requests / %s success\n", "Generation",
+						observability.FormatNumber(stats.GenerationRequests), observability.FormatNumber(stats.GenerationSuccess))
+					fmt.Fprintf(stdout, "    %-18s %6s decisions\n", "Routing",
+						observability.FormatNumber(stats.RoutingDecisions))
+					fmt.Fprintf(stdout, "    %-18s %6s attempts / %s recovered\n", "Failover",
+						observability.FormatNumber(stats.FailoverAttempts), observability.FormatNumber(stats.FailoverSuccess))
+					fmt.Fprintf(stdout, "    %-18s %6s\n", "Restricted skips",
+						observability.FormatNumber(stats.RestrictedSkips))
+					fmt.Fprintf(stdout, "    %-18s %6s / %s ok / %s failed\n", "Quota refresh",
+						observability.FormatNumber(stats.QuotaRefreshAttempts), observability.FormatNumber(stats.QuotaRefreshSuccess), observability.FormatNumber(stats.QuotaRefreshFailure))
+					fmt.Fprintf(stdout, "    %-18s %6s / %s ok / %s failed\n", "Auth refresh",
+						observability.FormatNumber(stats.AuthRefreshAttempts), observability.FormatNumber(stats.AuthRefreshSuccess), observability.FormatNumber(stats.AuthRefreshFailure))
+					fmt.Fprintf(stdout, "    %-18s %6s\n", "Persistence errors",
+						observability.FormatNumber(stats.PersistenceErrors))
+					fmt.Fprintf(stdout, "    %-18s %6s\n", "Replay prevented",
+						observability.FormatNumber(stats.NoReplayPrevented))
+				}
 			} else {
 				fmt.Fprintf(stdout, "Runtime : (metrics unavailable)\n")
+				if verbose {
+					fmt.Fprintf(stdout, "\n  %sRuntime Counters%s\n", clrBold, clrReset)
+					fmt.Fprintf(stdout, "    (metrics unavailable)\n")
+				}
 			}
 		}
+	} else if verbose {
+		fmt.Fprintf(stdout, "\n  %sRuntime Counters%s\n", clrBold, clrReset)
+		fmt.Fprintf(stdout, "    (gateway not running)\n")
 	}
 
 	fmt.Fprintf(stdout, "\n")

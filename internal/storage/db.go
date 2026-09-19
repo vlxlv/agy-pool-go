@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	_ "modernc.org/sqlite"
 )
 
@@ -295,7 +296,13 @@ func (s *StateDB) View(ctx context.Context, fn func(tx *sql.Tx) error) error {
 }
 
 // Update executes an immediate write transaction (BEGIN IMMEDIATE).
-func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) error {
+func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) (err error) {
+	defer func() {
+		if err != nil {
+			observability.RecordPersistenceError()
+		}
+	}()
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -310,7 +317,6 @@ func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	}
 
 	var tx *sql.Tx
-	var err error
 	for attempt := 0; attempt < 10; attempt++ {
 		tx, err = db.BeginTx(ctx, nil)
 		if err == nil {
