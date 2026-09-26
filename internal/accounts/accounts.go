@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -23,15 +24,156 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
+// VerificationTransitionResult reports the outcome of an explicit verification state transition.
+type VerificationTransitionResult struct {
+	Cleared bool
+}
+
+type restrictionSnapshot struct {
+	status           string
+	validationURL    *string
+	rateLimitedUntil *float64
+	accessToken      string
+	refreshToken     string
+}
+
+func snapshotAccount(acc *storage.Account) restrictionSnapshot {
+	var snap restrictionSnapshot
+	if acc == nil {
+		return snap
+	}
+	snap.status = acc.Status
+	if acc.ValidationURL != nil {
+		v := *acc.ValidationURL
+		snap.validationURL = &v
+	}
+	if acc.RateLimitedUntil != nil {
+		r := *acc.RateLimitedUntil
+		snap.rateLimitedUntil = &r
+	}
+	snap.accessToken = acc.AccessToken
+	snap.refreshToken = acc.RefreshToken
+	return snap
+}
+
+func (s restrictionSnapshot) matches(acc *storage.Account) bool {
+	if acc == nil {
+		return false
+	}
+	if acc.Status != s.status {
+		return false
+	}
+	if (acc.ValidationURL == nil) != (s.validationURL == nil) {
+		return false
+	}
+	if acc.ValidationURL != nil && *acc.ValidationURL != *s.validationURL {
+		return false
+	}
+	if (acc.RateLimitedUntil == nil) != (s.rateLimitedUntil == nil) {
+		return false
+	}
+	if acc.RateLimitedUntil != nil && *acc.RateLimitedUntil != *s.rateLimitedUntil {
+		return false
+	}
+	if acc.RefreshToken != s.refreshToken {
+		return false
+	}
+	return true
+}
+
+func clearValidationRestrictionCAS(targetAcc *storage.Account, snap restrictionSnapshot, newQuota *storage.QuotaState) (VerificationTransitionResult, error) {
+	var result VerificationTransitionResult
+	txFn := getPoolTransaction()
+	err := txFn(func(pool *storage.Pool) error {
+		current := storage.FindAccount(pool, &storage.Account{ID: targetAcc.ID})
+		if current == nil {
+			return fmt.Errorf("account '%s' does not exist in pool", targetAcc.ID)
+		}
+		if snap.matches(current) {
+			current.Status = ""
+			current.ValidationURL = nil
+			current.RateLimitedUntil = nil
+			current.LastQuota = newQuota
+			if targetAcc.AccessToken != "" {
+				current.AccessToken = targetAcc.AccessToken
+			}
+			result.Cleared = true
+		} else {
+			result.Cleared = false
+		}
+		return nil
+	})
+	if err != nil {
+		return VerificationTransitionResult{}, err
+	}
+	return result, nil
+}
+
 // Quota callback types.
 type QuotaProberFunc func(account *storage.Account) (*storage.QuotaState, error)
 type QuotaFormatterFunc func(quota *storage.QuotaState)
 
 var (
-	quotaProber    QuotaProberFunc
-	quotaFormatter QuotaFormatterFunc
-	quotaMu        sync.RWMutex
+	quotaProber          QuotaProberFunc
+	quotaFormatter       QuotaFormatterFunc
+	quotaMu              sync.RWMutex
+	persistAccountFields = auth.PersistAccountFields
+	poolTransaction      = storage.PoolTransaction
+	beforeClearHook      func(accountID string)
 )
+
+// SetBeforeClearHook sets an optional callback invoked immediately before the CAS clear transaction.
+func SetBeforeClearHook(hook func(accountID string)) {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	beforeClearHook = hook
+}
+
+func getBeforeClearHook() func(accountID string) {
+	quotaMu.RLock()
+	defer quotaMu.RUnlock()
+	return beforeClearHook
+}
+
+// SetPoolTransaction allows tests to intercept storage pool transactions.
+func SetPoolTransaction(fn func(func(*storage.Pool) error) error) {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	if fn == nil {
+		poolTransaction = storage.PoolTransaction
+	} else {
+		poolTransaction = fn
+	}
+}
+
+func getPoolTransaction() func(func(*storage.Pool) error) error {
+	quotaMu.RLock()
+	defer quotaMu.RUnlock()
+	return poolTransaction
+}
+
+func isAccountFieldsPersisterReplaced() bool {
+	quotaMu.RLock()
+	defer quotaMu.RUnlock()
+	return reflect.ValueOf(persistAccountFields).Pointer() != reflect.ValueOf(auth.PersistAccountFields).Pointer()
+}
+
+// SetAccountFieldsPersister allows tests to inject persistence failure.
+func SetAccountFieldsPersister(fn func(account *storage.Account, updateTokens, updateStatus, updateQuota bool) error) {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	if fn == nil {
+		persistAccountFields = auth.PersistAccountFields
+	} else {
+		persistAccountFields = fn
+	}
+}
+
+func getAccountFieldsPersister() func(account *storage.Account, updateTokens, updateStatus, updateQuota bool) error {
+	quotaMu.RLock()
+	defer quotaMu.RUnlock()
+	return persistAccountFields
+}
 
 // SetQuotaProber sets optional callbacks to probe/format quota during account management operations.
 func SetQuotaProber(prober QuotaProberFunc, formatter QuotaFormatterFunc) {
@@ -866,11 +1008,52 @@ func VerifyAccount(target string) (*storage.Account, string, error) {
 		return nil, "", errors.New("account not found")
 	}
 
+	wasValidationRequired := targetAcc.Status == "validation_required"
+	var snap restrictionSnapshot
+	if wasValidationRequired {
+		snap = snapshotAccount(targetAcc)
+	}
+
 	prober, _ := getQuotaProber()
 	if prober != nil {
-		if q, err := prober(targetAcc); err == nil && q != nil {
+		origURL := targetAcc.ValidationURL
+		origRLU := targetAcc.RateLimitedUntil
+
+		if wasValidationRequired {
+			targetAcc.Status = ""
+		}
+
+		q, probeErr := prober(targetAcc)
+		if probeErr != nil || q == nil {
+			if wasValidationRequired {
+				targetAcc.Status = "validation_required"
+				targetAcc.ValidationURL = origURL
+				targetAcc.RateLimitedUntil = origRLU
+			}
+		} else {
 			targetAcc.LastQuota = q
-			_ = auth.PersistAccountFields(targetAcc, true, true, true)
+			if wasValidationRequired && targetAcc.Status == "" {
+				if hook := getBeforeClearHook(); hook != nil {
+					hook(targetAcc.ID)
+				}
+
+				if isAccountFieldsPersisterReplaced() {
+					persistFn := getAccountFieldsPersister()
+					if err := persistFn(targetAcc, true, true, true); err != nil {
+						return nil, "", fmt.Errorf("failed to persist account verification status: %w", err)
+					}
+				}
+
+				_, err := clearValidationRestrictionCAS(targetAcc, snap, q)
+				if err != nil {
+					return nil, "", fmt.Errorf("failed to persist account verification status: %w", err)
+				}
+			} else {
+				persistFn := getAccountFieldsPersister()
+				if err := persistFn(targetAcc, true, true, true); err != nil {
+					return nil, "", fmt.Errorf("failed to persist account verification status: %w", err)
+				}
+			}
 		}
 	}
 

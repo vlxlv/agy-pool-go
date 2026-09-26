@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
 	"github.com/vlxlv/agy-pool-go/internal/installer"
+	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
 func setupCLITestEnv(t *testing.T) (string, func()) {
@@ -150,5 +153,123 @@ func TestDoctorCmd_BehaviorUnchanged(t *testing.T) {
 	}
 	if !strings.Contains(out, "Native Binary:") {
 		t.Errorf("doctor output missing Native Binary check, got: %s", out)
+	}
+}
+
+func TestVerifyCmd_SuccessClearsRestriction(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	fraction := 0.85
+	accounts.SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { accounts.SetQuotaProber(nil, nil) })
+
+	vURL := "https://accounts.google.com/verify?id=test_url"
+	cooldown := float64(time.Now().Unix() + 86400)
+	pool := storage.NewEmptyPool()
+	acc1 := &storage.Account{
+		ID:    "acc_1",
+		Name:  "Primary",
+		Email: "primary@example.com",
+	}
+	acc := &storage.Account{
+		ID:               "acc_2",
+		Name:             "Backup",
+		Email:            "backup@example.com",
+		Status:           "validation_required",
+		ValidationURL:    &vURL,
+		RateLimitedUntil: &cooldown,
+	}
+	pool.Accounts = []*storage.Account{acc1, acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"verify", "2"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("verify expected exit 0, got %d, stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Verification is not required for Backup.") {
+		t.Fatalf("expected healthy message for Backup, got: %q", out)
+	}
+	if strings.Contains(out, "backup@example.com") {
+		t.Fatalf("email leaked in output: %q", out)
+	}
+
+	// Confirm state.db was updated
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "" {
+		t.Fatalf("persisted Status = %q, want empty", stored.Status)
+	}
+	if stored.ValidationURL != nil {
+		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)
+	}
+	if stored.RateLimitedUntil != nil {
+		t.Fatalf("persisted RateLimitedUntil = %v, want nil", stored.RateLimitedUntil)
+	}
+}
+
+func TestVerifyCmd_PersistenceFailureExitsNonZero(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	fraction := 0.85
+	accounts.SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { accounts.SetQuotaProber(nil, nil) })
+
+	accounts.SetAccountFieldsPersister(func(account *storage.Account, updateTokens, updateStatus, updateQuota bool) error {
+		return errors.New("injected storage persistence error")
+	})
+	t.Cleanup(func() { accounts.SetAccountFieldsPersister(nil) })
+
+	vURL := "https://accounts.google.com/verify?id=test_url"
+	cooldown := float64(time.Now().Unix() + 86400)
+	pool := storage.NewEmptyPool()
+	acc1 := &storage.Account{
+		ID:    "acc_1",
+		Name:  "Primary",
+		Email: "primary@example.com",
+	}
+	acc := &storage.Account{
+		ID:               "acc_2",
+		Name:             "Backup",
+		Email:            "backup@example.com",
+		Status:           "validation_required",
+		ValidationURL:    &vURL,
+		RateLimitedUntil: &cooldown,
+	}
+	pool.Accounts = []*storage.Account{acc1, acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"verify", "2"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit on persistence failure, got 0")
+	}
+	out := stdout.String()
+	if strings.Contains(out, "Verification is not required") {
+		t.Fatalf("unexpected success message on persistence failure: %q", out)
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "Verification could not be completed") {
+		t.Fatalf("expected error message on stderr, got: %q", errOut)
+	}
+	if !strings.Contains(errOut, "injected storage persistence error") {
+		t.Fatalf("expected root cause error on stderr, got: %q", errOut)
 	}
 }

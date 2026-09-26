@@ -259,7 +259,13 @@ func TestQueryQuota_PreservesAuthRestrictions(t *testing.T) {
 	for _, status := range []string{"validation_required", "auth_error"} {
 		t.Run(status, func(t *testing.T) {
 			validationURL := "https://accounts.google.com/verify?id=" + status
-			acc := &storage.Account{ID: "restricted-" + status, Status: status, ValidationURL: &validationURL}
+			cooldown := float64(time.Now().Unix() + 86400)
+			acc := &storage.Account{
+				ID:               "restricted-" + status,
+				Status:           status,
+				ValidationURL:    &validationURL,
+				RateLimitedUntil: &cooldown,
+			}
 			pool := &storage.Pool{Accounts: []*storage.Account{acc}}
 			if err := storage.SavePool(pool); err != nil {
 				t.Fatalf("SavePool failed: %v", err)
@@ -278,6 +284,9 @@ func TestQueryQuota_PreservesAuthRestrictions(t *testing.T) {
 			}
 			if stored.ValidationURL == nil || *stored.ValidationURL != validationURL {
 				t.Fatalf("validation URL = %v, want %q", stored.ValidationURL, validationURL)
+			}
+			if stored.RateLimitedUntil == nil || *stored.RateLimitedUntil != cooldown {
+				t.Fatalf("rate limited until = %v, want %v", stored.RateLimitedUntil, cooldown)
 			}
 			if stored.LastQuota == nil || stored.LastQuota.Gemini5H == nil || stored.LastQuota.Gemini5H.Fraction == nil || *stored.LastQuota.Gemini5H.Fraction != 0.7 {
 				t.Fatalf("quota was not updated: %+v", stored.LastQuota)

@@ -613,21 +613,23 @@ func TestLogin_NativeSyncFailureIsObservable(t *testing.T) {
 	}
 }
 
-func TestVerifyAccount(t *testing.T) {
+func TestVerifyAccount_ClearsValidationRequiredOnSuccess(t *testing.T) {
 	setupIsolatedTestDir(t)
+	fraction := 0.8
 	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
-		fraction := 0.8
 		return &storage.QuotaState{RemainingFraction: &fraction}, nil
 	}, nil)
 	t.Cleanup(func() { SetQuotaProber(nil, nil) })
 
 	pool := storage.NewEmptyPool()
 	vURL := "https://accounts.google.com/verify?id=xyz"
+	cooldown := float64(time.Now().Unix() + 86400)
 	acc1 := &storage.Account{
-		ID:            "acc_1",
-		Email:         "verify_me@gmail.com",
-		Status:        "validation_required",
-		ValidationURL: &vURL,
+		ID:               "acc_1",
+		Email:            "verify_me@gmail.com",
+		Status:           "validation_required",
+		ValidationURL:    &vURL,
+		RateLimitedUntil: &cooldown,
 	}
 	acc2 := &storage.Account{
 		ID:     "acc_2",
@@ -635,18 +637,47 @@ func TestVerifyAccount(t *testing.T) {
 		Status: "",
 	}
 	pool.Accounts = []*storage.Account{acc1, acc2}
-	_ = storage.SavePool(pool)
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
 
-	// Acc 1 requires validation
 	acc, formattedURL, err := VerifyAccount("acc_1")
 	if err != nil {
 		t.Fatalf("VerifyAccount acc_1 failed: %v", err)
 	}
-	if acc.ID != "acc_1" {
-		t.Fatalf("got acc %q, want 'acc_1'", acc.ID)
+	if formattedURL != "" {
+		t.Fatalf("expected empty formattedURL, got %q", formattedURL)
 	}
-	if formattedURL != "https://accounts.google.com/verify?id=xyz&Email=verify_me%40gmail.com" {
-		t.Fatalf("formattedURL = %q, want email query parameter appended", formattedURL)
+	if acc.Status != "" {
+		t.Fatalf("expected acc.Status to be empty, got %q", acc.Status)
+	}
+	if acc.ValidationURL != nil {
+		t.Fatalf("expected acc.ValidationURL to be nil, got %v", acc.ValidationURL)
+	}
+	if acc.RateLimitedUntil != nil {
+		t.Fatalf("expected acc.RateLimitedUntil to be nil, got %v", acc.RateLimitedUntil)
+	}
+
+	// Verify authoritative persisted state in storage
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc1)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "" {
+		t.Fatalf("persisted Status = %q, want empty", stored.Status)
+	}
+	if stored.ValidationURL != nil {
+		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)
+	}
+	if stored.RateLimitedUntil != nil {
+		t.Fatalf("persisted RateLimitedUntil = %v, want nil", stored.RateLimitedUntil)
+	}
+	if stored.LastQuota == nil || stored.LastQuota.RemainingFraction == nil || *stored.LastQuota.RemainingFraction != 0.8 {
+		t.Fatalf("persisted LastQuota unexpected: %+v", stored.LastQuota)
 	}
 
 	// Acc 2 is already verified
@@ -659,6 +690,545 @@ func TestVerifyAccount(t *testing.T) {
 	}
 	if accGood.ID != "acc_2" {
 		t.Fatalf("got acc %q, want 'acc_2'", accGood.ID)
+	}
+}
+
+func TestVerifyAccount_DoesNotClearAuthError(t *testing.T) {
+	setupIsolatedTestDir(t)
+	fraction := 0.8
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{
+		ID:     "acc_auth_err",
+		Email:  "auth_err@gmail.com",
+		Status: "auth_error",
+	}
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	resAcc, formattedURL, err := VerifyAccount("acc_auth_err")
+	if err != nil {
+		t.Fatalf("VerifyAccount failed: %v", err)
+	}
+	if formattedURL != "" {
+		t.Fatalf("expected empty formattedURL, got %q", formattedURL)
+	}
+	if resAcc.Status != "auth_error" {
+		t.Fatalf("expected resAcc.Status to remain auth_error, got %q", resAcc.Status)
+	}
+
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "auth_error" {
+		t.Fatalf("persisted Status = %q, want auth_error", stored.Status)
+	}
+}
+
+func TestVerifyAccount_PreservesRestrictionWhenValidationStillRequired(t *testing.T) {
+	setupIsolatedTestDir(t)
+	challengeURL := "https://accounts.google.com/verify?id=fresh_challenge"
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		account.Status = "validation_required"
+		account.ValidationURL = &challengeURL
+		fraction := 0.0
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	pool := storage.NewEmptyPool()
+	oldURL := "https://accounts.google.com/verify?id=old"
+	cooldown := float64(time.Now().Unix() + 86400)
+	acc := &storage.Account{
+		ID:               "acc_val_req",
+		Email:            "val_req@gmail.com",
+		Status:           "validation_required",
+		ValidationURL:    &oldURL,
+		RateLimitedUntil: &cooldown,
+	}
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	resAcc, formattedURL, err := VerifyAccount("acc_val_req")
+	if err != nil {
+		t.Fatalf("VerifyAccount failed: %v", err)
+	}
+	if !strings.Contains(formattedURL, "fresh_challenge") {
+		t.Fatalf("expected formattedURL containing fresh_challenge, got %q", formattedURL)
+	}
+	if !strings.Contains(formattedURL, "Email=val_req%40gmail.com") {
+		t.Fatalf("expected email appended to URL, got %q", formattedURL)
+	}
+	if resAcc.Status != "validation_required" {
+		t.Fatalf("expected Status to remain validation_required, got %q", resAcc.Status)
+	}
+
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "validation_required" {
+		t.Fatalf("persisted Status = %q, want validation_required", stored.Status)
+	}
+	if stored.ValidationURL == nil || *stored.ValidationURL != challengeURL {
+		t.Fatalf("persisted ValidationURL = %v, want %q", stored.ValidationURL, challengeURL)
+	}
+}
+
+func TestVerifyAccount_PreservesRestrictionOnProbeError(t *testing.T) {
+	setupIsolatedTestDir(t)
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return nil, errors.New("temporary network timeout")
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	pool := storage.NewEmptyPool()
+	vURL := "https://accounts.google.com/verify?id=existing_url"
+	cooldown := float64(time.Now().Unix() + 86400)
+	acc := &storage.Account{
+		ID:               "acc_err",
+		Email:            "err_acc@gmail.com",
+		Status:           "validation_required",
+		ValidationURL:    &vURL,
+		RateLimitedUntil: &cooldown,
+	}
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	resAcc, formattedURL, err := VerifyAccount("acc_err")
+	if err != nil {
+		t.Fatalf("VerifyAccount failed: %v", err)
+	}
+	if !strings.Contains(formattedURL, "existing_url") {
+		t.Fatalf("expected formattedURL containing existing_url, got %q", formattedURL)
+	}
+	if resAcc.Status != "validation_required" {
+		t.Fatalf("expected Status to remain validation_required, got %q", resAcc.Status)
+	}
+
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "validation_required" {
+		t.Fatalf("persisted Status = %q, want validation_required", stored.Status)
+	}
+	if stored.ValidationURL == nil || *stored.ValidationURL != vURL {
+		t.Fatalf("persisted ValidationURL = %v, want %q", stored.ValidationURL, vURL)
+	}
+	if stored.RateLimitedUntil == nil || *stored.RateLimitedUntil != cooldown {
+		t.Fatalf("persisted RateLimitedUntil = %v, want %v", stored.RateLimitedUntil, cooldown)
+	}
+}
+
+func TestVerifyAccount_PersistenceFailureReturnsError(t *testing.T) {
+	setupIsolatedTestDir(t)
+	fraction := 0.8
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	SetAccountFieldsPersister(func(account *storage.Account, updateTokens, updateStatus, updateQuota bool) error {
+		return errors.New("simulated disk write failure")
+	})
+	t.Cleanup(func() { SetAccountFieldsPersister(nil) })
+
+	pool := storage.NewEmptyPool()
+	vURL := "https://accounts.google.com/verify?id=xyz"
+	acc := &storage.Account{
+		ID:            "acc_fail",
+		Email:         "fail@gmail.com",
+		Status:        "validation_required",
+		ValidationURL: &vURL,
+	}
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	resAcc, formattedURL, err := VerifyAccount("acc_fail")
+	if err == nil {
+		t.Fatal("expected error on persistence failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated disk write failure") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	if formattedURL != "" {
+		t.Fatalf("expected empty formattedURL on error, got %q", formattedURL)
+	}
+	if resAcc != nil {
+		t.Fatalf("expected nil account on persistence error, got %+v", resAcc)
+	}
+}
+
+func TestVerifyAccount_DoesNotClearNewerValidationRestriction(t *testing.T) {
+	setupIsolatedTestDir(t)
+	fraction := 0.8
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	urlA := "https://accounts.google.com/verify?id=val_A"
+	cooldownA := float64(time.Now().Unix() + 86400)
+	acc := &storage.Account{
+		ID:               "acc_race_1",
+		Email:            "race1@gmail.com",
+		AccessToken:      "token_gen_A",
+		RefreshToken:     "refresh_gen_A",
+		Status:           "validation_required",
+		ValidationURL:    &urlA,
+		RateLimitedUntil: &cooldownA,
+	}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	beforeClearReached := make(chan struct{})
+	resumeClear := make(chan struct{})
+	SetBeforeClearHook(func(id string) {
+		close(beforeClearReached)
+		<-resumeClear
+	})
+	t.Cleanup(func() { SetBeforeClearHook(nil) })
+
+	type verifyResult struct {
+		acc          *storage.Account
+		formattedURL string
+		err          error
+	}
+	resultChan := make(chan verifyResult, 1)
+
+	go func() {
+		resAcc, fURL, err := VerifyAccount("acc_race_1")
+		resultChan <- verifyResult{acc: resAcc, formattedURL: fURL, err: err}
+	}()
+
+	// Wait until VerifyAccount finishes probe and pauses before clear transaction
+	<-beforeClearReached
+
+	// Concurrent writer stores validation B
+	urlB := "https://accounts.google.com/verify?id=val_B"
+	cooldownB := float64(time.Now().Unix() + 99999)
+	err := storage.PoolTransaction(func(p *storage.Pool) error {
+		stored := storage.FindAccount(p, acc)
+		if stored == nil {
+			return errors.New("account not found")
+		}
+		stored.Status = "validation_required"
+		stored.ValidationURL = &urlB
+		stored.RateLimitedUntil = &cooldownB
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("concurrent writer failed: %v", err)
+	}
+
+	// Resume clear transaction in VerifyAccount
+	close(resumeClear)
+
+	res := <-resultChan
+	if res.err != nil {
+		t.Fatalf("VerifyAccount returned unexpected error: %v", res.err)
+	}
+
+	// Verify that newer validation B survived in memory return
+	if !strings.Contains(res.formattedURL, "val_B") {
+		t.Fatalf("expected formattedURL containing val_B, got: %q", res.formattedURL)
+	}
+	if res.acc == nil || res.acc.Status != "validation_required" {
+		t.Fatalf("expected account Status to remain validation_required, got %+v", res.acc)
+	}
+
+	// Verify that newer validation B survived in authoritative storage
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "validation_required" {
+		t.Fatalf("persisted Status = %q, want validation_required", stored.Status)
+	}
+	if stored.ValidationURL == nil || *stored.ValidationURL != urlB {
+		t.Fatalf("persisted ValidationURL = %v, want %q", stored.ValidationURL, urlB)
+	}
+	if stored.RateLimitedUntil == nil || *stored.RateLimitedUntil != cooldownB {
+		t.Fatalf("persisted RateLimitedUntil = %v, want %v", stored.RateLimitedUntil, cooldownB)
+	}
+}
+
+func TestVerifyAccount_DoesNotClearConcurrentAuthError(t *testing.T) {
+	setupIsolatedTestDir(t)
+	fraction := 0.8
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	urlA := "https://accounts.google.com/verify?id=val_A"
+	cooldownA := float64(time.Now().Unix() + 86400)
+	acc := &storage.Account{
+		ID:               "acc_race_2",
+		Email:            "race2@gmail.com",
+		AccessToken:      "token_gen_A",
+		RefreshToken:     "refresh_gen_A",
+		Status:           "validation_required",
+		ValidationURL:    &urlA,
+		RateLimitedUntil: &cooldownA,
+	}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	beforeClearReached := make(chan struct{})
+	resumeClear := make(chan struct{})
+	SetBeforeClearHook(func(id string) {
+		close(beforeClearReached)
+		<-resumeClear
+	})
+	t.Cleanup(func() { SetBeforeClearHook(nil) })
+
+	type verifyResult struct {
+		acc          *storage.Account
+		formattedURL string
+		err          error
+	}
+	resultChan := make(chan verifyResult, 1)
+
+	go func() {
+		resAcc, fURL, err := VerifyAccount("acc_race_2")
+		resultChan <- verifyResult{acc: resAcc, formattedURL: fURL, err: err}
+	}()
+
+	// Wait until VerifyAccount finishes probe and pauses before clear transaction
+	<-beforeClearReached
+
+	// Concurrent writer stores auth_error
+	err := storage.PoolTransaction(func(p *storage.Pool) error {
+		stored := storage.FindAccount(p, acc)
+		if stored == nil {
+			return errors.New("account not found")
+		}
+		stored.Status = "auth_error"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("concurrent writer failed: %v", err)
+	}
+
+	// Resume clear transaction in VerifyAccount
+	close(resumeClear)
+
+	res := <-resultChan
+	if res.err != nil {
+		t.Fatalf("VerifyAccount returned unexpected error: %v", res.err)
+	}
+
+	// Verify that auth_error survived in authoritative storage
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "auth_error" {
+		t.Fatalf("persisted Status = %q, want auth_error", stored.Status)
+	}
+}
+
+func TestVerifyAccount_DoesNotClearAfterCredentialGenerationChange(t *testing.T) {
+	setupIsolatedTestDir(t)
+	fraction := 0.8
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	urlA := "https://accounts.google.com/verify?id=val_A"
+	cooldownA := float64(time.Now().Unix() + 86400)
+	acc := &storage.Account{
+		ID:               "acc_race_3",
+		Email:            "race3@gmail.com",
+		AccessToken:      "token_gen_A",
+		RefreshToken:     "refresh_gen_A",
+		Status:           "validation_required",
+		ValidationURL:    &urlA,
+		RateLimitedUntil: &cooldownA,
+	}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	beforeClearReached := make(chan struct{})
+	resumeClear := make(chan struct{})
+	SetBeforeClearHook(func(id string) {
+		close(beforeClearReached)
+		<-resumeClear
+	})
+	t.Cleanup(func() { SetBeforeClearHook(nil) })
+
+	type verifyResult struct {
+		acc          *storage.Account
+		formattedURL string
+		err          error
+	}
+	resultChan := make(chan verifyResult, 1)
+
+	go func() {
+		resAcc, fURL, err := VerifyAccount("acc_race_3")
+		resultChan <- verifyResult{acc: resAcc, formattedURL: fURL, err: err}
+	}()
+
+	// Wait until VerifyAccount finishes probe and pauses before clear transaction
+	<-beforeClearReached
+
+	// Concurrent writer updates token generation B
+	err := storage.PoolTransaction(func(p *storage.Pool) error {
+		stored := storage.FindAccount(p, acc)
+		if stored == nil {
+			return errors.New("account not found")
+		}
+		stored.AccessToken = "token_gen_B"
+		stored.RefreshToken = "refresh_gen_B"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("concurrent writer failed: %v", err)
+	}
+
+	// Resume clear transaction in VerifyAccount
+	close(resumeClear)
+
+	res := <-resultChan
+	if res.err != nil {
+		t.Fatalf("VerifyAccount returned unexpected error: %v", res.err)
+	}
+
+	// Verify that restriction was NOT cleared by stale verification result
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "validation_required" {
+		t.Fatalf("persisted Status = %q, want validation_required", stored.Status)
+	}
+	if stored.ValidationURL == nil || *stored.ValidationURL != urlA {
+		t.Fatalf("persisted ValidationURL = %v, want %q", stored.ValidationURL, urlA)
+	}
+	if stored.RefreshToken != "refresh_gen_B" {
+		t.Fatalf("persisted RefreshToken = %q, want refresh_gen_B", stored.RefreshToken)
+	}
+}
+
+func TestVerifyAccount_AllowsSelfAccessTokenRefresh(t *testing.T) {
+	setupIsolatedTestDir(t)
+	fraction := 0.85
+	SetQuotaProber(func(account *storage.Account) (*storage.QuotaState, error) {
+		// Mock prober simulates normal access token self-refresh
+		account.AccessToken = "access_token_new"
+		return &storage.QuotaState{RemainingFraction: &fraction}, nil
+	}, nil)
+	t.Cleanup(func() { SetQuotaProber(nil, nil) })
+
+	urlA := "https://accounts.google.com/verify?id=val_A"
+	cooldownA := float64(time.Now().Unix() + 86400)
+	acc := &storage.Account{
+		ID:               "acc_self_refresh",
+		Email:            "self_refresh@gmail.com",
+		AccessToken:      "access_token_old",
+		RefreshToken:     "refresh_token_R",
+		Status:           "validation_required",
+		ValidationURL:    &urlA,
+		RateLimitedUntil: &cooldownA,
+	}
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{acc}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	resAcc, formattedURL, err := VerifyAccount("acc_self_refresh")
+	if err != nil {
+		t.Fatalf("VerifyAccount failed: %v", err)
+	}
+	if formattedURL != "" {
+		t.Fatalf("expected empty formattedURL, got %q", formattedURL)
+	}
+	if resAcc == nil {
+		t.Fatal("expected non-nil account")
+	}
+	if resAcc.Status != "" {
+		t.Fatalf("expected Status to be empty, got %q", resAcc.Status)
+	}
+	if resAcc.ValidationURL != nil {
+		t.Fatalf("expected ValidationURL to be nil, got %v", resAcc.ValidationURL)
+	}
+	if resAcc.RateLimitedUntil != nil {
+		t.Fatalf("expected RateLimitedUntil to be nil, got %v", resAcc.RateLimitedUntil)
+	}
+
+	// Verify authoritative persisted state in state.db
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, acc)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "" {
+		t.Fatalf("persisted Status = %q, want empty", stored.Status)
+	}
+	if stored.ValidationURL != nil {
+		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)
+	}
+	if stored.RateLimitedUntil != nil {
+		t.Fatalf("persisted RateLimitedUntil = %v, want nil", stored.RateLimitedUntil)
+	}
+	if stored.AccessToken != "access_token_new" {
+		t.Fatalf("persisted AccessToken = %q, want access_token_new", stored.AccessToken)
+	}
+	if stored.RefreshToken != "refresh_token_R" {
+		t.Fatalf("persisted RefreshToken = %q, want refresh_token_R", stored.RefreshToken)
 	}
 }
 
