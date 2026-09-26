@@ -1,0 +1,290 @@
+name: Verification State Machine
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'internal/accounts/**'
+      - 'internal/auth/**'
+      - 'internal/quota/**'
+      - 'internal/storage/**'
+      - 'internal/cli/**'
+      - '.github/workflows/verification-state-machine.yml'
+
+  pull_request:
+    branches: [main]
+    paths:
+      - 'internal/accounts/**'
+      - 'internal/auth/**'
+      - 'internal/quota/**'
+      - 'internal/storage/**'
+      - 'internal/cli/**'
+      - '.github/workflows/verification-state-machine.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-state-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: '1'
+
+jobs:
+  verification-state-machine:
+    name: Verification State Machine
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+
+          UNFORMATTED="$(gofmt -l .)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following files require gofmt:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+      - name: Verify production paths are absent from test HOME
+        run: |
+          set -euo pipefail
+
+          TEST_HOME="${RUNNER_TEMP}/agy-test-home"
+          mkdir -p "${TEST_HOME}"
+
+          test ! -e "${TEST_HOME}/.gemini"
+          test ! -e "${TEST_HOME}/.local/share/agy-pool"
+          test ! -e "${TEST_HOME}/.config/agy-pool"
+
+          echo "Synthetic HOME is clean:"
+          echo "${TEST_HOME}"
+
+      - name: Run account verification state-machine tests
+        env:
+          HOME: ${{ runner.temp }}/agy-test-home
+        run: |
+          set -euo pipefail
+
+          go test ./internal/accounts/... \
+            -count=1 \
+            -run 'Test.*(Verify|Verification|Restriction|Validation|AuthError|StateMachine).*'
+
+      - name: Run quota restriction ownership tests
+        env:
+          HOME: ${{ runner.temp }}/agy-test-home
+        run: |
+          set -euo pipefail
+
+          go test ./internal/quota/... \
+            -count=1 \
+            -run 'Test.*(Validation|AuthError|Restriction|Verify|Verification|StateMachine).*'
+
+      - name: Run CLI verification tests
+        env:
+          HOME: ${{ runner.temp }}/agy-test-home
+        run: |
+          set -euo pipefail
+
+          go test ./internal/cli/... \
+            -count=1 \
+            -run 'Test.*(Verify|Verification|Restriction).*'
+
+      - name: Run scheduler restriction invariant tests
+        env:
+          HOME: ${{ runner.temp }}/agy-test-home
+        run: |
+          set -euo pipefail
+
+          go test ./internal/scheduler/... \
+            -count=1 \
+            -run 'Test.*(Restricted|Restriction|Validation|AuthError).*'
+
+      - name: Run focused verification package regression
+        env:
+          HOME: ${{ runner.temp }}/agy-test-home
+        run: |
+          set -euo pipefail
+
+          go test \
+            ./internal/accounts/... \
+            ./internal/auth/... \
+            ./internal/quota/... \
+            ./internal/storage/... \
+            ./internal/cli/... \
+            ./internal/scheduler/... \
+            -count=1
+
+      - name: Check repository diff
+        run: |
+          set -euo pipefail
+          git diff --check
+
+      - name: Ensure tests did not dirty repository
+        run: |
+          set -euo pipefail
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Tests modified the repository:"
+            git status --short
+            exit 1
+          fi
+
+  verification-race:
+    name: Verification State Machine Race
+    runs-on: ubuntu-latest
+    needs: verification-state-machine
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Prepare isolated HOME
+        run: |
+          set -euo pipefail
+
+          TEST_HOME="${RUNNER_TEMP}/agy-race-home"
+          mkdir -p "${TEST_HOME}"
+
+          test ! -e "${TEST_HOME}/.gemini"
+          test ! -e "${TEST_HOME}/.local/share/agy-pool"
+          test ! -e "${TEST_HOME}/.config/agy-pool"
+
+      - name: Run account verification race tests
+        env:
+          HOME: ${{ runner.temp }}/agy-race-home
+        run: |
+          set -euo pipefail
+
+          go test -race ./internal/accounts/... \
+            -count=1 \
+            -run 'Test.*(Verify|Verification|Restriction|Validation|AuthError|StateMachine).*'
+
+      - name: Run quota restriction race tests
+        env:
+          HOME: ${{ runner.temp }}/agy-race-home
+        run: |
+          set -euo pipefail
+
+          go test -race ./internal/quota/... \
+            -count=1 \
+            -run 'Test.*(Validation|AuthError|Restriction|Verify|Verification|StateMachine).*'
+
+      - name: Run CLI verification race tests
+        env:
+          HOME: ${{ runner.temp }}/agy-race-home
+        run: |
+          set -euo pipefail
+
+          go test -race ./internal/cli/... \
+            -count=1 \
+            -run 'Test.*(Verify|Verification|Restriction).*'
+
+      - name: Run focused verification race regression
+        env:
+          HOME: ${{ runner.temp }}/agy-race-home
+        run: |
+          set -euo pipefail
+
+          go test -race \
+            ./internal/accounts/... \
+            ./internal/auth/... \
+            ./internal/quota/... \
+            ./internal/storage/... \
+            ./internal/cli/... \
+            ./internal/scheduler/... \
+            -count=1
+
+      - name: Ensure race tests did not dirty repository
+        run: |
+          set -euo pipefail
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Race tests modified the repository:"
+            git status --short
+            exit 1
+          fi
+
+  full-regression:
+    name: Full Regression
+    runs-on: ubuntu-latest
+    needs:
+      - verification-state-machine
+      - verification-race
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Prepare isolated HOME
+        run: |
+          set -euo pipefail
+
+          TEST_HOME="${RUNNER_TEMP}/agy-full-home"
+          mkdir -p "${TEST_HOME}"
+
+          test ! -e "${TEST_HOME}/.gemini"
+          test ! -e "${TEST_HOME}/.local/share/agy-pool"
+          test ! -e "${TEST_HOME}/.config/agy-pool"
+
+      - name: Run full unit test suite
+        env:
+          HOME: ${{ runner.temp }}/agy-full-home
+        run: |
+          set -euo pipefail
+          go test ./... -count=1
+
+      - name: Run full race detector suite
+        env:
+          HOME: ${{ runner.temp }}/agy-full-home
+        run: |
+          set -euo pipefail
+          go test -race ./... -count=1
+
+      - name: Final repository cleanliness check
+        run: |
+          set -euo pipefail
+
+          git diff --check
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Test suite modified the repository:"
+            git status --short
+            exit 1
+          fi
