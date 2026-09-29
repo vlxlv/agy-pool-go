@@ -67,9 +67,9 @@ func truncateRunes(s string, maxRunes int) string {
 }
 
 // ListAccounts renders the account pool dashboard with responsive layout based on terminal width.
-func ListAccounts(target string, stdout, stderr io.Writer) {
+func ListAccounts(target string, stdout, stderr io.Writer, showEmail ...bool) {
 	width := terminalWidth(stdout)
-	ListAccountsWithWidth(target, width, stdout, stderr)
+	ListAccountsWithWidth(target, width, stdout, stderr, showEmail...)
 }
 
 func getAccountState(acc *storage.Account, pool *storage.Pool, nowTS int64) (string, string) {
@@ -146,7 +146,12 @@ func extractResetTimes(acc *storage.Account, q *storage.QuotaState, nowTS int64)
 }
 
 // ListAccountsWithWidth renders the account pool dashboard for a specific terminal width.
-func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer) {
+func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer, showEmailOpt ...bool) {
+	showEmail := false
+	if len(showEmailOpt) > 0 {
+		showEmail = showEmailOpt[0]
+	}
+
 	if width <= 0 {
 		width = 100
 	}
@@ -194,24 +199,24 @@ func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer) {
 	nowTS := time.Now().Unix()
 
 	if width >= 96 {
-		renderWideQuotaDashboard(accList, pool, gatewayStatus, nowTS, stdout)
+		renderWideQuotaDashboard(accList, pool, gatewayStatus, nowTS, showEmail, stdout)
 		return
 	}
 
 	if width >= 60 {
-		renderCompactQuotaDashboard(accList, pool, nowTS, width, stdout)
+		renderCompactQuotaDashboard(accList, pool, nowTS, width, showEmail, stdout)
 		return
 	}
 
 	if width >= 40 {
-		renderMobileQuotaDashboard(accList, pool, daemonRunning, nowTS, width, stdout)
+		renderMobileQuotaDashboard(accList, pool, daemonRunning, nowTS, width, showEmail, stdout)
 		return
 	}
 
-	renderVeryNarrowQuotaDashboard(accList, pool, nowTS, width, stdout)
+	renderVeryNarrowQuotaDashboard(accList, pool, nowTS, width, showEmail, stdout)
 }
 
-func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, gatewayStatus string, nowTS int64, stdout io.Writer) {
+func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, gatewayStatus string, nowTS int64, showEmail bool, stdout io.Writer) {
 	sep := strings.Repeat("=", 68)
 	subSep := strings.Repeat("-", 68)
 
@@ -253,6 +258,10 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			stateClr, state, clrReset,
 			strings.Repeat(" ", spaces),
 			right)
+
+		if showEmail && acc.Email != "" {
+			fmt.Fprintf(stdout, "  %sEmail: %s%s\n", clrDim, acc.Email, clrReset)
+		}
 
 		status := acc.Status
 		if status == storage.StatusDisabled {
@@ -347,7 +356,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 	fmt.Fprintf(stdout, "%s\n\n", sep)
 }
 
-func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, stdout io.Writer) {
+func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, showEmail bool, stdout io.Writer) {
 	fmt.Fprintln(stdout)
 	for i, acc := range accList {
 		if acc == nil {
@@ -369,6 +378,10 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 
 		fmt.Fprintf(stdout, "  %s%s%s · %s%s%s · hits %d\n",
 			clrBold, dispName, clrReset, stateClr, state, clrReset, hits)
+
+		if showEmail && acc.Email != "" {
+			fmt.Fprintf(stdout, "  %sEmail: %s%s\n", clrDim, acc.Email, clrReset)
+		}
 
 		status := acc.Status
 		if status == storage.StatusDisabled {
@@ -457,7 +470,7 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 	fmt.Fprintln(stdout)
 }
 
-func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, daemonRunning bool, nowTS int64, width int, stdout io.Writer) {
+func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, daemonRunning bool, nowTS int64, width int, showEmail bool, stdout io.Writer) {
 	fmt.Fprintln(stdout)
 	for i, acc := range accList {
 		if acc == nil {
@@ -478,6 +491,10 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 		}
 
 		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
+
+		if showEmail && acc.Email != "" {
+			fmt.Fprintf(stdout, "%sEmail: %s%s\n", clrDim, acc.Email, clrReset)
+		}
 
 		status := acc.Status
 		if status == storage.StatusDisabled {
@@ -564,7 +581,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 	}
 }
 
-func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, stdout io.Writer) {
+func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, showEmail bool, stdout io.Writer) {
 	fmt.Fprintln(stdout)
 	for i, acc := range accList {
 		if acc == nil {
@@ -585,6 +602,14 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 		}
 
 		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
+
+		if showEmail && acc.Email != "" {
+			emailLine := fmt.Sprintf("%sEmail: %s%s", clrDim, acc.Email, clrReset)
+			if utf8.RuneCountInString(emailLine) > width {
+				emailLine = truncateRunes(emailLine, width)
+			}
+			fmt.Fprintln(stdout, emailLine)
+		}
 
 		status := acc.Status
 		if status == storage.StatusDisabled {

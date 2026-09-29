@@ -568,6 +568,26 @@ func TestTop_Privacy(t *testing.T) {
 	}
 }
 
+func TestTop_ShowEmail(t *testing.T) {
+	now := time.Now().Unix()
+	pool := createTestTopPool(now)
+	stats := createTestRuntimeStats(12345)
+	info := &daemon.DaemonInfo{PID: 12345}
+
+	for _, w := range []int{120, 80, 50, 35} {
+		frame := RenderTopFrame(pool, stats, info, true, "", 2*time.Second, w, false, true)
+		if !strings.Contains(frame, "Email: ") {
+			t.Errorf("expected Email: to be displayed with showEmail=true at width %d\nGot:\n%s", w, frame)
+		}
+	}
+
+	// Without showEmail, verify it does not contain Email:
+	frameNoEmail := RenderTopFrame(pool, stats, info, true, "", 2*time.Second, 100, false, false)
+	if strings.Contains(frameNoEmail, "Email: ") {
+		t.Errorf("top frame without showEmail should not contain Email:\nGot:\n%s", frameNoEmail)
+	}
+}
+
 func TestTop_AliasesAndFlags(t *testing.T) {
 	tmpDir, cleanup := setupCLITestEnv(t)
 	defer cleanup()

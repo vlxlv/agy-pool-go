@@ -516,3 +516,82 @@ func TestAuditRouting_RemovedFromCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestListCmd_ShowEmail(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	pool := &storage.Pool{
+		Version: 1,
+		Accounts: []*storage.Account{
+			{
+				ID:        "acc_1",
+				Email:     "myuser@example.com",
+				Name:      "DevAccount",
+				Status:    "ready",
+				CreatedAt: &now,
+			},
+		},
+	}
+	_ = storage.SavePool(pool)
+
+	for _, flag := range []string{"-e", "--email", "--show-email"} {
+		var stdout, stderr bytes.Buffer
+		code := Main([]string{"list", flag}, nil, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("expected exit 0 on list %s, got %d", flag, code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "EMAIL") {
+			t.Errorf("expected EMAIL column header for list %s, got: %s", flag, out)
+		}
+		if !strings.Contains(out, "myuser@example.com") {
+			t.Errorf("expected email address in list %s, got: %s", flag, out)
+		}
+	}
+}
+
+func TestQuotaCmd_ShowEmail(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	frac := 0.8
+	pool := &storage.Pool{
+		Version: 1,
+		Accounts: []*storage.Account{
+			{
+				ID:        "acc_1",
+				Email:     "dev@example.com",
+				Name:      "DevAccount",
+				Status:    "ready",
+				CreatedAt: &now,
+				LastQuota: &storage.QuotaState{RemainingFraction: &frac},
+			},
+		},
+	}
+	_ = storage.SavePool(pool)
+
+	for _, flag := range []string{"-e", "--email", "--show-email"} {
+		var stdout, stderr bytes.Buffer
+		code := Main([]string{"quota", flag}, nil, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("expected exit 0 on quota %s, got %d", flag, code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "Email: dev@example.com") {
+			t.Errorf("expected 'Email: dev@example.com' in quota %s, got: %s", flag, out)
+		}
+	}
+
+	// Without flag, email must NOT appear
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"quota"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on quota, got %d", code)
+	}
+	if strings.Contains(stdout.String(), "dev@example.com") {
+		t.Errorf("quota without flag must not contain email, got: %s", stdout.String())
+	}
+}

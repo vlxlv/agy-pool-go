@@ -37,6 +37,7 @@ type TopOptions struct {
 	Interval      time.Duration
 	Width         int
 	Once          bool
+	ShowEmail     bool
 	ForceRaw      bool // For testing raw mode rendering and alternate screen buffer transitions
 	Stdin         io.Reader
 	Stdout        io.Writer
@@ -64,10 +65,14 @@ func TopCmd(stdin io.Reader, stdout, stderr io.Writer, args ...string) int {
 	interval := DefaultTopRate
 	targetAccount := ""
 	once := false
+	showEmail := false
 
 	for i := 0; i < len(rem); i++ {
 		a := rem[i]
-		if a == "-i" || a == "--interval" {
+		if a == "-e" || a == "--email" || a == "--show-email" {
+			showEmail = true
+			continue
+		} else if a == "-i" || a == "--interval" {
 			if i+1 < len(rem) {
 				if d, err := time.ParseDuration(rem[i+1]); err == nil {
 					interval = d
@@ -119,6 +124,7 @@ func TopCmd(stdin io.Reader, stdout, stderr io.Writer, args ...string) int {
 		TargetAccount: targetAccount,
 		Interval:      interval,
 		Once:          once,
+		ShowEmail:     showEmail,
 		Stdin:         stdin,
 		Stdout:        stdout,
 		Stderr:        stderr,
@@ -141,7 +147,7 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 		if w <= 0 {
 			w = terminalWidth(opts.Stdout)
 		}
-		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, opts.Interval, w, false)
+		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, opts.Interval, w, false, opts.ShowEmail)
 		fmt.Fprint(opts.Stdout, frame)
 		return 0
 	}
@@ -234,7 +240,7 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 		if w <= 0 {
 			w = terminalWidth(opts.Stdout)
 		}
-		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, interval, w, refreshBanner)
+		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, interval, w, refreshBanner, opts.ShowEmail)
 		var buf bytes.Buffer
 		buf.WriteString("\033[H")
 		lines := strings.Split(frame, "\n")
@@ -324,6 +330,7 @@ func renderCurrentSnapshot(
 	interval time.Duration,
 	width int,
 	refreshBanner bool,
+	showEmailOpt ...bool,
 ) string {
 	status, info, _ := daemon.CheckInstanceStatus(ctx)
 	daemonRunning := (status == daemon.StatusRunningSameInstance || status == daemon.StatusOutdatedBinary)
@@ -336,8 +343,13 @@ func renderCurrentSnapshot(
 		}
 	}
 
+	showEmail := false
+	if len(showEmailOpt) > 0 {
+		showEmail = showEmailOpt[0]
+	}
+
 	pool, _ := storage.LoadPool()
-	return RenderTopFrame(pool, stats, info, daemonRunning, targetAccount, interval, width, refreshBanner)
+	return RenderTopFrame(pool, stats, info, daemonRunning, targetAccount, interval, width, refreshBanner, showEmail)
 }
 
 // RenderTopFrame formats a complete, responsive dashboard frame as a string.
@@ -351,7 +363,13 @@ func RenderTopFrame(
 	interval time.Duration,
 	width int,
 	refreshBanner bool,
+	showEmailOpt ...bool,
 ) string {
+	showEmail := false
+	if len(showEmailOpt) > 0 {
+		showEmail = showEmailOpt[0]
+	}
+
 	if width <= 0 {
 		width = 100
 	}
@@ -373,13 +391,13 @@ func RenderTopFrame(
 			sb.WriteString(fmt.Sprintf("\n%s[Error] The selected account was not found.%s\n\n", clrRed, clrReset))
 		} else {
 			if width >= 96 {
-				renderAccountsWide(&sb, accList, pool, stats, nowTS, width)
+				renderAccountsWide(&sb, accList, pool, stats, nowTS, width, showEmail)
 			} else if width >= 60 {
-				renderAccountsCompact(&sb, accList, pool, stats, nowTS, width)
+				renderAccountsCompact(&sb, accList, pool, stats, nowTS, width, showEmail)
 			} else if width >= 40 {
-				renderAccountsMobile(&sb, accList, pool, stats, nowTS, width)
+				renderAccountsMobile(&sb, accList, pool, stats, nowTS, width, showEmail)
 			} else {
-				renderAccountsVeryNarrow(&sb, accList, pool, stats, nowTS, width)
+				renderAccountsVeryNarrow(&sb, accList, pool, stats, nowTS, width, showEmail)
 			}
 		}
 	}
@@ -523,6 +541,7 @@ func renderAccountsWide(
 	stats *daemon.RuntimeStats,
 	nowTS int64,
 	width int,
+	showEmail bool,
 ) {
 	targetCol := 64
 	if width > 68 {
@@ -565,6 +584,10 @@ func renderAccountsWide(
 			stateClr, state, clrReset,
 			strings.Repeat(" ", spaces),
 			right))
+
+		if showEmail && acc.Email != "" {
+			sb.WriteString(fmt.Sprintf("  %sEmail: %s%s\n", clrDim, acc.Email, clrReset))
+		}
 
 		renderAccountDetailsWide(sb, acc, nowTS, i)
 
@@ -660,6 +683,7 @@ func renderAccountsCompact(
 	stats *daemon.RuntimeStats,
 	nowTS int64,
 	width int,
+	showEmail bool,
 ) {
 	sb.WriteString("\n")
 	for i, acc := range accList {
@@ -683,6 +707,10 @@ func renderAccountsCompact(
 
 		sb.WriteString(fmt.Sprintf("  %s%s%s · %s%s%s · in-flight %d · hits %d\n",
 			clrBold, dispName, clrReset, stateClr, state, clrReset, inFlight, hits))
+
+		if showEmail && acc.Email != "" {
+			sb.WriteString(fmt.Sprintf("  %sEmail: %s%s\n", clrDim, acc.Email, clrReset))
+		}
 
 		renderAccountDetailsCompact(sb, acc, nowTS, width, i)
 
@@ -789,6 +817,7 @@ func renderAccountsMobile(
 	stats *daemon.RuntimeStats,
 	nowTS int64,
 	width int,
+	showEmail bool,
 ) {
 	sb.WriteString("\n")
 	for i, acc := range accList {
@@ -811,6 +840,10 @@ func renderAccountsMobile(
 		}
 
 		sb.WriteString(fmt.Sprintf("%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset))
+
+		if showEmail && acc.Email != "" {
+			sb.WriteString(fmt.Sprintf("%sEmail: %s%s\n", clrDim, acc.Email, clrReset))
+		}
 
 		status := acc.Status
 		if status == storage.StatusDisabled {
@@ -879,6 +912,7 @@ func renderAccountsVeryNarrow(
 	stats *daemon.RuntimeStats,
 	nowTS int64,
 	width int,
+	showEmail bool,
 ) {
 	sb.WriteString("\n")
 	for i, acc := range accList {
@@ -904,6 +938,14 @@ func renderAccountsVeryNarrow(
 				state = TruncateVisible(state, width)
 			}
 			sb.WriteString(fmt.Sprintf("%s%s%s\n", stateClr, state, clrReset))
+		}
+
+		if showEmail && acc.Email != "" {
+			emailLine := fmt.Sprintf("%sEmail: %s%s", clrDim, acc.Email, clrReset)
+			if VisibleWidth(emailLine) > width {
+				emailLine = TruncateVisible(emailLine, width)
+			}
+			sb.WriteString(emailLine + "\n")
 		}
 
 		status := acc.Status

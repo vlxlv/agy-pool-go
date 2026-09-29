@@ -100,8 +100,13 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 	}
 
 	target := ""
-	if len(rem) > 0 {
-		target = rem[0]
+	showEmail := false
+	for _, a := range rem {
+		if a == "-e" || a == "--email" || a == "--show-email" {
+			showEmail = true
+		} else if !strings.HasPrefix(a, "-") && target == "" {
+			target = a
+		}
 	}
 
 	pool, err := storage.LoadPool()
@@ -145,7 +150,11 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 	}
 
 	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "#\tACCOUNT ID\tNAME\tSTATUS\tHITS\t5H QUOTA\tWEEKLY QUOTA\tLAST USED")
+	if showEmail {
+		fmt.Fprintln(w, "#\tACCOUNT ID\tNAME\tEMAIL\tSTATUS\tHITS\t5H QUOTA\tWEEKLY QUOTA\tLAST USED")
+	} else {
+		fmt.Fprintln(w, "#\tACCOUNT ID\tNAME\tSTATUS\tHITS\t5H QUOTA\tWEEKLY QUOTA\tLAST USED")
+	}
 
 	for i, a := range accList {
 		if a == nil {
@@ -204,8 +213,17 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 		lastUsedStr := formatLastUsed(a.LastUsedAt, nowTS)
 		dispName := accounts.DisplayAccountName(a)
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			i+1, a.ID, dispName, statusStr, hits, q5Str, gwStr, lastUsedStr)
+		if showEmail {
+			emailStr := a.Email
+			if emailStr == "" {
+				emailStr = "--"
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				i+1, a.ID, dispName, emailStr, statusStr, hits, q5Str, gwStr, lastUsedStr)
+		} else {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				i+1, a.ID, dispName, statusStr, hits, q5Str, gwStr, lastUsedStr)
+		}
 	}
 	w.Flush()
 
@@ -238,11 +256,16 @@ func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
 		return 2
 	}
 	target := ""
-	if len(rem) > 0 {
-		target = rem[0]
+	showEmail := false
+	for _, a := range rem {
+		if a == "-e" || a == "--email" || a == "--show-email" {
+			showEmail = true
+		} else if !strings.HasPrefix(a, "-") && target == "" {
+			target = a
+		}
 	}
 
-	ListAccounts(target, stdout, stderr)
+	ListAccounts(target, stdout, stderr, showEmail)
 	return 0
 }
 
