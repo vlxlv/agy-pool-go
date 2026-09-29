@@ -448,6 +448,61 @@ func TestTop_KeyHandling_Q_Plus_Minus_R(t *testing.T) {
 	}
 }
 
+func TestTop_RawMode_AlternateScreenAndCRLF(t *testing.T) {
+	tmpDir, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	pool := &storage.Pool{
+		Version: 1,
+		Accounts: []*storage.Account{
+			{ID: "acc_raw", Name: "RawTest", Status: "ready", CreatedAt: &now},
+		},
+	}
+	_ = storage.SavePool(pool)
+
+	ctx, err := daemon.ResolveInstanceContext(tmpDir, "", 8899, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in := bytes.NewBufferString("q\n")
+	var out, errBuf bytes.Buffer
+
+	opts := TopOptions{
+		Interval: 2 * time.Second,
+		Width:    100,
+		Once:     false,
+		ForceRaw: true,
+		Stdin:    in,
+		Stdout:   &out,
+		Stderr:   &errBuf,
+	}
+
+	exitCode := RunTop(ctx, opts)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	outStr := out.String()
+	// Must enter alternate screen buffer at start
+	if !strings.Contains(outStr, "\033[?1049h") {
+		t.Errorf("expected alternate screen sequence \\033[?1049h at start, got:\n%s", outStr)
+	}
+	// Must exit alternate screen buffer on quit
+	if !strings.Contains(outStr, "\033[?1049l") {
+		t.Errorf("expected alternate screen exit sequence \\033[?1049l on quit, got:\n%s", outStr)
+	}
+	// Must have line-clearing and CRLF in raw mode to prevent staircasing and ghost text
+	if !strings.Contains(outStr, "\033[K\r\n") {
+		t.Errorf("expected lines to end with \\033[K\\r\\n in raw mode, got:\n%s", outStr)
+	}
+	// Must restore cursor
+	if !strings.Contains(outStr, "\033[?25h") {
+		t.Errorf("expected cursor show sequence \\033[?25h on quit")
+	}
+}
+
 func TestTop_TerminalRestorationOnPanic(t *testing.T) {
 	var out bytes.Buffer
 

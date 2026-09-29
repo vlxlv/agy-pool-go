@@ -37,6 +37,7 @@ type TopOptions struct {
 	Interval      time.Duration
 	Width         int
 	Once          bool
+	ForceRaw      bool // For testing raw mode rendering and alternate screen buffer transitions
 	Stdin         io.Reader
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -159,6 +160,8 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 		}
 	}
 
+	isRaw := (restoreTerm != nil || opts.ForceRaw)
+
 	// Safe cleanup guarantees terminal state and cursor are always restored
 	var cleanupOnce sync.Once
 	cleanup := func() {
@@ -166,7 +169,11 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 			if restoreTerm != nil {
 				restoreTerm()
 			}
-			fmt.Fprint(opts.Stdout, "\033[?25h\033[0m\n")
+			if isRaw {
+				fmt.Fprint(opts.Stdout, "\033[?25h\033[?1049l\033[0m")
+			} else {
+				fmt.Fprint(opts.Stdout, "\033[?25h\033[0m\n")
+			}
 		})
 	}
 	defer cleanup()
@@ -179,8 +186,12 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 		}
 	}()
 
-	// Hide cursor on start
-	fmt.Fprint(opts.Stdout, "\033[?25l")
+	// Hide cursor on start, and enter alternate screen buffer if interactive / raw terminal
+	if isRaw {
+		fmt.Fprint(opts.Stdout, "\033[?1049h\033[H\033[?25l")
+	} else {
+		fmt.Fprint(opts.Stdout, "\033[?25l")
+	}
 
 	sigChan := make(chan os.Signal, 4)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -226,7 +237,18 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, interval, w, refreshBanner)
 		var buf bytes.Buffer
 		buf.WriteString("\033[H")
-		buf.WriteString(frame)
+		lines := strings.Split(frame, "\n")
+		for i, line := range lines {
+			buf.WriteString(line)
+			buf.WriteString("\033[K")
+			if i < len(lines)-1 {
+				if isRaw {
+					buf.WriteString("\r\n")
+				} else {
+					buf.WriteString("\n")
+				}
+			}
+		}
 		buf.WriteString("\033[J")
 		_, _ = opts.Stdout.Write(buf.Bytes())
 	}
@@ -573,7 +595,14 @@ func renderAccountDetailsWide(sb *strings.Builder, acc *storage.Account, nowTS i
 	}
 
 	if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
-		sb.WriteString(fmt.Sprintf("  %s[Reserve Protection: Low Quota]%s\n", clrYellow, clrReset))
+		capState := quota.ComputeCapacityState(acc, float64(nowTS))
+		reason := "Weekly quota low"
+		if capState.Q5Known && capState.Q5 != nil && *capState.Q5 <= scheduler.FiveHourReserveFloor {
+			reason = "5H quota <= 15%"
+		} else if capState.Q7Known && capState.Q7 != nil {
+			reason = fmt.Sprintf("Weekly quota <= %.1f%%", scheduler.DynamicWeeklyReserveFloor(capState.R7)*100)
+		}
+		sb.WriteString(fmt.Sprintf("  %s[Reserve Protection: %s, held back from pool routing]%s\n", clrYellow, reason, clrReset))
 	}
 
 	q := acc.LastQuota
