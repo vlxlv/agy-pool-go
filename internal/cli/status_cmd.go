@@ -15,6 +15,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
+	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -157,9 +158,17 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 			(gwFrac != nil && *gwFrac <= config.DepletedThreshold)
 
 		statusStr := "Ready"
-		if a.Status == "validation_required" {
+		if a.Status == storage.StatusDisabled {
+			if isActive {
+				statusStr = "CLI Base (Disabled)"
+			} else {
+				statusStr = "Disabled"
+			}
+		} else if a.Status == storage.StatusValidationRequired {
 			statusStr = "⚠ Verify Required"
-		} else if a.Status == "auth_error" {
+		} else if a.Status == storage.StatusVerificationPending {
+			statusStr = "Verification Pending"
+		} else if a.Status == storage.StatusAuthError {
 			statusStr = "✖ Auth Error"
 		} else if isCooling {
 			if isActive {
@@ -173,17 +182,23 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 			} else {
 				statusStr = "Exhausted"
 			}
+		} else if scheduler.IsReserveCandidate(a, float64(nowTS)) {
+			if isActive {
+				statusStr = "CLI Base (Protected)"
+			} else {
+				statusStr = "Protected"
+			}
 		} else if isActive {
 			statusStr = "CLI Base"
 		}
 
 		hits := a.GetHits()
 		q5Str := "--"
-		if q5Frac != nil {
+		if q5Frac != nil && a.Status != storage.StatusDisabled {
 			q5Str = fmt.Sprintf("%.1f%%", *q5Frac*100)
 		}
 		gwStr := "--"
-		if gwFrac != nil {
+		if gwFrac != nil && a.Status != storage.StatusDisabled {
 			gwStr = fmt.Sprintf("%.1f%%", *gwFrac*100)
 		}
 		lastUsedStr := formatLastUsed(a.LastUsedAt, nowTS)
@@ -202,6 +217,7 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 		strat, activeID, len(pool.Accounts))
 	return 0
 }
+
 
 // QuotaCmd renders the dedicated full quota dashboard with progress bars and reset countdowns.
 func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
@@ -368,7 +384,7 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 			remFraction = *gwFrac
 		}
 
-		if a.Status == "validation_required" || a.Status == "auth_error" {
+		if a.Status == storage.StatusValidationRequired || a.Status == storage.StatusVerificationPending || a.Status == storage.StatusAuthError || a.Status == storage.StatusDisabled {
 			restrictedCnt++
 		} else if a.RateLimitedUntil != nil && *a.RateLimitedUntil > float64(nowTS) {
 			cooldownCnt++

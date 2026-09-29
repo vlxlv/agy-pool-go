@@ -20,6 +20,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
+	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 	"golang.org/x/term"
 )
@@ -80,10 +81,19 @@ func getAccountState(acc *storage.Account, pool *storage.Pool, nowTS int64) (str
 	isActive := pool.ActiveAccountID != nil && acc.ID == *pool.ActiveAccountID
 
 	status := acc.Status
-	if status == "validation_required" {
+	if status == storage.StatusDisabled {
+		if isActive {
+			return "CLI Base (Disabled)", clrDim
+		}
+		return "Disabled", clrDim
+	}
+	if status == storage.StatusValidationRequired {
 		return "Verify Required", clrYellow
 	}
-	if status == "auth_error" {
+	if status == storage.StatusVerificationPending {
+		return "Verification Pending", clrCyan
+	}
+	if status == storage.StatusAuthError {
 		return "Auth Error", clrRed
 	}
 	if isCooling {
@@ -97,6 +107,12 @@ func getAccountState(acc *storage.Account, pool *storage.Pool, nowTS int64) (str
 			return "CLI Base (Exhausted)", clrRed
 		}
 		return "Exhausted", clrDim
+	}
+	if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
+		if isActive {
+			return "CLI Base (Protected)", clrYellow
+		}
+		return "Protected", clrYellow
 	}
 	if isActive {
 		return "CLI Base", clrGreen
@@ -239,12 +255,26 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			right)
 
 		status := acc.Status
-		if status == "validation_required" {
+		if status == storage.StatusDisabled {
+			fmt.Fprintf(stdout, "  %sDisabled (Excluded from pool routing)%s\n", clrDim, clrReset)
+		} else if status == storage.StatusValidationRequired {
 			fmt.Fprintf(stdout, "  %sAction Required (Verify needed)%s\n", clrYellow, clrReset)
 			fmt.Fprintf(stdout, "  Run: agy-pool verify %d\n", i+1)
-		} else if status == "auth_error" {
+		} else if status == storage.StatusVerificationPending {
+			fmt.Fprintf(stdout, "  %sWaiting for generation confirmation%s\n", clrCyan, clrReset)
+		} else if status == storage.StatusAuthError {
 			fmt.Fprintf(stdout, "  %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
 		} else {
+			if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
+				capState := quota.ComputeCapacityState(acc, float64(nowTS))
+				reason := "Weekly quota low"
+				if capState.Q5Known && capState.Q5 != nil && *capState.Q5 <= scheduler.FiveHourReserveFloor {
+					reason = "5H quota <= 15%"
+				} else if capState.Q7Known && capState.Q7 != nil {
+					reason = fmt.Sprintf("Weekly quota <= %.1f%%", scheduler.DynamicWeeklyReserveFloor(capState.R7)*100)
+				}
+				fmt.Fprintf(stdout, "  %s[Reserve Protection: %s, held back from pool routing]%s\n", clrYellow, reason, clrReset)
+			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
@@ -310,6 +340,8 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 		clrCyan, clrReset, clrDim, clrReset)
 	fmt.Fprintf(stdout, " %s[Cooldown]%s %sRate Limited%s      %s[Exhausted] Quota Depleted%s\n",
 		clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
+	fmt.Fprintf(stdout, " %s[Protected]%s %sLow Quota Reserve%s   %s[Disabled] Excluded from Pool%s\n",
+		clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
 	fmt.Fprintf(stdout, " Strategy: %s%s%s | Gateway Proxy: %s\n",
 		clrBold, strat, clrReset, gatewayStatus)
 	fmt.Fprintf(stdout, "%s\n\n", sep)
@@ -339,12 +371,19 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 			clrBold, dispName, clrReset, stateClr, state, clrReset, hits)
 
 		status := acc.Status
-		if status == "validation_required" {
+		if status == storage.StatusDisabled {
+			fmt.Fprintf(stdout, "  %sDisabled (Excluded from pool routing)%s\n", clrDim, clrReset)
+		} else if status == storage.StatusValidationRequired {
 			fmt.Fprintf(stdout, "  %sAction Required (Verify needed)%s\n", clrYellow, clrReset)
 			fmt.Fprintf(stdout, "  Run: agy-pool verify %d\n", i+1)
-		} else if status == "auth_error" {
+		} else if status == storage.StatusVerificationPending {
+			fmt.Fprintf(stdout, "  %sWaiting for generation confirmation%s\n", clrCyan, clrReset)
+		} else if status == storage.StatusAuthError {
 			fmt.Fprintf(stdout, "  %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
 		} else {
+			if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
+				fmt.Fprintf(stdout, "  %s[Reserve Protection: Low Quota]%s\n", clrYellow, clrReset)
+			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
@@ -441,12 +480,19 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
 
 		status := acc.Status
-		if status == "validation_required" {
+		if status == storage.StatusDisabled {
+			fmt.Fprintf(stdout, "%sDisabled (Excluded from pool routing)%s\n", clrDim, clrReset)
+		} else if status == storage.StatusValidationRequired {
 			fmt.Fprintf(stdout, "%sAction Required (Verify needed)%s\n", clrYellow, clrReset)
 			fmt.Fprintf(stdout, "Run: agy-pool verify %d\n", i+1)
-		} else if status == "auth_error" {
+		} else if status == storage.StatusVerificationPending {
+			fmt.Fprintf(stdout, "%sWaiting for generation confirmation%s\n", clrCyan, clrReset)
+		} else if status == storage.StatusAuthError {
 			fmt.Fprintf(stdout, "%sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset)
 		} else {
+			if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
+				fmt.Fprintf(stdout, "%s[Reserve Protection: Low Quota]%s\n", clrYellow, clrReset)
+			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
@@ -541,10 +587,14 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
 
 		status := acc.Status
-		if status == "validation_required" {
+		if status == storage.StatusDisabled {
+			fmt.Fprintf(stdout, "%sDisabled%s\n", clrDim, clrReset)
+		} else if status == storage.StatusValidationRequired {
 			fmt.Fprintf(stdout, "%sVerify Needed%s\n", clrYellow, clrReset)
 			fmt.Fprintf(stdout, "agy-pool verify %d\n", i+1)
-		} else if status == "auth_error" {
+		} else if status == storage.StatusVerificationPending {
+			fmt.Fprintf(stdout, "%sWaiting for confirmation%s\n", clrCyan, clrReset)
+		} else if status == storage.StatusAuthError {
 			fmt.Fprintf(stdout, "%sAuth Error%s\n", clrRed, clrReset)
 		} else {
 			q := acc.LastQuota
@@ -610,6 +660,28 @@ func RemoveAccount(target string, stdout, stderr io.Writer) bool {
 		return false
 	}
 	fmt.Fprintf(stdout, "%s✓ Removed account %s from pool.%s\n", clrGreen, accounts.DisplayAccountName(acc), clrReset)
+	return true
+}
+
+// DisableAccount disables an account in the pool.
+func DisableAccount(target string, stdout, stderr io.Writer) bool {
+	acc, err := accounts.DisableAccount(target)
+	if err != nil || acc == nil {
+		fmt.Fprintf(stderr, "%s[Error] Could not disable the selected account.%s\n", clrRed, clrReset)
+		return false
+	}
+	fmt.Fprintf(stdout, "%s✓ Disabled account %s.%s\n", clrGreen, accounts.DisplayAccountName(acc), clrReset)
+	return true
+}
+
+// EnableAccount enables a previously disabled account in the pool.
+func EnableAccount(target string, stdout, stderr io.Writer) bool {
+	acc, err := accounts.EnableAccount(target)
+	if err != nil || acc == nil {
+		fmt.Fprintf(stderr, "%s[Error] Could not enable the selected account.%s\n", clrRed, clrReset)
+		return false
+	}
+	fmt.Fprintf(stdout, "%s✓ Enabled account %s.%s\n", clrGreen, accounts.DisplayAccountName(acc), clrReset)
 	return true
 }
 

@@ -483,6 +483,48 @@ func TestRenameAccount(t *testing.T) {
 	}
 }
 
+func TestDisableAndEnableAccount(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{ID: "acc_1", Email: "test@gmail.com"}
+	pool.Accounts = []*storage.Account{acc}
+	_ = storage.SavePool(pool)
+
+	// Non-existent target
+	if _, err := DisableAccount("acc_999"); err == nil {
+		t.Fatal("expected error on non-existent account")
+	}
+
+	// Disable
+	disabled, err := DisableAccount("acc_1")
+	if err != nil {
+		t.Fatalf("DisableAccount failed: %v", err)
+	}
+	if disabled.Status != storage.StatusDisabled {
+		t.Fatalf("got status %q, want %q", disabled.Status, storage.StatusDisabled)
+	}
+
+	loaded, _ := storage.LoadPool()
+	if loaded.Accounts[0].Status != storage.StatusDisabled {
+		t.Fatalf("loaded status = %q, want %q", loaded.Accounts[0].Status, storage.StatusDisabled)
+	}
+
+	// Enable
+	enabled, err := EnableAccount("acc_1")
+	if err != nil {
+		t.Fatalf("EnableAccount failed: %v", err)
+	}
+	if enabled.Status != "" {
+		t.Fatalf("got status %q, want empty", enabled.Status)
+	}
+
+	loaded, _ = storage.LoadPool()
+	if loaded.Accounts[0].Status != "" {
+		t.Fatalf("loaded status after enable = %q, want empty", loaded.Accounts[0].Status)
+	}
+}
+
 func TestImportCurrent(t *testing.T) {
 	setupIsolatedTestDir(t)
 
@@ -648,8 +690,8 @@ func TestVerifyAccount_ClearsValidationRequiredOnSuccess(t *testing.T) {
 	if formattedURL != "" {
 		t.Fatalf("expected empty formattedURL, got %q", formattedURL)
 	}
-	if acc.Status != "" {
-		t.Fatalf("expected acc.Status to be empty, got %q", acc.Status)
+	if acc.Status != storage.StatusVerificationPending {
+		t.Fatalf("expected acc.Status to be verification_pending, got %q", acc.Status)
 	}
 	if acc.ValidationURL != nil {
 		t.Fatalf("expected acc.ValidationURL to be nil, got %v", acc.ValidationURL)
@@ -667,8 +709,8 @@ func TestVerifyAccount_ClearsValidationRequiredOnSuccess(t *testing.T) {
 	if stored == nil {
 		t.Fatal("stored account not found")
 	}
-	if stored.Status != "" {
-		t.Fatalf("persisted Status = %q, want empty", stored.Status)
+	if stored.Status != storage.StatusVerificationPending {
+		t.Fatalf("persisted Status = %q, want verification_pending", stored.Status)
 	}
 	if stored.ValidationURL != nil {
 		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)
@@ -1196,8 +1238,8 @@ func TestVerifyAccount_AllowsSelfAccessTokenRefresh(t *testing.T) {
 	if resAcc == nil {
 		t.Fatal("expected non-nil account")
 	}
-	if resAcc.Status != "" {
-		t.Fatalf("expected Status to be empty, got %q", resAcc.Status)
+	if resAcc.Status != storage.StatusVerificationPending {
+		t.Fatalf("expected Status to be verification_pending, got %q", resAcc.Status)
 	}
 	if resAcc.ValidationURL != nil {
 		t.Fatalf("expected ValidationURL to be nil, got %v", resAcc.ValidationURL)
@@ -1215,8 +1257,8 @@ func TestVerifyAccount_AllowsSelfAccessTokenRefresh(t *testing.T) {
 	if stored == nil {
 		t.Fatal("stored account not found")
 	}
-	if stored.Status != "" {
-		t.Fatalf("persisted Status = %q, want empty", stored.Status)
+	if stored.Status != storage.StatusVerificationPending {
+		t.Fatalf("persisted Status = %q, want verification_pending", stored.Status)
 	}
 	if stored.ValidationURL != nil {
 		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)

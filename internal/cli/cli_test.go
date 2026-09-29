@@ -193,8 +193,8 @@ func TestVerifyCmd_SuccessClearsRestriction(t *testing.T) {
 		t.Fatalf("verify expected exit 0, got %d, stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "Verification is not required for Backup.") {
-		t.Fatalf("expected healthy message for Backup, got: %q", out)
+	if !strings.Contains(out, "Verification challenge cleared for Backup. Status is Verification Pending; waiting for generation confirmation.") {
+		t.Fatalf("expected pending message for Backup, got: %q", out)
 	}
 	if strings.Contains(out, "backup@example.com") {
 		t.Fatalf("email leaked in output: %q", out)
@@ -209,8 +209,8 @@ func TestVerifyCmd_SuccessClearsRestriction(t *testing.T) {
 	if stored == nil {
 		t.Fatal("stored account not found")
 	}
-	if stored.Status != "" {
-		t.Fatalf("persisted Status = %q, want empty", stored.Status)
+	if stored.Status != storage.StatusVerificationPending {
+		t.Fatalf("persisted Status = %q, want verification_pending", stored.Status)
 	}
 	if stored.ValidationURL != nil {
 		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)

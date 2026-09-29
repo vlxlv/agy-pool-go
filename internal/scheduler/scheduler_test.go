@@ -426,6 +426,58 @@ func TestMaxQuota_ReserveHeadroom_WeeklyProtection(t *testing.T) {
 	}
 }
 
+// Test DynamicWeeklyReserveFloor: when weekly reset is near (e.g. 22 hours away),
+// 9% weekly quota is NOT reserve (it is healthy and drained), but drops to reserve below the dynamic floor.
+func TestMaxQuota_DynamicWeeklyReserveFloor_NearReset(t *testing.T) {
+	now := 1789560000.0
+	// 22 hours remaining out of 7 days
+	nearResetTime := now + 22*3600
+
+	makeNearResetAcc := func(id string, q5, qw float64) *storage.Account {
+		lq := &storage.QuotaState{
+			UpdatedAt: int64Ptr(int64(now - 10)),
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  &q5,
+				ResetTime: "2026-09-16T17:00:00Z", // 5h reset
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  &qw,
+				ResetTime: nearResetTime,
+			},
+		}
+		return &storage.Account{
+			ID:        id,
+			Status:    "active",
+			LastQuota: lq,
+		}
+	}
+
+	// Backup: 5H 100%, Weekly 9%, Weekly resets in 22h -> Healthy (not reserve)!
+	backupAcc := makeNearResetAcc("backup", 1.0, 0.09)
+	if IsReserveCandidate(backupAcc, now) {
+		t.Fatalf("Backup (5H 100%%, WK 9%% with 22h to reset) should NOT be Reserve, dynamic floor must allow draining")
+	}
+
+	// If Weekly drops below dynamic floor (~1.3%), it enters reserve
+	criticalAcc := makeNearResetAcc("critical", 1.0, 0.01)
+	if !IsReserveCandidate(criticalAcc, now) {
+		t.Fatalf("Critical (WK 1%% <= dynamic floor ~1.3%%) should be Reserve")
+	}
+
+	// Schedulers orders Backup as Healthy along with other healthy accounts
+	otherHealthy := makeNearResetAcc("work", 0.80, 0.20)
+	ordered := OrderCandidates([]*storage.Account{backupAcc, otherHealthy}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(ordered))
+	}
+	// Both are eligible and healthy
+	for _, a := range ordered {
+		if IsReserveCandidate(a, now) {
+			t.Errorf("candidate %s should not be reserve", a.ID)
+		}
+	}
+}
+
 // Test F: 5H protection: 5H <= 15%, weekly healthy -> Reserve
 func TestMaxQuota_ReserveHeadroom_FiveHourProtection(t *testing.T) {
 	now := 1789560000.0
@@ -507,7 +559,8 @@ func TestRestrictedAccountsExcludedFromAllStrategies(t *testing.T) {
 	cooldown := &storage.Account{ID: "cooldown", RateLimitedUntil: &cooldownUntil, LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0.9)}}
 	validation := &storage.Account{ID: "validation", Status: "validation_required", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(1)}}
 	authError := &storage.Account{ID: "auth", Status: "auth_error", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(1)}}
-	all := []*storage.Account{ready, reserve, depleted, cooldown, validation, authError}
+	disabled := &storage.Account{ID: "disabled", Status: "disabled", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(1)}}
+	all := []*storage.Account{ready, reserve, depleted, cooldown, validation, authError, disabled}
 
 	lastID := "ready"
 	for _, strategy := range []string{config.StrategyMaxQuota, config.StrategyLeastUsed, config.StrategyRoundRobin} {

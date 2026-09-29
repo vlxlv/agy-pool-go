@@ -13,6 +13,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/diagnostics"
+	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
 // ANSI Color Codes matching Python reference
@@ -124,6 +125,24 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "disable":
+		if len(args) < 2 {
+			fmt.Fprintf(stderr, "usage: agy-pool disable [-h] target\nagy-pool disable: error: the following arguments are required: target\n")
+			return 2
+		}
+		if !DisableAccount(args[1], stdout, stderr) {
+			return 1
+		}
+		return 0
+	case "enable":
+		if len(args) < 2 {
+			fmt.Fprintf(stderr, "usage: agy-pool enable [-h] target\nagy-pool enable: error: the following arguments are required: target\n")
+			return 2
+		}
+		if !EnableAccount(args[1], stdout, stderr) {
+			return 1
+		}
+		return 0
 	case "switch":
 		target := "auto"
 		if len(args) > 1 {
@@ -153,7 +172,11 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		label := accounts.DisplayAccountName(acc)
 		if verificationURL == "" {
-			fmt.Fprintf(stdout, "Verification is not required for %s.\n", label)
+			if acc.Status == storage.StatusVerificationPending {
+				fmt.Fprintf(stdout, "Verification challenge cleared for %s. Status is Verification Pending; waiting for generation confirmation.\n", label)
+			} else {
+				fmt.Fprintf(stdout, "Verification is not required for %s.\n", label)
+			}
 			return 0
 		}
 		fmt.Fprintf(stdout, "Verification required for %s.\n", label)
@@ -183,14 +206,14 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "uninstall":
 		return handleUninstall(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n")
+		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
 		return 2
 	}
 }
 
 func printHelp(out io.Writer) {
-	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n\n")
+	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n\n")
 	fmt.Fprintf(out, "Antigravity Multi-Account Pool & Load Balancer for Termux & Linux\n\n")
 	fmt.Fprintf(out, "Examples:\n")
 	fmt.Fprintf(out, "  agy-pool login            Add/login a new Google account\n")
@@ -200,6 +223,8 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "  agy-pool status           Show gateway process and runtime summary\n")
 	fmt.Fprintf(out, "  agy-pool strategy         View or change load balancing strategy\n")
 	fmt.Fprintf(out, "  agy-pool rename 1 \"Work\"  Set friendly label for an account\n")
+	fmt.Fprintf(out, "  agy-pool disable 4        Disable an account in rotation pool\n")
+	fmt.Fprintf(out, "  agy-pool enable 4         Enable a previously disabled account\n")
 	fmt.Fprintf(out, "  agy-pool doctor           Run comprehensive system diagnostic check\n")
 	fmt.Fprintf(out, "  agy-pool switch auto      Switch CLI base account to the one with highest quota\n")
 	fmt.Fprintf(out, "  agy-pool export           Export accounts pool to a backup JSON file\n")

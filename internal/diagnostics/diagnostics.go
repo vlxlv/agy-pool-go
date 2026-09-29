@@ -687,7 +687,7 @@ func RunDoctor(out io.Writer) bool {
 				}
 				isCooling := a.RateLimitedUntil != nil && *a.RateLimitedUntil > float64(nowTS)
 
-				if a.Status == "validation_required" || a.Status == "auth_error" {
+				if a.Status == storage.StatusValidationRequired || a.Status == storage.StatusVerificationPending || a.Status == storage.StatusAuthError || a.Status == storage.StatusDisabled {
 					restrictedCnt++
 				} else if isCooling {
 					cooldownCnt++

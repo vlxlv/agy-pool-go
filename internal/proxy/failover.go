@@ -41,6 +41,11 @@ func RecordSuccess(account *storage.Account, isGeneration bool) error {
 			}
 			stored.GenCount = &hits
 			stored.LastUsedAt = &now
+
+			// Generation Confirmation: If account was verification_pending, atomically transition to Ready
+			if stored.Status == storage.StatusVerificationPending {
+				stored.Status = ""
+			}
 		}
 		activeID := ""
 		if pool.ActiveAccountID != nil {

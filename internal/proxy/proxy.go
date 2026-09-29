@@ -556,6 +556,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var candidates []*storage.Account
+	var pendingClaimedID string
 	if isGeneration {
 		if strategy == "round_robin" {
 			var rrErr error
@@ -565,6 +566,17 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
+		}
+
+		if confCand := SelectAndClaimConfirmationCandidate(pool.Accounts); confCand != nil {
+			pendingClaimedID = confCand.ID
+			defer func() {
+				if pendingClaimedID != "" {
+					ReleaseVerificationConfirmation(pendingClaimedID)
+					pendingClaimedID = ""
+				}
+			}()
+			candidates = append([]*storage.Account{confCand}, candidates...)
 		}
 	} else {
 		// Non-generation: prefer active account, deprioritize restricted/cooldown accounts
@@ -577,7 +589,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		sort.SliceStable(candidates, func(i, j int) bool {
 			score := func(a *storage.Account) int {
-				if a.Status == "validation_required" || a.Status == "auth_error" {
+				if scheduler.IsRestricted(a) {
 					return 3
 				}
 				if a.RateLimitedUntil != nil && *a.RateLimitedUntil > now {
@@ -611,7 +623,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if cand == nil {
 				continue
 			}
-			if cand.Status == "validation_required" || cand.Status == "auth_error" {
+			if scheduler.IsRestricted(cand) {
 				continue
 			}
 			if cand.RateLimitedUntil != nil && *cand.RateLimitedUntil > now {
@@ -637,7 +649,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	attempt := 0
 	hasFailedOver := false
 	for _, acc := range candidates {
-		if isGeneration && scheduler.IsRestricted(acc) {
+		if isGeneration && scheduler.IsRestricted(acc) && acc.ID != pendingClaimedID {
 			continue
 		}
 		attempt++
@@ -649,6 +661,10 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, selectionAuditCtx)
+		if acc.ID == pendingClaimedID {
+			ReleaseVerificationConfirmation(pendingClaimedID)
+			pendingClaimedID = ""
+		}
 		if isGeneration && (outcome.Reason == "TerminalSuccess" || outcome.Reason == "CommittedStreamSuccess") {
 			observability.RecordGenerationSuccess()
 			if hasFailedOver {

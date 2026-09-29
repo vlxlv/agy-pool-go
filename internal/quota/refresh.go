@@ -135,6 +135,9 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 	if account == nil {
 		return nil, errors.New("account is required")
 	}
+	if account.Status == storage.StatusDisabled {
+		return nil, errors.New("cannot refresh quota for disabled account")
+	}
 
 	observability.RecordQuotaRefreshAttempt()
 	defer func() {
@@ -414,7 +417,7 @@ func recomputeCompatQuota(q *storage.QuotaState) {
 // ScheduleQuotaRefresh starts one bounded, non-blocking refresh per account.
 // Returns true if a refresh was scheduled, or false if blocked by an in-flight refresh or active backoff.
 func ScheduleQuotaRefresh(account *storage.Account, now ...float64) bool {
-	if account == nil {
+	if account == nil || account.Status == storage.StatusDisabled {
 		return false
 	}
 	key := account.ID

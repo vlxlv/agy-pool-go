@@ -120,6 +120,14 @@ func (q QuotaState) MarshalJSON() ([]byte, error) {
 	return json.Marshal(combined)
 }
 
+// Account status constants.
+const (
+	StatusValidationRequired  = "validation_required"
+	StatusVerificationPending = "verification_pending"
+	StatusAuthError           = "auth_error"
+	StatusDisabled            = "disabled"
+)
+
 // Account represents a single user account record in the pool.
 type Account struct {
 	ID               string      `json:"id"`

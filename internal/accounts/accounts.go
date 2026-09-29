@@ -90,7 +90,7 @@ func clearValidationRestrictionCAS(targetAcc *storage.Account, snap restrictionS
 			return fmt.Errorf("account '%s' does not exist in pool", targetAcc.ID)
 		}
 		if snap.matches(current) {
-			current.Status = ""
+			current.Status = storage.StatusVerificationPending
 			current.ValidationURL = nil
 			current.RateLimitedUntil = nil
 			current.LastQuota = newQuota
@@ -509,6 +509,9 @@ func SwitchAccount(target string) (*storage.Account, error) {
 	isAuto := target == "" || target == "auto"
 	if isAuto && prober != nil {
 		for _, acc := range pool.Accounts {
+			if acc == nil || acc.Status == storage.StatusDisabled {
+				continue
+			}
 			q, err := prober(acc)
 			if err == nil && q != nil {
 				acc.LastQuota = q
@@ -526,7 +529,7 @@ func SwitchAccount(target string) (*storage.Account, error) {
 		nowTS := float64(time.Now().Unix())
 		selected = pool.Accounts[0]
 		score := func(a *storage.Account) (int, float64) {
-			if a.Status == "validation_required" || a.Status == "auth_error" {
+			if a.Status == storage.StatusValidationRequired || a.Status == storage.StatusVerificationPending || a.Status == storage.StatusAuthError || a.Status == storage.StatusDisabled {
 				return -2, 0
 			}
 			if a.RateLimitedUntil != nil && *a.RateLimitedUntil > nowTS {
@@ -591,6 +594,44 @@ func RenameAccount(target, newName string) (*storage.Account, error) {
 			return fmt.Errorf("account '%s' not found", target)
 		}
 		found.Name = name
+		updated = found
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// DisableAccount sets an account's status to disabled in the pool.
+func DisableAccount(target string) (*storage.Account, error) {
+	var updated *storage.Account
+	err := storage.PoolTransaction(func(pool *storage.Pool) error {
+		found := FindAccountByTarget(pool.Accounts, target)
+		if found == nil {
+			return fmt.Errorf("account '%s' not found", target)
+		}
+		found.Status = storage.StatusDisabled
+		updated = found
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// EnableAccount clears an account's disabled status in the pool.
+func EnableAccount(target string) (*storage.Account, error) {
+	var updated *storage.Account
+	err := storage.PoolTransaction(func(pool *storage.Pool) error {
+		found := FindAccountByTarget(pool.Accounts, target)
+		if found == nil {
+			return fmt.Errorf("account '%s' not found", target)
+		}
+		if found.Status == storage.StatusDisabled {
+			found.Status = ""
+		}
 		updated = found
 		return nil
 	})
@@ -994,7 +1035,7 @@ func VerifyAccount(target string) (*storage.Account, string, error) {
 		targetAcc = FindAccountByTarget(pool.Accounts, target)
 	} else {
 		for _, a := range pool.Accounts {
-			if a.Status == "validation_required" {
+			if a.Status == storage.StatusValidationRequired {
 				targetAcc = a
 				break
 			}
@@ -1008,7 +1049,7 @@ func VerifyAccount(target string) (*storage.Account, string, error) {
 		return nil, "", errors.New("account not found")
 	}
 
-	wasValidationRequired := targetAcc.Status == "validation_required"
+	wasValidationRequired := targetAcc.Status == storage.StatusValidationRequired
 	var snap restrictionSnapshot
 	if wasValidationRequired {
 		snap = snapshotAccount(targetAcc)
@@ -1026,13 +1067,16 @@ func VerifyAccount(target string) (*storage.Account, string, error) {
 		q, probeErr := prober(targetAcc)
 		if probeErr != nil || q == nil {
 			if wasValidationRequired {
-				targetAcc.Status = "validation_required"
+				targetAcc.Status = storage.StatusValidationRequired
 				targetAcc.ValidationURL = origURL
 				targetAcc.RateLimitedUntil = origRLU
 			}
 		} else {
 			targetAcc.LastQuota = q
 			if wasValidationRequired && targetAcc.Status == "" {
+				targetAcc.Status = storage.StatusVerificationPending
+				targetAcc.ValidationURL = nil
+				targetAcc.RateLimitedUntil = nil
 				if hook := getBeforeClearHook(); hook != nil {
 					hook(targetAcc.ID)
 				}
@@ -1066,7 +1110,7 @@ func VerifyAccount(target string) (*storage.Account, string, error) {
 		currentAcc = targetAcc
 	}
 
-	if currentAcc.Status != "validation_required" {
+	if currentAcc.Status != storage.StatusValidationRequired {
 		return currentAcc, "", nil
 	}
 

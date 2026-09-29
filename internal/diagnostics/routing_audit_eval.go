@@ -145,7 +145,7 @@ func EvaluateRoutingAttempt(
 		if cand == nil {
 			continue
 		}
-		if cand.Status == "validation_required" || cand.Status == "auth_error" {
+		if cand.Status == storage.StatusValidationRequired || cand.Status == storage.StatusVerificationPending || cand.Status == storage.StatusAuthError || cand.Status == storage.StatusDisabled {
 			continue
 		}
 		if cand.RateLimitedUntil != nil && *cand.RateLimitedUntil > now {

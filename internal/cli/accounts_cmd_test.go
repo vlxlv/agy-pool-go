@@ -64,6 +64,196 @@ func TestRenameCommand(t *testing.T) {
 	}
 }
 
+func TestDisableAndEnableCommand(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	// Missing arguments -> exit 2
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"disable"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2 on missing disable args, got %d", code)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"enable"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2 on missing enable args, got %d", code)
+	}
+
+	// Target not found -> exit 1
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"disable", "nonexistent"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1 on account not found, got %d", code)
+	}
+
+	// Add an account
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{ID: "acc_1", Name: "TestAcc", Email: "test@example.com"}
+	pool.Accounts = []*storage.Account{acc}
+	_ = storage.SavePool(pool)
+
+	// Disable acc_1
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"disable", "1"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on disable, got %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Disabled account TestAcc") {
+		t.Errorf("expected disabled success message, got: %s", stdout.String())
+	}
+
+	// Check status via getAccountState
+	loaded, _ := storage.LoadPool()
+	state, _ := getAccountState(loaded.Accounts[0], loaded, time.Now().Unix())
+	if state != "Disabled" {
+		t.Fatalf("got state %q, want 'Disabled'", state)
+	}
+
+	// Enable acc_1
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"enable", "acc_1"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on enable, got %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Enabled account TestAcc") {
+		t.Errorf("expected enabled success message, got: %s", stdout.String())
+	}
+
+	loaded, _ = storage.LoadPool()
+	state, _ = getAccountState(loaded.Accounts[0], loaded, time.Now().Unix())
+	if state != "Ready" {
+		t.Fatalf("got state %q, want 'Ready'", state)
+	}
+}
+
+func TestGetAccountState_Protected(t *testing.T) {
+	pool := storage.NewEmptyPool()
+	// Weekly quota <= 10% (0.08) => protected
+	qw := 0.08
+	q5 := 0.40
+	acc := &storage.Account{
+		ID:    "acc_1",
+		Name:  "Backup",
+		Email: "backup@example.com",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: &q5},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &qw},
+		},
+	}
+	pool.Accounts = []*storage.Account{acc}
+
+	state, _ := getAccountState(acc, pool, time.Now().Unix())
+	if state != "Protected" {
+		t.Fatalf("got state %q, want 'Protected'", state)
+	}
+}
+
+func TestDisabledAccount_QuotaAndListRendering(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	fullFrac := 1.0
+	lowFrac := 0.08
+	h5Frac := 0.40
+
+	accDisabled := &storage.Account{
+		ID:     "acc_1",
+		Name:   "DisabledAcc",
+		Status: storage.StatusDisabled,
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: &fullFrac,
+			Gemini5H:          &storage.QuotaWindow{Fraction: &fullFrac},
+			GeminiWeekly:      &storage.QuotaWindow{Fraction: &fullFrac},
+		},
+	}
+	accProtected := &storage.Account{
+		ID:     "acc_2",
+		Name:   "ProtectedAcc",
+		Status: "",
+		LastQuota: &storage.QuotaState{
+			RemainingFraction: &lowFrac,
+			Gemini5H:          &storage.QuotaWindow{Fraction: &h5Frac},
+			GeminiWeekly:      &storage.QuotaWindow{Fraction: &lowFrac},
+		},
+	}
+	activeID := "acc_2"
+	pool := &storage.Pool{
+		Version:         1,
+		ActiveAccountID: &activeID,
+		Strategy:        config.StrategyMaxQuota,
+		Accounts:        []*storage.Account{accDisabled, accProtected},
+	}
+	_ = storage.SavePool(pool)
+
+	// 1. Wide quota dashboard (width 100)
+	var stdout, stderr bytes.Buffer
+	ListAccountsWithWidth("", 100, &stdout, &stderr)
+	cleanWide := stripANSI(stdout.String())
+
+	if !strings.Contains(cleanWide, "Disabled (Excluded from pool routing)") {
+		t.Errorf("wide quota dashboard missing disabled notice, got:\n%s", cleanWide)
+	}
+	if !strings.Contains(cleanWide, "[Reserve Protection:") {
+		t.Errorf("wide quota dashboard missing reserve protection note, got:\n%s", cleanWide)
+	}
+	if !strings.Contains(cleanWide, "[Protected]") || !strings.Contains(cleanWide, "[Disabled]") {
+		t.Errorf("wide quota dashboard legend missing [Protected] or [Disabled], got:\n%s", cleanWide)
+	}
+
+	// 2. Compact quota dashboard (width 70)
+	stdout.Reset()
+	ListAccountsWithWidth("", 70, &stdout, &stderr)
+	cleanCompact := stripANSI(stdout.String())
+	if !strings.Contains(cleanCompact, "Disabled (Excluded from pool routing)") {
+		t.Errorf("compact quota dashboard missing disabled notice, got:\n%s", cleanCompact)
+	}
+	if !strings.Contains(cleanCompact, "[Reserve Protection: Low Quota]") {
+		t.Errorf("compact quota dashboard missing reserve protection note, got:\n%s", cleanCompact)
+	}
+
+	// 3. agy-pool list (ListCmd)
+	stdout.Reset()
+	code := ListCmd(&stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on list, got %d", code)
+	}
+	cleanList := stripANSI(stdout.String())
+	lines := strings.Split(strings.TrimSpace(cleanList), "\n")
+	foundDisabled := false
+	foundProtected := false
+	for _, line := range lines {
+		if strings.Contains(line, "DisabledAcc") {
+			foundDisabled = true
+			if !strings.Contains(line, "Disabled") {
+				t.Errorf("expected Disabled status for DisabledAcc, line: %s", line)
+			}
+			// Both 5H and Weekly quota should be "--"
+			fields := strings.Fields(line)
+			if len(fields) >= 7 {
+				q5, qw := fields[5], fields[6]
+				if q5 != "--" || qw != "--" {
+					t.Errorf("expected '--' for disabled account quotas, got q5=%s qw=%s", q5, qw)
+				}
+			}
+		}
+		if strings.Contains(line, "ProtectedAcc") {
+			foundProtected = true
+			if !strings.Contains(line, "Protected") {
+				t.Errorf("expected Protected in status for ProtectedAcc, line: %s", line)
+			}
+		}
+	}
+	if !foundDisabled || !foundProtected {
+		t.Errorf("missing accounts in list output:\n%s", cleanList)
+	}
+}
+
 func TestListAccounts_EmptyAndPopulated(t *testing.T) {
 	_, cleanup := setupCLITestEnv(t)
 	defer cleanup()

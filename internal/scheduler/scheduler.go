@@ -11,8 +11,22 @@ import (
 // FiveHourReserveFloor is the threshold below or equal to which an account's 5-hour quota is in reserve.
 const FiveHourReserveFloor = 0.15
 
-// WeeklyReserveFloor is the threshold below or equal to which an account's weekly quota is in reserve.
+// WeeklyReserveFloor is the base threshold below or equal to which an account's weekly quota is in reserve.
 const WeeklyReserveFloor = 0.10
+
+// DynamicWeeklyReserveFloor returns the time-decaying weekly reserve floor.
+// As weekly reset approaches, the reserve floor decays proportionally with the remaining time in the week,
+// ensuring perishable quota is not stranded before weekly reset.
+func DynamicWeeklyReserveFloor(r7 float64) float64 {
+	if r7 <= 0 || r7 >= 1.0 {
+		return WeeklyReserveFloor
+	}
+	floor := WeeklyReserveFloor * r7
+	if floor < config.DepletedThreshold {
+		return config.DepletedThreshold
+	}
+	return floor
+}
 
 // IsReserveCandidate reports whether a candidate account has one or more known quota windows
 // at or below the reserve thresholds, while not being depleted.
@@ -34,7 +48,8 @@ func IsReserveCapacity(capState quota.CapacityState) bool {
 	if capState.Q5Known && capState.Q5 != nil && *capState.Q5 <= FiveHourReserveFloor {
 		return true
 	}
-	if capState.Q7Known && capState.Q7 != nil && *capState.Q7 <= WeeklyReserveFloor {
+	weeklyFloor := DynamicWeeklyReserveFloor(capState.R7)
+	if capState.Q7Known && capState.Q7 != nil && *capState.Q7 <= weeklyFloor {
 		return true
 	}
 	return false
@@ -42,7 +57,10 @@ func IsReserveCapacity(capState quota.CapacityState) bool {
 
 // IsRestricted reports whether an account is blocked from generation routing.
 func IsRestricted(acc *storage.Account) bool {
-	return acc != nil && (acc.Status == "validation_required" || acc.Status == "auth_error")
+	return acc != nil && (acc.Status == storage.StatusValidationRequired ||
+		acc.Status == storage.StatusVerificationPending ||
+		acc.Status == storage.StatusAuthError ||
+		acc.Status == storage.StatusDisabled)
 }
 
 // OrderCandidates orders generation candidates according to the specified strategy.

@@ -19,6 +19,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
+	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 	"golang.org/x/term"
 )
@@ -553,14 +554,26 @@ func renderAccountsWide(
 
 func renderAccountDetailsWide(sb *strings.Builder, acc *storage.Account, nowTS int64, idx int) {
 	status := acc.Status
-	if status == "validation_required" {
+	if status == storage.StatusDisabled {
+		sb.WriteString(fmt.Sprintf("  %sDisabled (Excluded from pool routing)%s\n", clrDim, clrReset))
+		return
+	}
+	if status == storage.StatusValidationRequired {
 		sb.WriteString(fmt.Sprintf("  %sAction Required (Verify needed)%s\n", clrYellow, clrReset))
 		sb.WriteString(fmt.Sprintf("  Run: agy-pool verify %d\n", idx+1))
 		return
 	}
-	if status == "auth_error" {
+	if status == storage.StatusVerificationPending {
+		sb.WriteString(fmt.Sprintf("  %sWaiting for generation confirmation%s\n", clrCyan, clrReset))
+		return
+	}
+	if status == storage.StatusAuthError {
 		sb.WriteString(fmt.Sprintf("  %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset))
 		return
+	}
+
+	if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
+		sb.WriteString(fmt.Sprintf("  %s[Reserve Protection: Low Quota]%s\n", clrYellow, clrReset))
 	}
 
 	q := acc.LastQuota
@@ -652,14 +665,26 @@ func renderAccountsCompact(
 
 func renderAccountDetailsCompact(sb *strings.Builder, acc *storage.Account, nowTS int64, width int, idx int) {
 	status := acc.Status
-	if status == "validation_required" {
+	if status == storage.StatusDisabled {
+		sb.WriteString(fmt.Sprintf("  %sDisabled (Excluded from pool routing)%s\n", clrDim, clrReset))
+		return
+	}
+	if status == storage.StatusValidationRequired {
 		sb.WriteString(fmt.Sprintf("  %sAction Required (Verify needed)%s\n", clrYellow, clrReset))
 		sb.WriteString(fmt.Sprintf("  Run: agy-pool verify %d\n", idx+1))
 		return
 	}
-	if status == "auth_error" {
+	if status == storage.StatusVerificationPending {
+		sb.WriteString(fmt.Sprintf("  %sWaiting for generation confirmation%s\n", clrCyan, clrReset))
+		return
+	}
+	if status == storage.StatusAuthError {
 		sb.WriteString(fmt.Sprintf("  %sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset))
 		return
+	}
+
+	if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
+		sb.WriteString(fmt.Sprintf("  %s[Reserve Protection: Low Quota]%s\n", clrYellow, clrReset))
 	}
 
 	q := acc.LastQuota
@@ -759,12 +784,19 @@ func renderAccountsMobile(
 		sb.WriteString(fmt.Sprintf("%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset))
 
 		status := acc.Status
-		if status == "validation_required" {
+		if status == storage.StatusDisabled {
+			sb.WriteString(fmt.Sprintf("%sDisabled (Excluded from pool routing)%s\n", clrDim, clrReset))
+		} else if status == storage.StatusValidationRequired {
 			sb.WriteString(fmt.Sprintf("%sAction Required (Verify needed)%s\n", clrYellow, clrReset))
 			sb.WriteString(fmt.Sprintf("Run: agy-pool verify %d\n", i+1))
-		} else if status == "auth_error" {
+		} else if status == storage.StatusVerificationPending {
+			sb.WriteString(fmt.Sprintf("%sWaiting for generation confirmation%s\n", clrCyan, clrReset))
+		} else if status == storage.StatusAuthError {
 			sb.WriteString(fmt.Sprintf("%sAuth Failure (Re-authenticate)%s\n", clrRed, clrReset))
 		} else {
+			if scheduler.IsReserveCandidate(acc, float64(nowTS)) {
+				sb.WriteString(fmt.Sprintf("%s[Reserve Protection: Low Quota]%s\n", clrYellow, clrReset))
+			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
@@ -846,10 +878,14 @@ func renderAccountsVeryNarrow(
 		}
 
 		status := acc.Status
-		if status == "validation_required" {
+		if status == storage.StatusDisabled {
+			sb.WriteString(fmt.Sprintf("%sDisabled%s\n", clrDim, clrReset))
+		} else if status == storage.StatusValidationRequired {
 			sb.WriteString(fmt.Sprintf("%sVerify Needed%s\n", clrYellow, clrReset))
 			sb.WriteString(fmt.Sprintf("agy-pool verify %d\n", i+1))
-		} else if status == "auth_error" {
+		} else if status == storage.StatusVerificationPending {
+			sb.WriteString(fmt.Sprintf("%sVerification Pending%s\n", clrCyan, clrReset))
+		} else if status == storage.StatusAuthError {
 			sb.WriteString(fmt.Sprintf("%sAuth Error%s\n", clrRed, clrReset))
 		} else {
 			q := acc.LastQuota

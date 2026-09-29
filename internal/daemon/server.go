@@ -171,6 +171,9 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 				if err == nil && pool != nil {
 					now := float64(time.Now().Unix())
 					for _, acc := range pool.Accounts {
+						if acc == nil || acc.Status == storage.StatusDisabled {
+							continue
+						}
 						if quota.RefreshNeeded(acc, now) {
 							if QuotaRefresher != nil {
 								QuotaRefresher(acc)
