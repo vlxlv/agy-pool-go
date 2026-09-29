@@ -218,7 +218,6 @@ func ListCmd(stdout, stderr io.Writer, args ...string) int {
 	return 0
 }
 
-
 // QuotaCmd renders the dedicated full quota dashboard with progress bars and reset countdowns.
 func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
 	for _, a := range args {
