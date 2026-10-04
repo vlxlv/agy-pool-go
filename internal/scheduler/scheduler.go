@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"math"
 	"sort"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
@@ -61,6 +62,19 @@ func IsRestricted(acc *storage.Account) bool {
 		acc.Status == storage.StatusVerificationPending ||
 		acc.Status == storage.StatusAuthError ||
 		acc.Status == storage.StatusDisabled)
+}
+
+// EffectiveWorstPace returns the scheduling pace for candidate ranking.
+// When an account's weekly quota is abundant (>= 0.80), the weekly window is not
+// a constraint bottleneck; we use 5H pace to avoid cold-start linear decay starvation
+// at the beginning of a 7-day cycle.
+func EffectiveWorstPace(capState quota.CapacityState) float64 {
+	if capState.Q5Known && capState.Q5 != nil && capState.Pace5 != nil {
+		if capState.Q7Known && capState.Q7 != nil && *capState.Q7 >= 0.80 {
+			return *capState.Pace5
+		}
+	}
+	return capState.WorstPace
 }
 
 // OrderCandidates orders generation candidates according to the specified strategy.
@@ -156,6 +170,8 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 			}
 		}
 
+		const paceEpsilon = 0.005
+
 		maxQuotaCompare := func(a, b *storage.Account) bool {
 			capA := quota.ComputeCapacityState(a, now)
 			capB := quota.ComputeCapacityState(b, now)
@@ -170,20 +186,26 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				return rankA > rankB
 			}
 
-			if capA.WorstPace != capB.WorstPace {
-				return capA.WorstPace > capB.WorstPace
+			paceA := EffectiveWorstPace(capA)
+			paceB := EffectiveWorstPace(capB)
+			if math.IsInf(paceA, 0) || math.IsInf(paceB, 0) {
+				if paceA != paceB {
+					return paceA > paceB
+				}
+			} else if math.Abs(paceA-paceB) > paceEpsilon {
+				return paceA > paceB
 			}
 
-			if capA.TotalPace != capB.TotalPace {
-				return capA.TotalPace > capB.TotalPace
-			}
-
-			if capA.RawFloor != capB.RawFloor {
+			if math.Abs(capA.RawFloor-capB.RawFloor) > paceEpsilon {
 				return capA.RawFloor > capB.RawFloor
 			}
 
 			hitsA, hitsB := a.GetHits(), b.GetHits()
-			return hitsA < hitsB // Lowest hits first (key had -hits descending)
+			if hitsA != hitsB {
+				return hitsA < hitsB // Lowest hits first (key had -hits descending)
+			}
+
+			return a.ID < b.ID
 		}
 
 		sort.SliceStable(healthy, func(i, j int) bool {

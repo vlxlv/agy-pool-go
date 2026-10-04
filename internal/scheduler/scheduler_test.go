@@ -709,3 +709,51 @@ func TestMaxQuota_ReserveHeadroom_LegacyFraction(t *testing.T) {
 		t.Fatal("12% must be Reserve for explicit 5H, but Healthy for explicit Weekly")
 	}
 }
+
+// TestMaxQuota_AbundantWeeklyQuota_NoColdStartStarvation verifies that a newly active account
+// with abundant weekly quota (>= 80%) is not starved by an early negative weekly pace
+// when its 5H quota and available capacity are superior to mid-cycle accounts.
+func TestMaxQuota_AbundantWeeklyQuota_NoColdStartStarvation(t *testing.T) {
+	now := 1789560000.0
+
+	// freshAcc: newly reset cycle (7 days left), 99% 5H, 99% weekly.
+	// Raw weekly pace is -0.009 (because r7 ≈ 0.999), but 5H pace is +0.026.
+	freshAcc := &storage.Account{
+		ID:     "fresh_acc_4",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.99),
+				ResetTime: "2026-09-16T20:50:00Z", // ~4.8h remaining (r5 ≈ 0.96)
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.99),
+				ResetTime: "2026-09-23T16:00:00Z", // ~7d remaining (r7 ≈ 0.999)
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	// midCycleAcc: 3.8 days into week, 97% 5H, 63% weekly.
+	// Mid-cycle surplus gives raw weekly pace +0.24, but lower overall quota.
+	midCycleAcc := &storage.Account{
+		ID:     "mid_cycle_acc_2",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.97),
+				ResetTime: "2026-09-16T20:45:00Z", // ~4.75h remaining (r5 ≈ 0.95)
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.63),
+				ResetTime: "2026-09-20T11:00:00Z", // ~3.8d remaining (r7 ≈ 0.54)
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{midCycleAcc, freshAcc}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "fresh_acc_4" {
+		t.Fatalf("expected fresh account with 99%% quota to be ordered first, got %s", ordered[0].ID)
+	}
+}
