@@ -206,15 +206,18 @@ func TestDisabledAccount_QuotaAndListRendering(t *testing.T) {
 		t.Errorf("wide quota dashboard legend missing [Protected] or [Disabled], got:\n%s", cleanWide)
 	}
 
-	// 2. Compact quota dashboard (width 70)
+	// 2. Tablet quota dashboard (width 70) - unified with PC
 	stdout.Reset()
 	ListAccountsWithWidth("", 70, &stdout, &stderr)
-	cleanCompact := stripANSI(stdout.String())
-	if !strings.Contains(cleanCompact, "Disabled (Excluded from pool routing)") {
-		t.Errorf("compact quota dashboard missing disabled notice, got:\n%s", cleanCompact)
+	cleanTablet := stripANSI(stdout.String())
+	if !strings.Contains(cleanTablet, "Disabled (Excluded from pool routing)") {
+		t.Errorf("tablet quota dashboard missing disabled notice, got:\n%s", cleanTablet)
 	}
-	if !strings.Contains(cleanCompact, "[Reserve Protection: Low Quota]") {
-		t.Errorf("compact quota dashboard missing reserve protection note, got:\n%s", cleanCompact)
+	if !strings.Contains(cleanTablet, "[Reserve Protection:") {
+		t.Errorf("tablet quota dashboard missing reserve protection note, got:\n%s", cleanTablet)
+	}
+	if !strings.Contains(cleanTablet, "[Protected]") || !strings.Contains(cleanTablet, "[Disabled]") {
+		t.Errorf("tablet quota dashboard legend missing [Protected] or [Disabled], got:\n%s", cleanTablet)
 	}
 
 	// 3. agy-pool list (ListCmd)
@@ -527,8 +530,8 @@ func TestListAccounts_ResponsiveWidths(t *testing.T) {
 			cleanOutput := stripANSI(output)
 
 			switch {
-			case w >= 96:
-				// Wide layout
+			case w >= 60:
+				// Wide layout (Unified PC & Tablet: 60+)
 				if !strings.Contains(cleanOutput, "Antigravity Multi-Account Pool") {
 					t.Errorf("width %d: missing wide banner", w)
 				}
@@ -541,30 +544,11 @@ func TestListAccounts_ResponsiveWidths(t *testing.T) {
 				if !regexp.MustCompile(`WK\s+██████████░░░░░░░░░░\s+50%\s+resets in 5d1[456]h`).MatchString(cleanOutput) {
 					t.Errorf("width %d: wide WK line mismatch:\n%s", w, cleanOutput)
 				}
-				if !strings.Contains(cleanOutput, "quota age") {
+				if !strings.Contains(cleanOutput, "quota age") && !strings.Contains(cleanOutput, "age") {
 					t.Errorf("width %d: wide quota age missing", w)
 				}
 				if !strings.Contains(cleanOutput, "Backup · Ready") || !strings.Contains(cleanOutput, "hits 2110") {
 					t.Errorf("width %d: wide account 2 mismatch:\n%s", w, cleanOutput)
-				}
-
-			case w >= 60:
-				// Compact layout: 60-95
-				if !strings.Contains(cleanOutput, "Main · CLI Base · hits 1035") {
-					t.Errorf("width %d: compact title line mismatch:\n%s", w, cleanOutput)
-				}
-				if !regexp.MustCompile(`5H\s+100%\s+██████████\s+reset 4h5[67]m`).MatchString(cleanOutput) {
-					t.Errorf("width %d: compact 5H line mismatch:\n%s", w, cleanOutput)
-				}
-				if !regexp.MustCompile(`WK\s+50%\s+█████░░░░░\s+reset 5d1[456]h`).MatchString(cleanOutput) {
-					t.Errorf("width %d: compact WK line mismatch:\n%s", w, cleanOutput)
-				}
-				if !regexp.MustCompile(`age 2m3[45]s`).MatchString(cleanOutput) {
-					t.Errorf("width %d: compact metadata line mismatch:\n%s", w, cleanOutput)
-				}
-				// Verify account 2
-				if !strings.Contains(cleanOutput, "Backup · Ready · hits 2110") {
-					t.Errorf("width %d: compact account 2 title mismatch:\n%s", w, cleanOutput)
 				}
 
 			case w >= 40:
@@ -1197,29 +1181,15 @@ func TestQuotaDashboard_EdgeCasesAndLayouts(t *testing.T) {
 
 			// Layout-specific checks
 			switch {
-			case w >= 96:
+			case w >= 60:
 				if !strings.Contains(clean, "5H  ████████████████████ 100%   resets in 4h59m") {
 					t.Errorf("width %d: wide 5H line format mismatch:\n%s", w, clean)
 				}
 				if !strings.Contains(clean, "WK  ████░░░░░░░░░░░░░░░░  21%   resets in 5d14h") {
 					t.Errorf("width %d: wide WK line format mismatch:\n%s", w, clean)
 				}
-				if !strings.Contains(clean, "quota age") {
+				if !strings.Contains(clean, "quota age") && !strings.Contains(clean, "age") {
 					t.Errorf("width %d: wide quota age missing", w)
-				}
-
-			case w >= 60:
-				if !strings.Contains(clean, "Main · CLI Base · hits 2395") {
-					t.Errorf("width %d: compact header format mismatch:\n%s", w, clean)
-				}
-				if !strings.Contains(clean, "5H 100% ██████████  reset 4h59m") {
-					t.Errorf("width %d: compact 5H line format mismatch:\n%s", w, clean)
-				}
-				if !strings.Contains(clean, "WK  21% ██░░░░░░░░  reset 5d14h") {
-					t.Errorf("width %d: compact WK line format mismatch:\n%s", w, clean)
-				}
-				if !strings.Contains(clean, "age") {
-					t.Errorf("width %d: compact age missing", w)
 				}
 
 			case w >= 40:

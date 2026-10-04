@@ -19,13 +19,22 @@ const (
 )
 
 // PrintRunwaySummary renders compact runway forecast block inside the main quota dashboard.
-func PrintRunwaySummary(w io.Writer, pool *storage.Pool, now float64) {
+func PrintRunwaySummary(w io.Writer, pool *storage.Pool, now float64, widthOpt ...int) {
 	res := SimulateQuotaRunway(pool, nil, now)
 	if res.Status == "no_accounts" || res.Status == "all_restricted" {
 		return
 	}
 
-	subSep := strings.Repeat("-", 68)
+	width := 68
+	if len(widthOpt) > 0 && widthOpt[0] > 0 {
+		width = widthOpt[0]
+	}
+
+	subSepLen := 68
+	if width < subSepLen {
+		subSepLen = width
+	}
+	subSep := strings.Repeat("-", subSepLen)
 	fmt.Fprintln(w, subSep)
 	fmt.Fprintf(w, " %s%s⚡ Quota Runway & Endurance Forecast:%s\n", clrBold, clrCyan, clrReset)
 
@@ -72,20 +81,37 @@ func PrintRunwaySummary(w io.Writer, pool *storage.Pool, now float64) {
 		if net >= 0 {
 			netColor = clrGreen
 		}
-		fmt.Fprintf(w, "  • Burn/Replenish:  ~%.1f%%/hr burn | +%.1f%%/hr reload (%s%s%.1f%%/hr net%s)\n",
-			burn, replenish, netColor, sign, net, clrReset)
+		if width >= 76 {
+			fmt.Fprintf(w, "  • Burn/Replenish:  ~%.1f%%/hr burn | +%.1f%%/hr reload (%s%s%.1f%%/hr net%s)\n",
+				burn, replenish, netColor, sign, net, clrReset)
+		} else {
+			fmt.Fprintf(w, "  • Burn/Reload:     ~%.1f%%/hr burn | +%.1f%%/hr reload (%s%s%.1f%%%s)\n",
+				burn, replenish, netColor, sign, net, clrReset)
+		}
 	} else {
-		fmt.Fprintf(w, "  • Capacity Reload: +%.1f%%/hr natural recovery across pool\n", replenish)
+		if width >= 64 {
+			fmt.Fprintf(w, "  • Capacity Reload: +%.1f%%/hr natural recovery across pool\n", replenish)
+		} else {
+			fmt.Fprintf(w, "  • Capacity Reload: +%.1f%%/hr natural recovery\n", replenish)
+		}
 	}
 
 	// 5-hour rolling runway
 	if isIdle {
 		var b5h string
 		if bench.IsSustainable5H {
-			b5h = fmt.Sprintf("%s⚡ Sustainable%s (> 24h at standard ~20 gens/hr pace)", clrGreen, clrReset)
+			if width >= 76 {
+				b5h = fmt.Sprintf("%s⚡ Sustainable%s (> 24h at standard ~20 gens/hr pace)", clrGreen, clrReset)
+			} else {
+				b5h = fmt.Sprintf("%s⚡ Sustainable%s (> 24h at standard pace)", clrGreen, clrReset)
+			}
 		} else if bench.FirstStallSec != nil {
 			stallStr := FormatDurationShort(bench.FirstStallSec)
-			b5h = fmt.Sprintf("%s~%s%s at standard ~20 gens/hr pace", clrYellow, stallStr, clrReset)
+			if width >= 76 {
+				b5h = fmt.Sprintf("%s~%s%s at standard ~20 gens/hr pace", clrYellow, stallStr, clrReset)
+			} else {
+				b5h = fmt.Sprintf("%s~%s%s at standard pace", clrYellow, stallStr, clrReset)
+			}
 		} else {
 			b5h = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
 		}
@@ -93,7 +119,13 @@ func PrintRunwaySummary(w io.Writer, pool *storage.Pool, now float64) {
 	} else {
 		var run5h string
 		if sim.IsSustainable5H {
-			run5h = fmt.Sprintf("%s⚡ Sustainable%s (Pool replenishes faster than burn rate)", clrGreen, clrReset)
+			if width >= 76 {
+				run5h = fmt.Sprintf("%s⚡ Sustainable%s (Pool replenishes faster than burn rate)", clrGreen, clrReset)
+			} else if width >= 70 {
+				run5h = fmt.Sprintf("%s⚡ Sustainable%s (Pool replenishes faster than burn)", clrGreen, clrReset)
+			} else {
+				run5h = fmt.Sprintf("%s⚡ Sustainable%s (Replenish > burn)", clrGreen, clrReset)
+			}
 		} else if sim.FirstStallSec != nil {
 			stallStr := FormatDurationShort(sim.FirstStallSec)
 			causeNote := ""

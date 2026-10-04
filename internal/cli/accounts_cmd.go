@@ -215,13 +215,8 @@ func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer, s
 
 	nowTS := time.Now().Unix()
 
-	if width >= 96 {
-		renderWideQuotaDashboard(accList, pool, gatewayStatus, nowTS, showEmail, stdout)
-		return
-	}
-
 	if width >= 60 {
-		renderCompactQuotaDashboard(accList, pool, nowTS, width, showEmail, stdout)
+		renderWideQuotaDashboard(accList, pool, gatewayStatus, nowTS, width, showEmail, stdout)
 		return
 	}
 
@@ -233,9 +228,13 @@ func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer, s
 	renderVeryNarrowQuotaDashboard(accList, pool, nowTS, width, showEmail, stdout)
 }
 
-func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, gatewayStatus string, nowTS int64, showEmail bool, stdout io.Writer) {
-	sep := strings.Repeat("=", 68)
-	subSep := strings.Repeat("-", 68)
+func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, gatewayStatus string, nowTS int64, width int, showEmail bool, stdout io.Writer) {
+	borderWidth := 68
+	if width < 68 {
+		borderWidth = width
+	}
+	sep := strings.Repeat("=", borderWidth)
+	subSep := strings.Repeat("-", borderWidth)
 
 	fmt.Fprintf(stdout, "\n%s\n", sep)
 	title := fmt.Sprintf("Antigravity Multi-Account Pool v%s", config.Version)
@@ -254,10 +253,17 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 
 		right := fmt.Sprintf("hits %d", hits)
 		if acc.LastQuota != nil {
-			right = fmt.Sprintf("hits %d · quota age %s", hits, ageStr)
+			if borderWidth >= 68 {
+				right = fmt.Sprintf("hits %d · quota age %s", hits, ageStr)
+			} else {
+				right = fmt.Sprintf("hits %d · age %s", hits, ageStr)
+			}
 		}
 		rightLen := len(right)
 		targetCol := 64
+		if borderWidth < 68 {
+			targetCol = borderWidth - 4
+		}
 
 		suffixLen := utf8.RuneCountInString(" · ") + utf8.RuneCountInString(state)
 		maxLeftLen := targetCol - 2 - rightLen - 2
@@ -303,7 +309,11 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 				} else if capState.Q7Known && capState.Q7 != nil {
 					reason = fmt.Sprintf("Weekly quota <= %.1f%%", scheduler.DynamicWeeklyReserveFloor(capState.R7)*100)
 				}
-				fmt.Fprintf(stdout, "  %s[Reserve Protection: %s, held back from pool routing]%s\n", clrYellow, reason, clrReset)
+				if width >= 74 {
+					fmt.Fprintf(stdout, "  %s[Reserve Protection: %s, held back from pool routing]%s\n", clrYellow, reason, clrReset)
+				} else {
+					fmt.Fprintf(stdout, "  %s[Reserve Protection: %s]%s\n", clrYellow, reason, clrReset)
+				}
 			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
@@ -367,11 +377,25 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 		clrCyan, clrReset, clrDim, clrReset)
 	fmt.Fprintf(stdout, " %s[Cooldown]%s %sRate Limited%s      %s[Exhausted] Quota Depleted%s\n",
 		clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
-	fmt.Fprintf(stdout, " %s[Protected]%s %sLow Quota Reserve%s   %s[Disabled] Excluded from Pool%s\n",
-		clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
-	fmt.Fprintf(stdout, " Strategy: %s%s%s | Gateway Proxy: %s\n",
-		clrBold, strat, clrReset, gatewayStatus)
-	forecast.PrintRunwaySummary(stdout, pool, float64(nowTS))
+	if width >= 64 {
+		fmt.Fprintf(stdout, " %s[Protected]%s %sLow Quota Reserve%s   %s[Disabled] Excluded from Pool%s\n",
+			clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
+	} else {
+		fmt.Fprintf(stdout, " %s[Protected]%s %sLow Quota Reserve%s  %s[Disabled] Excluded%s\n",
+			clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
+	}
+	if width >= 64 {
+		fmt.Fprintf(stdout, " Strategy: %s%s%s | Gateway Proxy: %s\n",
+			clrBold, strat, clrReset, gatewayStatus)
+	} else {
+		shortStatus := fmt.Sprintf("%sRUNNING (:8899)%s", clrGreen, clrReset)
+		if !daemon.IsPortListening(config.DefaultPort) {
+			shortStatus = fmt.Sprintf("%sSTOPPED%s", clrDim, clrReset)
+		}
+		fmt.Fprintf(stdout, " Strategy: %s%s%s | Proxy: %s\n",
+			clrBold, strat, clrReset, shortStatus)
+	}
+	forecast.PrintRunwaySummary(stdout, pool, float64(nowTS), width)
 	fmt.Fprintf(stdout, "%s\n\n", sep)
 }
 
