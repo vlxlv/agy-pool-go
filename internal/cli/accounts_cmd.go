@@ -717,6 +717,7 @@ func RenameAccount(target, name string, stdout, stderr io.Writer) bool {
 		fmt.Fprintf(stdout, "%s[Error] The selected account was not found.%s\n", clrRed, clrReset)
 		return false
 	}
+	fmt.Fprintf(stdout, "%s✓ Renamed account [%s] to: %s%s%s\n", clrGreen, acc.ID, clrBold, acc.Name, clrReset)
 	return true
 }
 

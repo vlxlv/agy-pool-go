@@ -62,6 +62,22 @@ func TestRenameCommand(t *testing.T) {
 	if !strings.Contains(stdout.String(), "[Error] The selected account was not found.") {
 		t.Errorf("expected not found error, got: %s", stdout.String())
 	}
+
+	// 4. Successful rename
+	pool := storage.NewEmptyPool()
+	pool.Accounts = []*storage.Account{
+		{ID: "acc_1", Name: "OldName"},
+	}
+	_ = storage.SavePool(pool)
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"rename", "1", "BrandNewName"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on successful rename, got %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stripANSI(stdout.String()), "Renamed account [acc_1] to: BrandNewName") {
+		t.Errorf("expected rename success message, got: %s", stdout.String())
+	}
 }
 
 func TestDisableAndEnableCommand(t *testing.T) {
