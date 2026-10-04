@@ -733,3 +733,37 @@ func TestTop_PrintRepresentativeWidths(t *testing.T) {
 		t.Logf("\n=== WIDTH %d ===\n%s", w, StripANSI(frame))
 	}
 }
+
+func TestTop_TelemetryBlock(t *testing.T) {
+	now := time.Now().Unix()
+	pool := createTestTopPool(now)
+	stats := createTestRuntimeStats(12345)
+	info := &daemon.DaemonInfo{PID: 12345}
+
+	// 1. Height < 18: Telemetry omitted
+	frameShort := RenderTopFrameWithHeight(pool, stats, info, true, "", 2*time.Second, 100, 15, false)
+	plainShort := StripANSI(frameShort)
+	if strings.Contains(plainShort, "Quota Runway &") {
+		t.Fatalf("expected telemetry omitted on short terminal height=15, got:\n%s", plainShort)
+	}
+
+	// 2. Height >= 18 and Width >= 76: Full telemetry
+	frameFull := RenderTopFrameWithHeight(pool, stats, info, true, "", 2*time.Second, 100, 24, false)
+	plainFull := StripANSI(frameFull)
+	if !strings.Contains(plainFull, "⚡ Quota Runway & Endurance Forecast:") {
+		t.Fatalf("expected full telemetry on height=24 width=100, got:\n%s", plainFull)
+	}
+	if !strings.Contains(plainFull, "Health & Pace:") {
+		t.Fatalf("expected Health & Pace in full telemetry, got:\n%s", plainFull)
+	}
+	if !strings.Contains(plainFull, "5-Hour Runway:") {
+		t.Fatalf("expected 5-Hour Runway in full telemetry, got:\n%s", plainFull)
+	}
+
+	// 3. Height >= 18 and Width < 76: Compact telemetry
+	frameCompact := RenderTopFrameWithHeight(pool, stats, info, true, "", 2*time.Second, 60, 24, false)
+	plainCompact := StripANSI(frameCompact)
+	if !strings.Contains(plainCompact, "⚡ Quota Runway & Health:") {
+		t.Fatalf("expected compact telemetry on width=60, got:\n%s", plainCompact)
+	}
+}

@@ -938,6 +938,24 @@ func (h *Handler) dispatchAccount(
 			return outcome
 		}
 
+		// Failover on Location / GeoIP Not Supported (temporary datacenter IP / Anycast routing glitch)
+		if IsLocationError(statusCode, errBody) {
+			persistErr := RecordLocationError(acc)
+			if persistErr != nil {
+				logMessage("PROXY WARN", "failed to persist location cooldown; continuing failover")
+			}
+			logMessage("FAILOVER", fmt.Sprintf("Account %s hit temporary location restriction (HTTP %d)! Auto-switching to next account (soft cooldown 30s)...", dispName, statusCode))
+			notifyAudit(statusCode, "LocationError")
+			outcome := DispatchOutcome{
+				Action: ActionFailoverNext,
+				Reason: "ExplicitRetryableUpstreamResponse:LocationError",
+			}
+			if persistErr != nil {
+				outcome.Err = persistErr
+			}
+			return outcome
+		}
+
 		// Ordinary upstream error (400, 404, 500, etc.): Forward directly, DO NOT REPLAY!
 		notifyAudit(statusCode, "NonRetryableError")
 		SendBuffered(committer, statusCode, resp.Header, errBody)

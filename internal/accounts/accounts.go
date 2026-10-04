@@ -189,30 +189,73 @@ func getQuotaProber() (QuotaProberFunc, QuotaFormatterFunc) {
 	return quotaProber, quotaFormatter
 }
 
+// IsShowEmailEnabled checks if real email addresses should be displayed instead of masked.
+// Evaluation order:
+//  1. AGY_SHOW_EMAIL env var ('1', 'true', 'yes', 'on')
+//  2. AGY_PRIVACY env var ('0', 'false', 'no', 'off')
+//  3. pool.ShowEmail if pool provided or loadable
+//  4. Default: false
+func IsShowEmailEnabled(pool *storage.Pool) bool {
+	envShow := strings.ToLower(strings.TrimSpace(os.Getenv("AGY_SHOW_EMAIL")))
+	if envShow == "1" || envShow == "true" || envShow == "yes" || envShow == "on" {
+		return true
+	}
+	if envShow == "0" || envShow == "false" || envShow == "no" || envShow == "off" {
+		return false
+	}
+
+	envPriv := strings.ToLower(strings.TrimSpace(os.Getenv("AGY_PRIVACY")))
+	if envPriv == "0" || envPriv == "false" || envPriv == "no" || envPriv == "off" {
+		return true
+	}
+	if envPriv == "1" || envPriv == "true" || envPriv == "yes" || envPriv == "on" {
+		return false
+	}
+
+	if pool == nil {
+		if p, err := storage.LoadPool(); err == nil {
+			pool = p
+		}
+	}
+	if pool != nil && pool.ShowEmail != nil {
+		return *pool.ShowEmail
+	}
+	return false
+}
+
 // DisplayAccountName returns the user-visible friendly display name for an account.
-// Never falls back to real email or values derived from email.
-// Fallback order:
-//  1. Explicit friendly name / label ('name' field)
-//  2. 'Account N' if account id matches 'acc_N'
-//  3. 'Account' as generic safe fallback
-func DisplayAccountName(account *storage.Account) string {
+// If showEmail is true and account has an email, appends " (email)" to the friendly name.
+func DisplayAccountName(account *storage.Account, showEmailOpt ...bool) string {
 	if account == nil {
 		return "Account"
 	}
 	friendly := strings.TrimSpace(account.Name)
-	if friendly != "" {
-		return friendly
-	}
-	accountID := strings.TrimSpace(account.ID)
-	if strings.HasPrefix(accountID, "acc_") {
-		suffix := accountID[4:]
-		if isDigits(suffix) {
-			if n, err := strconv.Atoi(suffix); err == nil {
-				return fmt.Sprintf("Account %d", n)
+	if friendly == "" {
+		accountID := strings.TrimSpace(account.ID)
+		if strings.HasPrefix(accountID, "acc_") {
+			suffix := accountID[4:]
+			if isDigits(suffix) {
+				if n, err := strconv.Atoi(suffix); err == nil {
+					friendly = fmt.Sprintf("Account %d", n)
+				}
 			}
 		}
+		if friendly == "" {
+			friendly = "Account"
+		}
 	}
-	return "Account"
+
+	showEmail := false
+	if len(showEmailOpt) > 0 {
+		showEmail = showEmailOpt[0]
+	} else {
+		showEmail = IsShowEmailEnabled(nil)
+	}
+
+	if showEmail && strings.TrimSpace(account.Email) != "" {
+		return fmt.Sprintf("%s (%s)", friendly, strings.TrimSpace(account.Email))
+	}
+	return friendly
 }
 
 func isDigits(s string) bool {
@@ -227,29 +270,72 @@ func isDigits(s string) bool {
 	return true
 }
 
-// FindAccountByTarget resolves a target selector (1-based index, account ID, exact email, or friendly name).
-func FindAccountByTarget(accounts []*storage.Account, target string) *storage.Account {
+// ResolveAccountIndex resolves an account target (1-based index, account ID, exact email/name,
+// case-insensitive email/name, or unique substring) to its 0-based index in accounts.
+// Returns 0-based index if found, or -1 if not found or ambiguous.
+func ResolveAccountIndex(accounts []*storage.Account, target string) int {
 	targetStr := strings.TrimSpace(target)
-	if targetStr == "" {
-		return nil
+	if targetStr == "" || len(accounts) == 0 {
+		return -1
 	}
+
+	// 1. 1-based integer index
 	if isDigits(targetStr) {
-		idx, err := strconv.Atoi(targetStr)
-		if err == nil {
+		if idx, err := strconv.Atoi(targetStr); err == nil {
 			i := idx - 1
 			if i >= 0 && i < len(accounts) {
-				return accounts[i]
+				return i
 			}
-			return nil
+			return -1
 		}
 	}
-	for _, a := range accounts {
+
+	// 2. Exact match on 'id', 'email', or 'name'
+	for i, a := range accounts {
 		if a == nil {
 			continue
 		}
 		if a.ID == targetStr || a.Email == targetStr || a.Name == targetStr {
-			return a
+			return i
 		}
+	}
+
+	// 3. Case-insensitive exact match on email or name
+	targetLower := strings.ToLower(targetStr)
+	for i, a := range accounts {
+		if a == nil {
+			continue
+		}
+		if strings.ToLower(a.Email) == targetLower || strings.ToLower(a.Name) == targetLower {
+			return i
+		}
+	}
+
+	// 4. Unique substring match on email or name
+	var matches []int
+	for i, a := range accounts {
+		if a == nil {
+			continue
+		}
+		emailLower := strings.ToLower(a.Email)
+		nameLower := strings.ToLower(a.Name)
+		if (emailLower != "" && strings.Contains(emailLower, targetLower)) ||
+			(nameLower != "" && strings.Contains(nameLower, targetLower)) {
+			matches = append(matches, i)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+
+	return -1
+}
+
+// FindAccountByTarget resolves a target selector (1-based index, account ID, exact email, or friendly name).
+func FindAccountByTarget(accounts []*storage.Account, target string) *storage.Account {
+	idx := ResolveAccountIndex(accounts, target)
+	if idx >= 0 && idx < len(accounts) {
+		return accounts[idx]
 	}
 	return nil
 }

@@ -239,15 +239,48 @@ func (a Account) MarshalJSON() ([]byte, error) {
 	return json.Marshal(combined)
 }
 
+// GenerationEvent represents a timestamped inference event for quota telemetry and runway forecasting.
+type GenerationEvent struct {
+	TS int64  `json:"ts"`
+	ID string `json:"id,omitempty"`
+}
+
+// TelemetryCap defines the maximum number of rolling generation events stored.
+const TelemetryCap = 1000
+
 // Pool represents the top-level agy-pool-accounts.json data structure.
 type Pool struct {
-	Version                 int        `json:"version"`
-	Strategy                string     `json:"strategy"`
-	ActiveAccountID         *string    `json:"active_account_id"`
-	RoundRobinLastAccountID *string    `json:"round_robin_last_account_id,omitempty"`
-	Accounts                []*Account `json:"accounts"`
+	Version                 int               `json:"version"`
+	Strategy                string            `json:"strategy"`
+	ActiveAccountID         *string           `json:"active_account_id"`
+	RoundRobinLastAccountID *string           `json:"round_robin_last_account_id,omitempty"`
+	ShowEmail               *bool             `json:"show_email,omitempty"`
+	Accounts                []*Account        `json:"accounts"`
+	GenerationEvents        []GenerationEvent `json:"generation_events,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// RecordGenerationTelemetry appends a generation event and trims to a rolling 4-hour window capped at TelemetryCap.
+func (p *Pool) RecordGenerationTelemetry(accountID string, now int64) {
+	if now <= 0 {
+		return
+	}
+	p.GenerationEvents = append(p.GenerationEvents, GenerationEvent{
+		TS: now,
+		ID: accountID,
+	})
+	cutoff := now - 14400 // 4 hours
+	filtered := make([]GenerationEvent, 0, len(p.GenerationEvents))
+	for _, e := range p.GenerationEvents {
+		if e.TS >= cutoff {
+			filtered = append(filtered, e)
+		}
+	}
+	if len(filtered) > TelemetryCap {
+		filtered = filtered[len(filtered)-TelemetryCap:]
+	}
+	p.GenerationEvents = filtered
 }
 
 // NewEmptyPool returns a newly initialized empty pool matching Python _empty_pool().
@@ -282,7 +315,9 @@ func (p *Pool) UnmarshalJSON(data []byte) error {
 	delete(raw, "strategy")
 	delete(raw, "active_account_id")
 	delete(raw, "round_robin_last_account_id")
+	delete(raw, "show_email")
 	delete(raw, "accounts")
+	delete(raw, "generation_events")
 
 	if len(raw) > 0 {
 		p.Extra = raw

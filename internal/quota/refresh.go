@@ -96,11 +96,11 @@ func getHTTPClient() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-func doRefreshToken(account *storage.Account) (string, error) {
+func doRefreshToken(account *storage.Account, force ...bool) (string, error) {
 	if TokenRefresher != nil {
 		return TokenRefresher(account)
 	}
-	return auth.RefreshToken(account)
+	return auth.RefreshToken(account, force...)
 }
 
 type quotaSummaryResponse struct {
@@ -153,9 +153,14 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 		return nil, errors.New("[FAIL-CLOSED TEST GUARD] refusing external quota query in test mode without mock backend")
 	}
 
-	at, err := doRefreshToken(account)
+	forceRefresh := account.Status == storage.StatusValidationRequired || account.Status == storage.StatusAuthError
+	at, err := doRefreshToken(account, forceRefresh)
 	if err != nil {
-		return nil, fmt.Errorf("token refresh failed for account %s: %w", account.ID, err)
+		if forceRefresh && account.AccessToken != "" {
+			at = account.AccessToken
+		} else {
+			return nil, fmt.Errorf("token refresh failed for account %s: %w", account.ID, err)
+		}
 	}
 
 	// Copy existing windows if present to preserve known windows absent from partial response
@@ -295,7 +300,7 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 	}
 
 	// Fallback to fetchAvailableModels
-	fallbackErr := fetchAvailableModelsQuota(ctx, headers, quotaData)
+	fallbackErr := fetchAvailableModelsQuota(ctx, headers, account, quotaData)
 	if fallbackErr != nil {
 		if quotaErr != nil {
 			return nil, fmt.Errorf("quota refresh failed (%w) and fallback failed (%v)", quotaErr, fallbackErr)
@@ -306,7 +311,7 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 	return finalizeAndPersistQuota(account, quotaData)
 }
 
-func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, quotaData *storage.QuotaState) error {
+func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, account *storage.Account, quotaData *storage.QuotaState) error {
 	modelsURL := getBackendURLBase() + "/v1internal:fetchAvailableModels"
 	req, err := http.NewRequestWithContext(ctx, "POST", modelsURL, bytes.NewReader([]byte("{}")))
 	if err != nil {
@@ -322,6 +327,46 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, quotaDa
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
+		if auth.IsValidationError(resp.StatusCode, b) || auth.IsAuthError(resp.StatusCode, b) {
+			isVal := auth.IsValidationError(resp.StatusCode, b)
+			status := "auth_error"
+			delay := 3600.0
+			if isVal {
+				status = "validation_required"
+				delay = 86400.0
+			}
+			vURL := auth.ExtractValidationURL(b)
+			now := float64(time.Now().Unix())
+			cooldown := now + delay
+
+			var zeroFrac float64 = 0.0
+			quotaData.Gemini5H = &storage.QuotaWindow{Fraction: &zeroFrac, ResetTime: nil}
+			quotaData.GeminiWeekly = &storage.QuotaWindow{Fraction: &zeroFrac, ResetTime: nil}
+			recomputeCompatQuota(quotaData)
+			nowSec := time.Now().Unix()
+			quotaData.UpdatedAt = &nowSec
+
+			_ = poolTransaction(func(pool *storage.Pool) error {
+				stored := storage.FindAccount(pool, account)
+				if stored != nil {
+					stored.Status = status
+					if vURL != "" {
+						stored.ValidationURL = &vURL
+					}
+					stored.RateLimitedUntil = &cooldown
+					stored.ErrorCount++
+					stored.LastQuota = quotaData
+				}
+				return nil
+			})
+			account.Status = status
+			if vURL != "" {
+				account.ValidationURL = &vURL
+			}
+			account.RateLimitedUntil = &cooldown
+			account.LastQuota = quotaData
+			return nil
+		}
 		return fmt.Errorf("fetchAvailableModels HTTP %d: %s", resp.StatusCode, string(b))
 	}
 
@@ -368,6 +413,9 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, quotaDa
 // Quota health and auth/verification restriction are orthogonal: a successful
 // quota probe is not proof that verification or re-authentication completed.
 func finalizeAndPersistQuota(account *storage.Account, quotaData *storage.QuotaState) (*storage.QuotaState, error) {
+	if quotaData.GeminiWeekly != nil && quotaData.GeminiWeekly.ResetTime == nil && quotaData.GeminiWeekly.Fraction != nil && *quotaData.GeminiWeekly.Fraction == 0.0 {
+		quotaData.GeminiWeekly = nil
+	}
 	recomputeCompatQuota(quotaData)
 	nowSec := time.Now().Unix()
 	quotaData.UpdatedAt = &nowSec

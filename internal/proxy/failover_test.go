@@ -604,3 +604,122 @@ func TestRecordQuotaError_429Atomicity(t *testing.T) {
 		t.Fatalf("gemini_weekly window was lost or corrupted during 429 mutation: %+v", stored.LastQuota.GeminiWeekly)
 	}
 }
+
+func TestIsLocationError(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{400, `{"error":{"message":"User location is not supported for the API use."}}`, true},
+		{400, `{"error":{"message":"Location is not supported"}}`, true},
+		{400, `{"error":{"message":"location_not_supported"}}`, true},
+		{400, `{"error":{"message":"Not supported in your country."}}`, true},
+		{400, `{"error":{"message":"Region not supported"}}`, true},
+		{400, `{"error":{"status":"FAILED_PRECONDITION","message":"Location is restricted"}}`, true},
+		{403, `{"error":{"message":"User location is not supported for the API use"}}`, true},
+		{400, `{"error":{"message":"Invalid argument: prompt is required"}}`, false},
+		{404, `{"error":{"message":"Not found"}}`, false},
+		{500, `{"error":{"message":"Internal server error"}}`, false},
+		{200, `{"result":"ok"}`, false},
+	}
+
+	for _, c := range cases {
+		got := IsLocationError(c.status, []byte(c.body))
+		if got != c.want {
+			t.Errorf("IsLocationError(%d, %q) = %v, want %v", c.status, c.body, got, c.want)
+		}
+	}
+}
+
+func TestProxy_LocationError_FailsOverAndSoftCooldown(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+
+	var acc1Hits, acc2Hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if strings.Contains(authHeader, "token-acc_1") {
+			atomic.AddInt32(&acc1Hits, 1)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":400,"message":"User location is not supported for the API use."}}`))
+			return
+		}
+		if strings.Contains(authHeader, "token-acc_2") {
+			atomic.AddInt32(&acc2Hits, 1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"result":"acc2_success"}`))
+			return
+		}
+		http.Error(w, "unknown account", http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	BackendHostProvider = func() string { return u.Host }
+	BackendURLProvider = func() string { return upstream.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) {
+		return "token-" + account.ID, nil
+	}
+
+	fraction := 0.95
+	pool := storage.NewEmptyPool()
+	acc1 := &storage.Account{
+		ID:        "acc_1",
+		Email:     "acc1@example.com",
+		Status:    "",
+		LastQuota: &storage.QuotaState{RemainingFraction: &fraction},
+	}
+	acc2 := &storage.Account{
+		ID:        "acc_2",
+		Email:     "acc2@example.com",
+		Status:    "",
+		LastQuota: &storage.QuotaState{RemainingFraction: &fraction},
+	}
+	pool.Accounts = []*storage.Account{acc1, acc2}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	handler := NewHandler()
+	req := httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader(`{"prompt":"hi"}`))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// 1. Should succeed via failover to acc2
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "acc2_success") {
+		t.Fatalf("expected acc2_success in body, got %s", w.Body.String())
+	}
+
+	// Both accounts hit
+	if atomic.LoadInt32(&acc1Hits) != 1 || atomic.LoadInt32(&acc2Hits) != 1 {
+		t.Fatalf("expected acc1Hits=1, acc2Hits=1; got acc1=%d, acc2=%d", acc1Hits, acc2Hits)
+	}
+
+	// Verify acc_1 was put in soft cooldown
+	loaded, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored1 := storage.FindAccount(loaded, acc1)
+	if stored1.RateLimitedUntil == nil || *stored1.RateLimitedUntil <= float64(time.Now().Unix()) {
+		t.Fatalf("expected soft cooldown on acc_1, got %v", stored1.RateLimitedUntil)
+	}
+	if stored1.Status != "" {
+		t.Fatalf("acc_1 status should remain empty (soft cooldown), got %q", stored1.Status)
+	}
+
+	// RecordSuccess on acc_1 should clear soft cooldown
+	if err := RecordSuccess(acc1, true); err != nil {
+		t.Fatalf("RecordSuccess failed: %v", err)
+	}
+	loaded2, _ := storage.LoadPool()
+	stored1After := storage.FindAccount(loaded2, acc1)
+	if stored1After.RateLimitedUntil != nil {
+		t.Fatalf("expected RateLimitedUntil to be cleared after success, got %v", stored1After.RateLimitedUntil)
+	}
+}

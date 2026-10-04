@@ -17,6 +17,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
+	"github.com/vlxlv/agy-pool-go/internal/forecast"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
@@ -36,6 +37,7 @@ type TopOptions struct {
 	TargetAccount string
 	Interval      time.Duration
 	Width         int
+	Height        int
 	Once          bool
 	ShowEmail     bool
 	ForceRaw      bool // For testing raw mode rendering and alternate screen buffer transitions
@@ -144,10 +146,17 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 	// Non-interactive / single-shot mode
 	if opts.Once {
 		w := opts.Width
-		if w <= 0 {
-			w = terminalWidth(opts.Stdout)
+		h := opts.Height
+		if w <= 0 || h <= 0 {
+			tw, th := terminalSize(opts.Stdout)
+			if w <= 0 {
+				w = tw
+			}
+			if h <= 0 {
+				h = th
+			}
 		}
-		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, opts.Interval, w, false, opts.ShowEmail)
+		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, opts.Interval, w, h, false, opts.ShowEmail)
 		fmt.Fprint(opts.Stdout, frame)
 		return 0
 	}
@@ -237,10 +246,17 @@ func RunTop(ctx *daemon.InstanceContext, opts TopOptions) int {
 
 	redraw := func() {
 		w := opts.Width
-		if w <= 0 {
-			w = terminalWidth(opts.Stdout)
+		h := opts.Height
+		if w <= 0 || h <= 0 {
+			tw, th := terminalSize(opts.Stdout)
+			if w <= 0 {
+				w = tw
+			}
+			if h <= 0 {
+				h = th
+			}
 		}
-		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, interval, w, refreshBanner, opts.ShowEmail)
+		frame := renderCurrentSnapshot(ctx, opts.TargetAccount, interval, w, h, refreshBanner, opts.ShowEmail)
 		var buf bytes.Buffer
 		buf.WriteString("\033[H")
 		lines := strings.Split(frame, "\n")
@@ -329,6 +345,7 @@ func renderCurrentSnapshot(
 	targetAccount string,
 	interval time.Duration,
 	width int,
+	height int,
 	refreshBanner bool,
 	showEmailOpt ...bool,
 ) string {
@@ -349,11 +366,10 @@ func renderCurrentSnapshot(
 	}
 
 	pool, _ := storage.LoadPool()
-	return RenderTopFrame(pool, stats, info, daemonRunning, targetAccount, interval, width, refreshBanner, showEmail)
+	return RenderTopFrameWithHeight(pool, stats, info, daemonRunning, targetAccount, interval, width, height, refreshBanner, showEmail)
 }
 
-// RenderTopFrame formats a complete, responsive dashboard frame as a string.
-// Every rendered non-control line is guaranteed to have VisibleWidth(line) <= width.
+// RenderTopFrame formats a complete, responsive dashboard frame as a string with default 24-line height.
 func RenderTopFrame(
 	pool *storage.Pool,
 	stats *daemon.RuntimeStats,
@@ -365,6 +381,23 @@ func RenderTopFrame(
 	refreshBanner bool,
 	showEmailOpt ...bool,
 ) string {
+	return RenderTopFrameWithHeight(pool, stats, info, daemonRunning, targetAccount, interval, width, 24, refreshBanner, showEmailOpt...)
+}
+
+// RenderTopFrameWithHeight formats a complete, responsive dashboard frame as a string.
+// Every rendered non-control line is guaranteed to have VisibleWidth(line) <= width.
+func RenderTopFrameWithHeight(
+	pool *storage.Pool,
+	stats *daemon.RuntimeStats,
+	info *daemon.DaemonInfo,
+	daemonRunning bool,
+	targetAccount string,
+	interval time.Duration,
+	width int,
+	height int,
+	refreshBanner bool,
+	showEmailOpt ...bool,
+) string {
 	showEmail := false
 	if len(showEmailOpt) > 0 {
 		showEmail = showEmailOpt[0]
@@ -372,6 +405,9 @@ func RenderTopFrame(
 
 	if width <= 0 {
 		width = 100
+	}
+	if height <= 0 {
+		height = 24
 	}
 
 	var sb strings.Builder
@@ -405,7 +441,10 @@ func RenderTopFrame(
 	// 3. Runtime Counters
 	renderRuntimeCounters(&sb, stats, daemonRunning, width)
 
-	// 4. Footer
+	// 4. Telemetry (Runway & Health)
+	renderTelemetry(&sb, pool, nowTS, width, height)
+
+	// 5. Footer
 	renderFooter(&sb, interval, width, refreshBanner)
 
 	// Final guarantee: every non-control visible line fits within requested terminal width
@@ -422,6 +461,173 @@ func RenderTopFrame(
 	}
 
 	return boundedSb.String()
+}
+
+func renderTelemetry(sb *strings.Builder, pool *storage.Pool, nowTS int64, width, height int) {
+	if height < 18 || pool == nil || len(pool.Accounts) == 0 {
+		return
+	}
+
+	fc := forecast.SimulateQuotaRunway(pool, nil, float64(nowTS))
+	if fc.Status != "ok" {
+		return
+	}
+
+	hCount := fc.HealthyCount
+	totCount := fc.TotalAccounts
+	coolCount := fc.CoolingCount
+	pace := fc.TargetPace
+	isIdle := fc.IsIdle
+	replenish := fc.ReplenishRatePctHr
+	burn := fc.BurnRatePctHr
+	net := fc.NetRatePctHr
+	sim := fc.CurrentRunway
+	bench := fc.BenchmarkRunway
+
+	healthStr := fmt.Sprintf("%d/%d Active", hCount, totCount)
+	if coolCount > 0 {
+		healthStr += fmt.Sprintf(" (%d Cooling)", coolCount)
+	}
+
+	sign := ""
+	if net >= 0 {
+		sign = "+"
+	}
+	netClr := clrYellow
+	if net >= 0 {
+		netClr = clrGreen
+	}
+
+	subSep := strings.Repeat("-", width)
+	sb.WriteString(subSep + "\n")
+
+	if width < 76 {
+		// Responsive compact telemetry (< 76 cols)
+		sb.WriteString(fmt.Sprintf(" %s%s⚡ Quota Runway & Health:%s\n", clrBold, clrCyan, clrReset))
+		paceVal := "Idle"
+		if !isIdle {
+			paceVal = fmt.Sprintf("%.1f/hr", pace)
+		}
+		sb.WriteString(fmt.Sprintf("  • Health & Pace:  %s | %s\n", healthStr, paceVal))
+		if isIdle {
+			sb.WriteString(fmt.Sprintf("  • Capacity:       +%.1f%%/hr reload\n", replenish))
+		} else {
+			bUnit := "%/hr"
+			if width < 54 {
+				bUnit = "%"
+			}
+			sb.WriteString(fmt.Sprintf("  • Burn/Reload:    ~%.1f%s | +%.1f%s (%s%s%.1f%%%s)\n",
+				burn, bUnit, replenish, bUnit, netClr, sign, net, clrReset))
+		}
+
+		// 5h Runway compact
+		var r5Tag string
+		if isIdle {
+			if bench.IsSustainable5H {
+				r5Tag = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
+			} else {
+				r5Tag = fmt.Sprintf("~%s", forecast.FormatDurationShort(bench.FirstStallSec))
+			}
+		} else {
+			if sim.IsSustainable5H {
+				r5Tag = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
+			} else if sim.FirstStallSec != nil {
+				r5Tag = fmt.Sprintf("%s~%s%s", clrYellow, forecast.FormatDurationShort(sim.FirstStallSec), clrReset)
+			} else {
+				r5Tag = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
+			}
+		}
+		sb.WriteString(fmt.Sprintf("  • 5-Hour Runway:  %s\n", r5Tag))
+
+		// Weekly Runway compact
+		activeSim := sim
+		if isIdle {
+			activeSim = bench
+		}
+		var wTag string
+		if activeSim.IsSustainableWeekly {
+			wTag = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
+		} else if activeSim.WeeklyExhaustSec != nil {
+			wDays := *activeSim.WeeklyExhaustSec / 86400.0
+			wClr := clrYellow
+			if wDays <= 2.0 {
+				wClr = clrRed
+			}
+			wTag = fmt.Sprintf("%s~%.1fd%s", wClr, wDays, clrReset)
+		} else {
+			wTag = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
+		}
+		sb.WriteString(fmt.Sprintf("  • Weekly Runway:  %s\n", wTag))
+	} else {
+		// Full standard telemetry (>= 75 cols)
+		var paceLine, replenishLine string
+		if isIdle {
+			paceStr := fmt.Sprintf("%sIdle (0 gens/hr)%s", clrDim, clrReset)
+			paceLine = fmt.Sprintf("  • Health & Pace:  %s | %s", healthStr, paceStr)
+			replenishLine = fmt.Sprintf("  • Capacity:       +%.1f%%/hr natural recovery across pool", replenish)
+		} else {
+			winLabel := "smoothed"
+			if fc.Telemetry != nil {
+				winLabel = fc.Telemetry.WindowUsed
+			}
+			paceStr := fmt.Sprintf("%s%.1f gens/hr%s (%s%s%s)", clrBold, pace, clrReset, clrCyan, winLabel, clrReset)
+			paceLine = fmt.Sprintf("  • Health & Pace:  %s | %s", healthStr, paceStr)
+			replenishLine = fmt.Sprintf("  • Burn/Reload:    ~%.1f%%/hr burn | +%.1f%%/hr reload (%s%s%.1f%%/hr net%s)",
+				burn, replenish, netClr, sign, net, clrReset)
+		}
+
+		sb.WriteString(fmt.Sprintf(" %s%s⚡ Quota Runway & Endurance Forecast:%s\n", clrBold, clrCyan, clrReset))
+		sb.WriteString(paceLine + "\n")
+		sb.WriteString(replenishLine + "\n")
+
+		// 5h Runway
+		var r5Tag string
+		if isIdle {
+			if bench.IsSustainable5H {
+				r5Tag = fmt.Sprintf("%s⚡ Sustainable%s (> 24h at standard pace)", clrGreen, clrReset)
+			} else {
+				r5Tag = fmt.Sprintf("~%s", forecast.FormatDurationShort(bench.FirstStallSec))
+			}
+		} else {
+			if sim.IsSustainable5H {
+				r5Tag = fmt.Sprintf("%s⚡ Sustainable%s (Pool replenishes faster than burn)", clrGreen, clrReset)
+			} else if sim.FirstStallSec != nil {
+				stallStr := forecast.FormatDurationShort(sim.FirstStallSec)
+				causeNote := ""
+				if sim.StallDurationSec != nil && *sim.StallDurationSec > 0 {
+					causeNote = fmt.Sprintf(" (Dry pause: ~%s)", forecast.FormatDurationShort(sim.StallDurationSec))
+				}
+				r5Tag = fmt.Sprintf("%s~%s until stall%s%s", clrYellow, stallStr, clrReset, causeNote)
+			} else {
+				r5Tag = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
+			}
+		}
+		sb.WriteString(fmt.Sprintf("  • 5-Hour Runway:  %s\n", r5Tag))
+
+		// Weekly Runway
+		activeSim := sim
+		if isIdle {
+			activeSim = bench
+		}
+		var wTag string
+		if activeSim.IsSustainableWeekly {
+			wTag = fmt.Sprintf("%s⚡ Sustainable%s (> 7 Days remaining)", clrGreen, clrReset)
+		} else if activeSim.WeeklyExhaustSec != nil {
+			wDays := *activeSim.WeeklyExhaustSec / 86400.0
+			wClr := clrYellow
+			if wDays <= 2.0 {
+				wClr = clrRed
+			}
+			wTag = fmt.Sprintf("%s~%.1f Days remaining%s", wClr, wDays, clrReset)
+		} else {
+			wTag = fmt.Sprintf("%s⚡ Sustainable%s", clrGreen, clrReset)
+		}
+		wLabel := "Weekly Runway:  "
+		if isIdle {
+			wLabel = "Weekly Budget:  "
+		}
+		sb.WriteString(fmt.Sprintf("  • %s%s\n", wLabel, wTag))
+	}
 }
 
 func filterAccounts(all []*storage.Account, target string) []*storage.Account {
@@ -543,8 +749,11 @@ func renderAccountsWide(
 	width int,
 	showEmail bool,
 ) {
-	targetCol := 64
-	if width > 68 {
+	targetCol := width - 4
+	if targetCol > 86 {
+		targetCol = 86
+	}
+	if targetCol < 64 {
 		targetCol = 64
 	}
 
@@ -554,12 +763,16 @@ func renderAccountsWide(
 			continue
 		}
 
-		dispName := accounts.DisplayAccountName(acc)
-		state, stateClr := getAccountState(acc, pool, nowTS)
-		hits := acc.GetHits()
+		dispName := accounts.DisplayAccountName(acc, showEmail)
 		inFlight := getInFlight(acc, stats)
+		state, stateClr := getAccountState(acc, pool, nowTS, inFlight)
+		hits := acc.GetHits()
+		ageStr := quota.FormatQuotaAge(acc, float64(nowTS))
 
 		right := fmt.Sprintf("in-flight %d · hits %d", inFlight, hits)
+		if acc.LastQuota != nil {
+			right = fmt.Sprintf("in-flight %d · hits %d · quota age %s", inFlight, hits, ageStr)
+		}
 		rightLen := VisibleWidth(right)
 
 		suffix := " · " + state
@@ -671,9 +884,6 @@ func renderAccountDetailsWide(sb *strings.Builder, acc *storage.Account, nowTS i
 		}
 		sb.WriteString(fmt.Sprintf("  3P  %s %s   %s\n", tpBar, tpPct, rTpStr))
 	}
-
-	ageStr := quota.FormatQuotaAge(acc, float64(nowTS))
-	sb.WriteString(fmt.Sprintf("  quota age %s\n", ageStr))
 }
 
 func renderAccountsCompact(

@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"reflect"
+	"strings"
 
 	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
@@ -46,7 +47,14 @@ func RecordSuccess(account *storage.Account, isGeneration bool) error {
 			if stored.Status == storage.StatusVerificationPending {
 				stored.Status = ""
 			}
+			pool.RecordGenerationTelemetry(stored.ID, now)
 		}
+
+		// Clear soft cooldown (e.g. temporary location error) if account is otherwise healthy
+		if stored.Status == "" && stored.RateLimitedUntil != nil && *stored.RateLimitedUntil > 0 {
+			stored.RateLimitedUntil = nil
+		}
+
 		activeID := ""
 		if pool.ActiveAccountID != nil {
 			activeID = *pool.ActiveAccountID
@@ -130,6 +138,47 @@ func RecordAuthError(account *storage.Account) error {
 				var zero float64
 				stored.LastQuota.RemainingFraction = &zero
 			}
+		}
+		return nil
+	})
+}
+
+// IsLocationError checks if a 400 or 403 error represents a temporary location restriction.
+func IsLocationError(status int, body []byte) bool {
+	if status != 400 && status != 403 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	markers := []string{
+		"user location is not supported",
+		"location is not supported",
+		"location_not_supported",
+		"user_location_not_supported",
+		"not supported in your country",
+		"not supported in your region",
+		"country not supported",
+		"region not supported",
+	}
+	for _, m := range markers {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	if strings.Contains(text, "failed_precondition") && strings.Contains(text, "location") {
+		return true
+	}
+	return false
+}
+
+// RecordLocationError marks account with a soft 30s cooldown under transaction.
+func RecordLocationError(account *storage.Account) error {
+	now := float64(NowFunc().Unix())
+	return runPoolTransaction(func(pool *storage.Pool) error {
+		stored := storage.FindAccount(pool, account)
+		if stored != nil {
+			cooldown := now + 30 // 30s soft cooldown
+			stored.RateLimitedUntil = &cooldown
+			stored.ErrorCount++
 		}
 		return nil
 	})

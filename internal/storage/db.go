@@ -413,6 +413,9 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 	strategy := "max_quota"
 	var activeID *string
 	var rrID *string
+	var showEmail *bool
+	var accountOrder []string
+	var genEvents []GenerationEvent
 	var poolExtra map[string]json.RawMessage
 
 	for rows.Next() {
@@ -437,6 +440,25 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 			if v.Valid && v.String != "" {
 				val := v.String
 				rrID = &val
+			}
+		case "show_email":
+			if v.Valid && v.String != "" {
+				b := v.String == "1" || v.String == "true"
+				showEmail = &b
+			}
+		case "account_order":
+			if v.Valid && v.String != "" {
+				var ord []string
+				if err := json.Unmarshal([]byte(v.String), &ord); err == nil {
+					accountOrder = ord
+				}
+			}
+		case "generation_events":
+			if v.Valid && v.String != "" {
+				var evs []GenerationEvent
+				if err := json.Unmarshal([]byte(v.String), &evs); err == nil {
+					genEvents = evs
+				}
 			}
 		case "pool_extra":
 			if v.Valid && v.String != "" {
@@ -607,12 +629,35 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 		accountsList = append(accountsList, acc)
 	}
 
+	if len(accountOrder) > 0 {
+		accMap := make(map[string]*Account, len(accountsList))
+		for _, a := range accountsList {
+			accMap[a.ID] = a
+		}
+		orderedList := make([]*Account, 0, len(accountsList))
+		used := make(map[string]bool)
+		for _, aid := range accountOrder {
+			if a, ok := accMap[aid]; ok {
+				orderedList = append(orderedList, a)
+				used[aid] = true
+			}
+		}
+		for _, a := range accountsList {
+			if !used[a.ID] {
+				orderedList = append(orderedList, a)
+			}
+		}
+		accountsList = orderedList
+	}
+
 	return &Pool{
 		Version:                 1,
 		Strategy:                strategy,
 		ActiveAccountID:         activeID,
 		RoundRobinLastAccountID: rrID,
+		ShowEmail:               showEmail,
 		Accounts:                accountsList,
+		GenerationEvents:        genEvents,
 		Extra:                   poolExtra,
 	}, nil
 }
@@ -650,6 +695,42 @@ func SavePoolToTx(tx *sql.Tx, pool *Pool) error {
 		if _, err := tx.Exec("DELETE FROM runtime_global WHERE key = 'round_robin_last_account_id'"); err != nil {
 			return fmt.Errorf("failed to delete round_robin_last_account_id: %w", err)
 		}
+	}
+
+	if pool.ShowEmail != nil {
+		val := "0"
+		if *pool.ShowEmail {
+			val = "1"
+		}
+		if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('show_email', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", val); err != nil {
+			return fmt.Errorf("failed to save show_email: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec("DELETE FROM runtime_global WHERE key = 'show_email'"); err != nil {
+			return fmt.Errorf("failed to delete show_email: %w", err)
+		}
+	}
+
+	accountIDs := make([]string, 0, len(pool.Accounts))
+	for _, a := range pool.Accounts {
+		if a != nil && a.ID != "" {
+			accountIDs = append(accountIDs, a.ID)
+		}
+	}
+	if b, err := json.Marshal(accountIDs); err == nil {
+		if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('account_order', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(b)); err != nil {
+			return fmt.Errorf("failed to save account_order: %w", err)
+		}
+	}
+
+	if len(pool.GenerationEvents) > 0 {
+		if b, err := json.Marshal(pool.GenerationEvents); err == nil {
+			if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('generation_events', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(b)); err != nil {
+				return fmt.Errorf("failed to save generation_events: %w", err)
+			}
+		}
+	} else {
+		_, _ = tx.Exec("DELETE FROM runtime_global WHERE key = 'generation_events'")
 	}
 
 	if len(pool.Extra) > 0 {

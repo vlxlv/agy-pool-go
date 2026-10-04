@@ -56,6 +56,45 @@ func RenderProgressBar(fraction *float64, width int) string {
 		color, pct, clrReset)
 }
 
+// RenderCompactProgressBar renders a compact progress bar (e.g. for preview lists).
+func RenderCompactProgressBar(fraction *float64, width int) string {
+	if width <= 0 {
+		width = 8
+	}
+	if fraction == nil {
+		return fmt.Sprintf("[%s%s%s] N/A", clrDim, strings.Repeat("─", width), clrReset)
+	}
+
+	f := *fraction
+	if f < 0.0 {
+		f = 0.0
+	} else if f > 1.0 {
+		f = 1.0
+	}
+
+	filled := int(math.Round(f * float64(width)))
+	if filled > width {
+		filled = width
+	}
+	empty := width - filled
+
+	pct := fmt.Sprintf("%d%%", int(math.Round(f*100.0)))
+	color := clrRed
+	if f > 0.4 {
+		color = clrGreen
+	} else if f > 0.15 {
+		color = clrYellow
+	}
+
+	filledBar := strings.Repeat("━", filled)
+	emptyBar := strings.Repeat("─", empty)
+
+	return fmt.Sprintf("[%s%s%s%s%s%s] %s%s%s",
+		color, filledBar, clrReset,
+		clrDim, emptyBar, clrReset,
+		color, pct, clrReset)
+}
+
 // FormatRemainingTime formats a reset timestamp into relative string matching Python reference.
 func FormatRemainingTime(resetTime any) string {
 	if resetTime == nil {

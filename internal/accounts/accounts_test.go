@@ -247,7 +247,9 @@ func TestSyncActiveAgyTokenFile_RefreshFailureLeavesFileUnchanged(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenRefresher = func(*storage.Account) (string, error) { return "", errors.New("token refresh failed (HTTP 400)") }
+	tokenRefresher = func(*storage.Account, ...bool) (string, error) {
+		return "", errors.New("token refresh failed (HTTP 400)")
+	}
 	tokenFileWriter = func(*storage.Account) error { t.Fatal("writer called after refresh failure"); return nil }
 	_, err = SyncActiveAgyTokenFile()
 	if err == nil || strings.Contains(err.Error(), "access-secret") || strings.Contains(err.Error(), "refresh-secret") {
@@ -296,7 +298,9 @@ func TestSwitchAccount_RefreshFailureKeepsPreviousActive(t *testing.T) {
 	if err := WriteAgyTokenFile(first); err != nil {
 		t.Fatal(err)
 	}
-	tokenRefresher = func(*storage.Account) (string, error) { return "", errors.New("token refresh failed (HTTP 400)") }
+	tokenRefresher = func(*storage.Account, ...bool) (string, error) {
+		return "", errors.New("token refresh failed (HTTP 400)")
+	}
 	_, err := SwitchAccount("acc_2")
 	if err == nil || strings.Contains(err.Error(), "access-secret") || strings.Contains(err.Error(), "refresh-secret") {
 		t.Fatalf("unexpected switch error: %v", err)
@@ -364,7 +368,7 @@ func TestRemoveAccount_ReplacementSyncFailureKeepsPool(t *testing.T) {
 	if err := storage.SavePool(pool); err != nil {
 		t.Fatal(err)
 	}
-	tokenRefresher = func(*storage.Account) (string, error) { return "", errors.New("refresh failed") }
+	tokenRefresher = func(*storage.Account, ...bool) (string, error) { return "", errors.New("refresh failed") }
 	if _, err := RemoveAccount("acc_1"); err == nil {
 		t.Fatal("expected replacement sync failure")
 	}

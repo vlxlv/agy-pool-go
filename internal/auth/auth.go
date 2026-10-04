@@ -224,16 +224,21 @@ func safeProviderReason(body []byte) string {
 	}
 }
 
-func RefreshToken(account *storage.Account) (string, error) {
+func RefreshToken(account *storage.Account, forceOpt ...bool) (string, error) {
 	if account == nil {
 		return "", errors.New("nil account")
+	}
+
+	force := false
+	if len(forceOpt) > 0 {
+		force = forceOpt[0]
 	}
 
 	now := NowFunc()
 	nowUnix := float64(now.Unix())
 
-	// If valid for at least another 2 minutes, return existing access_token
-	if account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-nowUnix > 120) {
+	// If valid for at least another 2 minutes and not forced, return existing access_token
+	if !force && account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-nowUnix > 120) {
 		return account.AccessToken, nil
 	}
 
@@ -283,7 +288,7 @@ func RefreshToken(account *storage.Account) (string, error) {
 
 		currentNow := NowFunc()
 		currentNowUnix := float64(currentNow.Unix())
-		if account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-currentNowUnix > 120) {
+		if !force && account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-currentNowUnix > 120) {
 			refreshedToken = account.AccessToken
 			return nil
 		}

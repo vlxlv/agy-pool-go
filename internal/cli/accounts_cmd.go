@@ -19,24 +19,32 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
+	"github.com/vlxlv/agy-pool-go/internal/forecast"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 	"golang.org/x/term"
 )
 
-// terminalWidth detects terminal column width using golang.org/x/term when stdout is a TTY,
-// or returns 100 as the deterministic non-TTY default (desktop layout).
-func terminalWidth(w io.Writer) int {
+// terminalSize detects terminal column width and height using golang.org/x/term when stdout is a TTY,
+// or returns 100, 24 as the deterministic non-TTY default (desktop layout).
+func terminalSize(w io.Writer) (int, int) {
 	if f, ok := w.(*os.File); ok {
 		fd := int(f.Fd())
 		if term.IsTerminal(fd) {
-			if width, _, err := term.GetSize(fd); err == nil && width > 0 {
-				return width
+			if width, height, err := term.GetSize(fd); err == nil && width > 0 && height > 0 {
+				return width, height
 			}
 		}
 	}
-	return 100
+	return 100, 24
+}
+
+// terminalWidth detects terminal column width using golang.org/x/term when stdout is a TTY,
+// or returns 100 as the deterministic non-TTY default (desktop layout).
+func terminalWidth(w io.Writer) int {
+	width, _ := terminalSize(w)
+	return width
 }
 
 // chooseBarWidth calculates the largest bar width (up to maxDesired) that fits within lineWidth budget.
@@ -72,12 +80,18 @@ func ListAccounts(target string, stdout, stderr io.Writer, showEmail ...bool) {
 	ListAccountsWithWidth(target, width, stdout, stderr, showEmail...)
 }
 
-func getAccountState(acc *storage.Account, pool *storage.Pool, nowTS int64) (string, string) {
+func getAccountState(acc *storage.Account, pool *storage.Pool, nowTS int64, inFlightOpt ...int64) (string, string) {
+	var inFlight int64
+	if len(inFlightOpt) > 0 {
+		inFlight = inFlightOpt[0]
+	}
+
 	q := acc.LastQuota
 	q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
 	isCooling := acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > float64(nowTS)
 	isExhausted := (q5Frac != nil && *q5Frac <= config.DepletedThreshold) ||
 		(gwFrac != nil && *gwFrac <= config.DepletedThreshold)
+
 	isActive := pool.ActiveAccountID != nil && acc.ID == *pool.ActiveAccountID
 
 	status := acc.Status
@@ -116,6 +130,9 @@ func getAccountState(acc *storage.Account, pool *storage.Pool, nowTS int64) (str
 	}
 	if isActive {
 		return "CLI Base", clrGreen
+	}
+	if inFlight > 0 {
+		return fmt.Sprintf("⚡ Running (%d)", inFlight), clrCyan
 	}
 	return "Ready", clrCyan
 }
@@ -233,8 +250,12 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 		dispName := accounts.DisplayAccountName(acc)
 		state, stateClr := getAccountState(acc, pool, nowTS)
 		hits := acc.GetHits()
+		ageStr := quota.FormatQuotaAge(acc, float64(nowTS))
 
 		right := fmt.Sprintf("hits %d", hits)
+		if acc.LastQuota != nil {
+			right = fmt.Sprintf("hits %d · quota age %s", hits, ageStr)
+		}
 		rightLen := len(right)
 		targetCol := 64
 
@@ -327,9 +348,6 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 				}
 				fmt.Fprintf(stdout, "  3P  %s %s   %s\n", tpBar, tpPct, rTpStr)
 			}
-
-			ageStr := quota.FormatQuotaAge(acc, float64(nowTS))
-			fmt.Fprintf(stdout, "  quota age %s\n", ageStr)
 		}
 
 		if i < len(accList)-1 {
@@ -353,6 +371,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 		clrYellow, clrReset, clrDim, clrReset, clrDim, clrReset)
 	fmt.Fprintf(stdout, " Strategy: %s%s%s | Gateway Proxy: %s\n",
 		clrBold, strat, clrReset, gatewayStatus)
+	forecast.PrintRunwaySummary(stdout, pool, float64(nowTS))
 	fmt.Fprintf(stdout, "%s\n\n", sep)
 }
 

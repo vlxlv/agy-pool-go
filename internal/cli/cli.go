@@ -143,6 +143,16 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "move", "mv":
+		return MoveCmd(stdout, stderr, args[1:]...)
+	case "swap":
+		return SwapCmd(stdout, stderr, args[1:]...)
+	case "sort":
+		return SortCmd(stdout, stderr, args[1:]...)
+	case "reorder", "order":
+		return ReorderCmd(stdout, stderr, args[1:]...)
+	case "config":
+		return ConfigCmd(stdout, stderr, args[1:]...)
 	case "switch":
 		target := "auto"
 		if len(args) > 1 {
@@ -197,6 +207,12 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return RestartDaemonCmd(stdout, stderr, args[1:]...)
 	case "status":
 		return StatusCmd(stdout, stderr, args[1:]...)
+	case "forecast", "runway", "predict":
+		if err := ForecastCmd(args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "%s[Error] %v%s\n", clrRed, err, clrReset)
+			return 1
+		}
+		return 0
 	case "migrate-legacy":
 		return handleMigrateLegacy(args[1:], stdout, stderr)
 	case "install":
@@ -206,23 +222,28 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "uninstall":
 		return handleUninstall(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n")
+		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,move,mv,swap,sort,reorder,order,config,log,logs,start,stop,restart,status,forecast,runway,predict,top,watch,monitor,version,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
 		return 2
 	}
 }
 
 func printHelp(out io.Writer) {
-	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,log,logs,start,stop,restart,status,top,watch,monitor,version,run} ...\n\n")
+	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,move,mv,swap,sort,reorder,order,config,log,logs,start,stop,restart,status,forecast,runway,predict,top,watch,monitor,version,run} ...\n\n")
 	fmt.Fprintf(out, "Antigravity Multi-Account Pool & Load Balancer for Termux & Linux\n\n")
 	fmt.Fprintf(out, "Examples:\n")
 	fmt.Fprintf(out, "  agy-pool login            Add/login a new Google account\n")
 	fmt.Fprintf(out, "  agy-pool list [-e]        List accounts in rotation pool (-e to show email)\n")
 	fmt.Fprintf(out, "  agy-pool quota [-e]       Display per-account quota progress bars (-e to show email)\n")
 	fmt.Fprintf(out, "  agy-pool top [-e]         Interactive real-time quota & activity dashboard (-e to show email)\n")
+	fmt.Fprintf(out, "  agy-pool forecast         Predict quota endurance and runway based on usage\n")
 	fmt.Fprintf(out, "  agy-pool status           Show gateway process and runtime summary\n")
 	fmt.Fprintf(out, "  agy-pool strategy         View or change load balancing strategy\n")
 	fmt.Fprintf(out, "  agy-pool rename 1 \"Work\"  Set friendly label for an account\n")
+	fmt.Fprintf(out, "  agy-pool move 2 top       Move account to a specific position\n")
+	fmt.Fprintf(out, "  agy-pool swap 1 2         Swap positions of two accounts\n")
+	fmt.Fprintf(out, "  agy-pool sort quota       Sort accounts by quota, hits, name, email, or status\n")
+	fmt.Fprintf(out, "  agy-pool reorder 3 1 2    Batch reorder accounts in custom order\n")
 	fmt.Fprintf(out, "  agy-pool disable 4        Disable an account in rotation pool\n")
 	fmt.Fprintf(out, "  agy-pool enable 4         Enable a previously disabled account\n")
 	fmt.Fprintf(out, "  agy-pool doctor           Run comprehensive system diagnostic check\n")
