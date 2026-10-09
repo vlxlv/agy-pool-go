@@ -228,6 +228,21 @@ func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer, s
 	renderVeryNarrowQuotaDashboard(accList, pool, nowTS, width, showEmail, stdout)
 }
 
+func resolveNextCandidateID(pool *storage.Pool, nowTS int64) string {
+	if pool == nil || len(pool.Accounts) <= 1 {
+		return ""
+	}
+	strat := pool.Strategy
+	if strat == "" {
+		strat = config.DefaultStrategy
+	}
+	ordered := scheduler.OrderCandidates(pool.Accounts, strat, pool, float64(nowTS))
+	if len(ordered) > 0 && ordered[0] != nil && !scheduler.IsRestricted(ordered[0]) {
+		return ordered[0].ID
+	}
+	return ""
+}
+
 func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, gatewayStatus string, nowTS int64, width int, showEmail bool, stdout io.Writer) {
 	borderWidth := 68
 	if width < 68 {
@@ -241,6 +256,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 	fmt.Fprintf(stdout, "%s%*s%s\n", clrBold, (68+len(title))/2, title, clrReset)
 	fmt.Fprintf(stdout, "%s\n", sep)
 
+	nextID := resolveNextCandidateID(pool, nowTS)
 	for i, acc := range accList {
 		if acc == nil {
 			continue
@@ -265,7 +281,14 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			targetCol = borderWidth - 4
 		}
 
-		suffixLen := utf8.RuneCountInString(" · ") + utf8.RuneCountInString(state)
+		nextTag := ""
+		nextTagVisible := ""
+		if nextID != "" && acc.ID == nextID {
+			nextTag = fmt.Sprintf(" %s%s[Next ⚡]%s", clrBold, clrCyan, clrReset)
+			nextTagVisible = " [Next ⚡]"
+		}
+
+		suffixLen := utf8.RuneCountInString(" · ") + utf8.RuneCountInString(state) + utf8.RuneCountInString(nextTagVisible)
 		maxLeftLen := targetCol - 2 - rightLen - 2
 		if utf8.RuneCountInString(dispName)+suffixLen > maxLeftLen {
 			avail := maxLeftLen - suffixLen
@@ -280,9 +303,10 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			spaces = 2
 		}
 
-		fmt.Fprintf(stdout, "  %s%s%s · %s%s%s%s%s\n",
+		fmt.Fprintf(stdout, "  %s%s%s · %s%s%s%s%s%s\n",
 			clrBold, dispName, clrReset,
 			stateClr, state, clrReset,
+			nextTag,
 			strings.Repeat(" ", spaces),
 			right)
 
@@ -401,6 +425,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 
 func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, showEmail bool, stdout io.Writer) {
 	fmt.Fprintln(stdout)
+	nextID := resolveNextCandidateID(pool, nowTS)
 	for i, acc := range accList {
 		if acc == nil {
 			continue
@@ -410,7 +435,14 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 		state, stateClr := getAccountState(acc, pool, nowTS)
 		hits := acc.GetHits()
 
-		suffix := fmt.Sprintf(" · %s · hits %d", state, hits)
+		nextTag := ""
+		nextTagVisible := ""
+		if nextID != "" && acc.ID == nextID {
+			nextTag = fmt.Sprintf(" %s%s[Next ⚡]%s", clrBold, clrCyan, clrReset)
+			nextTagVisible = " [Next ⚡]"
+		}
+
+		suffix := fmt.Sprintf(" · %s%s · hits %d", state, nextTagVisible, hits)
 		suffixLen := utf8.RuneCountInString(suffix)
 		if 2+utf8.RuneCountInString(dispName)+suffixLen > width {
 			avail := width - 2 - suffixLen
@@ -419,8 +451,8 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 			}
 		}
 
-		fmt.Fprintf(stdout, "  %s%s%s · %s%s%s · hits %d\n",
-			clrBold, dispName, clrReset, stateClr, state, clrReset, hits)
+		fmt.Fprintf(stdout, "  %s%s%s · %s%s%s%s · hits %d\n",
+			clrBold, dispName, clrReset, stateClr, state, clrReset, nextTag, hits)
 
 		if showEmail && acc.Email != "" {
 			fmt.Fprintf(stdout, "  %sEmail: %s%s\n", clrDim, acc.Email, clrReset)
@@ -515,6 +547,7 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 
 func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, daemonRunning bool, nowTS int64, width int, showEmail bool, stdout io.Writer) {
 	fmt.Fprintln(stdout)
+	nextID := resolveNextCandidateID(pool, nowTS)
 	for i, acc := range accList {
 		if acc == nil {
 			continue
@@ -524,7 +557,14 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 		state, stateClr := getAccountState(acc, pool, nowTS)
 		hits := acc.GetHits()
 
-		suffix := fmt.Sprintf(" · %s", state)
+		nextTag := ""
+		nextTagVisible := ""
+		if nextID != "" && acc.ID == nextID {
+			nextTag = fmt.Sprintf(" %s%s[Next ⚡]%s", clrBold, clrCyan, clrReset)
+			nextTagVisible = " [Next ⚡]"
+		}
+
+		suffix := fmt.Sprintf(" · %s%s", state, nextTagVisible)
 		suffixLen := utf8.RuneCountInString(suffix)
 		if utf8.RuneCountInString(dispName)+suffixLen > width {
 			avail := width - suffixLen
@@ -533,7 +573,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 			}
 		}
 
-		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
+		fmt.Fprintf(stdout, "%s%s%s · %s%s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset, nextTag)
 
 		if showEmail && acc.Email != "" {
 			fmt.Fprintf(stdout, "%sEmail: %s%s\n", clrDim, acc.Email, clrReset)
@@ -626,6 +666,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 
 func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Pool, nowTS int64, width int, showEmail bool, stdout io.Writer) {
 	fmt.Fprintln(stdout)
+	nextID := resolveNextCandidateID(pool, nowTS)
 	for i, acc := range accList {
 		if acc == nil {
 			continue
@@ -635,7 +676,14 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 		state, stateClr := getAccountState(acc, pool, nowTS)
 		hits := acc.GetHits()
 
-		suffix := fmt.Sprintf(" · %s", state)
+		nextTag := ""
+		nextTagVisible := ""
+		if nextID != "" && acc.ID == nextID {
+			nextTag = fmt.Sprintf(" %s%s[Next ⚡]%s", clrBold, clrCyan, clrReset)
+			nextTagVisible = " [Next ⚡]"
+		}
+
+		suffix := fmt.Sprintf(" · %s%s", state, nextTagVisible)
 		suffixLen := utf8.RuneCountInString(suffix)
 		if utf8.RuneCountInString(dispName)+suffixLen > width {
 			avail := width - suffixLen
@@ -644,7 +692,7 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 			}
 		}
 
-		fmt.Fprintf(stdout, "%s%s%s · %s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset)
+		fmt.Fprintf(stdout, "%s%s%s · %s%s%s%s\n", clrBold, dispName, clrReset, stateClr, state, clrReset, nextTag)
 
 		if showEmail && acc.Email != "" {
 			emailLine := fmt.Sprintf("%sEmail: %s%s", clrDim, acc.Email, clrReset)

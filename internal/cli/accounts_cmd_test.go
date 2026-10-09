@@ -1274,3 +1274,56 @@ func TestRenderRepresentativeWidths(t *testing.T) {
 		t.Logf("\n=== WIDTH %d ===\n%s", w, stripANSI(out.String()))
 	}
 }
+
+func TestListAccounts_NextCandidateTag(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	frac := 0.8
+	rSoon := time.Now().Add(30 * time.Minute).Format(time.RFC3339)
+	rLater := time.Now().Add(2 * time.Hour).Format(time.RFC3339)
+
+	acc1 := &storage.Account{
+		ID:           "acc_1",
+		Name:         "Main",
+		Status:       "ready",
+		RequestCount: 100,
+		LastQuota: &storage.QuotaState{
+			UpdatedAt:    &now,
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac, ResetTime: rSoon},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac, ResetTime: rSoon},
+		},
+	}
+	acc2 := &storage.Account{
+		ID:           "acc_2",
+		Name:         "Work",
+		Status:       "ready",
+		RequestCount: 50,
+		LastQuota: &storage.QuotaState{
+			UpdatedAt:    &now,
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac, ResetTime: rLater},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac, ResetTime: rLater},
+		},
+	}
+
+	activeID := "acc_1"
+	pool := &storage.Pool{
+		Version:         1,
+		ActiveAccountID: &activeID,
+		Strategy:        config.StrategySmart,
+		Accounts:        []*storage.Account{acc1, acc2},
+	}
+	_ = storage.SavePool(pool)
+
+	var stdout, stderr bytes.Buffer
+	ListAccountsWithWidth("", 80, &stdout, &stderr)
+	clean := stripANSI(stdout.String())
+
+	if !strings.Contains(clean, "Main · CLI Base [Next ⚡]") {
+		t.Errorf("expected Main to be tagged as [Next ⚡], got:\n%s", clean)
+	}
+	if strings.Contains(clean, "Work · Ready [Next ⚡]") {
+		t.Errorf("expected Work NOT to be tagged as [Next ⚡], got:\n%s", clean)
+	}
+}
