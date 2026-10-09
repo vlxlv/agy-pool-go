@@ -21,14 +21,14 @@ import (
 
 // ManageStrategy displays or updates the pool load balancing strategy.
 func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
-	validStrategies := []string{config.StrategyMaxQuota, config.StrategyLeastUsed, config.StrategyRoundRobin}
+	validStrategies := []string{config.StrategyMaxQuota, config.StrategyLeastUsed, config.StrategyRoundRobin, config.StrategySmart}
 
 	pool, err := storage.LoadPool()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s[Error] Could not load the account pool.%s\n", clrRed, clrReset)
 		return false
 	}
-	current := config.StrategyMaxQuota
+	current := config.DefaultStrategy
 	if pool != nil && pool.Strategy != "" {
 		current = pool.Strategy
 	}
@@ -36,7 +36,8 @@ func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 	if targetStrategy == "" {
 		fmt.Fprintf(stdout, "\nCurrent load balancing strategy: %s%s%s%s\n\n", clrBold, clrGreen, current, clrReset)
 		fmt.Fprintf(stdout, "Available strategies:\n")
-		fmt.Fprintf(stdout, "  • %smax_quota%s   - Prioritizes accounts with safest remaining 5-hour and weekly quota, taking reset times into account (default)\n", clrBold, clrReset)
+		fmt.Fprintf(stdout, "  • %ssmart%s       - Prioritizes accounts with quotas resetting soonest to minimize wasted quota, with hour truncation smoothing (Magpie Smart, default)\n", clrBold, clrReset)
+		fmt.Fprintf(stdout, "  • %smax_quota%s   - Prioritizes accounts with safest remaining 5-hour and weekly quota, taking reset times into account\n", clrBold, clrReset)
 		fmt.Fprintf(stdout, "  • %sleast_used%s  - Distributes load evenly to accounts with lowest AI generation count (Hits)\n", clrBold, clrReset)
 		fmt.Fprintf(stdout, "  • %sround_robin%s - Cycles through ready accounts in sequential rotation\n\n", clrBold, clrReset)
 		fmt.Fprintf(stdout, "To update strategy: %sagy-pool strategy <name>%s\n\n", clrBold, clrReset)

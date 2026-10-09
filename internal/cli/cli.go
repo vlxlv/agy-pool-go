@@ -242,7 +242,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "  agy-pool rename 1 \"Work\"  Set friendly label for an account\n")
 	fmt.Fprintf(out, "  agy-pool move 2 top       Move account to a specific position\n")
 	fmt.Fprintf(out, "  agy-pool swap 1 2         Swap positions of two accounts\n")
-	fmt.Fprintf(out, "  agy-pool sort quota       Sort accounts by quota, hits, name, email, or status\n")
+	fmt.Fprintf(out, "  agy-pool sort smart       Sort accounts by smart (renewal priority), quota, hits, name, email, or status\n")
 	fmt.Fprintf(out, "  agy-pool reorder 3 1 2    Batch reorder accounts in custom order\n")
 	fmt.Fprintf(out, "  agy-pool disable 4        Disable an account in rotation pool\n")
 	fmt.Fprintf(out, "  agy-pool enable 4         Enable a previously disabled account\n")

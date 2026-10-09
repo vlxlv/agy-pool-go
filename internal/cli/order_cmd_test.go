@@ -164,6 +164,14 @@ func TestSortCmd(t *testing.T) {
 		t.Fatalf("expected reverse sort success, got code=%d, out=%s, err=%s", code, stdout.String(), stderr.String())
 	}
 
+	// Sort by smart
+	stdout.Reset()
+	stderr.Reset()
+	code = SortCmd(&stdout, &stderr, "smart")
+	if code != 0 || !strings.Contains(stdout.String(), "Sorted account pool by") || !strings.Contains(stdout.String(), "smart") {
+		t.Fatalf("expected smart sort success, got code=%d, out=%s, err=%s", code, stdout.String(), stderr.String())
+	}
+
 	// Invalid criterion
 	stdout.Reset()
 	stderr.Reset()

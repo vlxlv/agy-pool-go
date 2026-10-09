@@ -271,6 +271,30 @@ func TestSortAccounts(t *testing.T) {
 			res.Accounts[0].ID, res.Accounts[1].ID, res.Accounts[2].ID, res.Accounts[3].ID)
 	}
 
+	// Sort by smart (Magpie strategy: accounts with sooner reset priority, restricted to end)
+	SetSmartOrderHook(func(candidates []*storage.Account, pool *storage.Pool, now float64) []*storage.Account {
+		// Mock smart ordering: acc_3, acc_1, acc_2 (acc_10 restricted omitted)
+		return []*storage.Account{candidates[2], candidates[0], candidates[1]}
+	})
+	defer SetSmartOrderHook(nil)
+
+	res, err = SortAccounts("smart", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Accounts) != 4 || res.Accounts[0].ID != "acc_3" || res.Accounts[3].ID != "acc_10" {
+		t.Fatalf("sort by smart failed (restricted must be at end): %+v", res.Accounts)
+	}
+
+	// Reverse sort by smart
+	res, err = SortAccounts("smart", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Accounts) != 4 || res.Accounts[0].ID != "acc_10" {
+		t.Fatalf("reverse sort by smart failed: %+v", res.Accounts)
+	}
+
 	// Unknown criterion
 	_, err = SortAccounts("invalid_crit", false, false)
 	if err == nil || !strings.Contains(err.Error(), "unknown sort criterion") {

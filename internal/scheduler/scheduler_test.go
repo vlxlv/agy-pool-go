@@ -757,3 +757,225 @@ func TestMaxQuota_AbundantWeeklyQuota_NoColdStartStarvation(t *testing.T) {
 		t.Fatalf("expected fresh account with 99%% quota to be ordered first, got %s", ordered[0].ID)
 	}
 }
+
+func TestSmartStrategy_RenewalOrder(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+	accA := &storage.Account{
+		ID:     "acc_soon",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.50),
+				ResetTime: "2026-09-17T18:00:00Z", // renews in ~30 hours
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	accB := &storage.Account{
+		ID:     "acc_later",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-21T18:00:00Z", // renews in ~5 days
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accB, accA}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_soon" || ordered[1].ID != "acc_later" {
+		t.Fatalf("expected [acc_soon, acc_later], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+func TestSmartStrategy_HourTruncation(t *testing.T) {
+	now := 1789560000.0
+	// Both accounts renew in the same hour (10:xx).
+	acc1 := &storage.Account{
+		ID:           "acc_hits5",
+		Status:       "active",
+		RequestCount: 5,
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.70),
+				ResetTime: "2026-09-18T10:15:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	acc2 := &storage.Account{
+		ID:           "acc_hits2",
+		Status:       "active",
+		RequestCount: 2,
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.70),
+				ResetTime: "2026-09-18T10:45:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{acc1, acc2}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_hits2" || ordered[1].ID != "acc_hits5" {
+		t.Fatalf("expected [acc_hits2, acc_hits5] due to hour truncation and lower hits, got [%s, %s]",
+			ordered[0].ID, ordered[1].ID)
+	}
+}
+
+func TestSmartStrategy_HierarchicalWindows(t *testing.T) {
+	now := 1789560000.0
+	// Weekly renews in the same hour (10:xx), but acc2's 5H resets sooner (12:00 vs 15:00).
+	acc1 := &storage.Account{
+		ID:     "acc_5h_later",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-17T15:00:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.70),
+				ResetTime: "2026-09-18T10:10:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	acc2 := &storage.Account{
+		ID:     "acc_5h_sooner",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-17T12:00:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.70),
+				ResetTime: "2026-09-18T10:50:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{acc1, acc2}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_5h_sooner" || ordered[1].ID != "acc_5h_later" {
+		t.Fatalf("expected [acc_5h_sooner, acc_5h_later], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+func TestSmartStrategy_FiveHourOnlyVsWeekly(t *testing.T) {
+	now := 1789560000.0
+	// 5H-only account renewing in 3 hours vs Weekly account renewing in 3 days.
+	acc5HOnly := &storage.Account{
+		ID:     "acc_5h_only",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-16T15:00:00Z", // renews in 3 hours
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	accWeekly := &storage.Account{
+		ID:     "acc_weekly",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-16T14:00:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-19T10:00:00Z", // renews in ~3 days
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accWeekly, acc5HOnly}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_5h_only" || ordered[1].ID != "acc_weekly" {
+		t.Fatalf("expected [acc_5h_only, acc_weekly], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+func TestSmartStrategy_ReserveDeprioritization(t *testing.T) {
+	now := 1789560000.0
+	// Reserve account (5H at 10% <= 15% reserve floor) renewing in 1 hour vs Healthy account renewing in 2 days.
+	accReserve := &storage.Account{
+		ID:     "acc_reserve",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.10), // <= FiveHourReserveFloor (0.15)
+				ResetTime: "2026-09-16T13:00:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.50),
+				ResetTime: "2026-09-16T13:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	accHealthy := &storage.Account{
+		ID:     "acc_healthy",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-18T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accReserve, accHealthy}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_healthy" || ordered[1].ID != "acc_reserve" {
+		t.Fatalf("expected [acc_healthy, acc_reserve], got [%s, %s]", ordered[0].ID, ordered[1].ID)
+	}
+}
+
+func TestSmartStrategy_CooldownSink(t *testing.T) {
+	now := 1789560000.0
+	accHealthy := &storage.Account{
+		ID:     "healthy",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-18T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	accDepleted := &storage.Account{
+		ID:     "depleted",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.001),
+				ResetTime: "2026-09-17T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	cooldownUntil := now + 120
+	accCooldown := &storage.Account{
+		ID:               "cooldown",
+		Status:           "active",
+		RateLimitedUntil: &cooldownUntil,
+		LastQuota: &storage.QuotaState{
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.95),
+				ResetTime: "2026-09-16T13:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accCooldown, accDepleted, accHealthy}, config.StrategySmart, nil, now)
+	if len(ordered) != 3 || ordered[0].ID != "healthy" || ordered[1].ID != "depleted" || ordered[2].ID != "cooldown" {
+		t.Fatalf("expected [healthy, depleted, cooldown], got [%s, %s, %s]", ordered[0].ID, ordered[1].ID, ordered[2].ID)
+	}
+}

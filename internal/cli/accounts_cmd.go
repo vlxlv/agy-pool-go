@@ -367,7 +367,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 
 	strat := pool.Strategy
 	if strat == "" {
-		strat = config.StrategyMaxQuota
+		strat = config.DefaultStrategy
 	}
 
 	fmt.Fprintf(stdout, "%s\n", subSep)
@@ -614,7 +614,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 
 	strat := pool.Strategy
 	if strat == "" {
-		strat = config.StrategyMaxQuota
+		strat = config.DefaultStrategy
 	}
 	fmt.Fprintln(stdout)
 	if daemonRunning {

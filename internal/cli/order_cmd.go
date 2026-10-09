@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
+	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -135,9 +136,9 @@ func SortCmd(stdout, stderr io.Writer, args ...string) int {
 		switch arg {
 		case "-h", "--help":
 			fmt.Fprintf(stdout, "usage: agy-pool sort [-h] [-r] [--refresh] [--show-email] [--hide-email] [by]\n\n")
-			fmt.Fprintf(stdout, "Sort account pool by criteria (quota, hits, name, email, status, id, created)\n\n")
+			fmt.Fprintf(stdout, "Sort account pool by criteria (smart, quota, hits, name, email, status, id, created)\n\n")
 			fmt.Fprintf(stdout, "positional arguments:\n")
-			fmt.Fprintf(stdout, "  by            Sort criterion (default: quota)\n\n")
+			fmt.Fprintf(stdout, "  by            Sort criterion (default: quota, options: smart, quota, hits, name, email, status, id, created)\n\n")
 			fmt.Fprintf(stdout, "options:\n")
 			fmt.Fprintf(stdout, "  -r, --reverse Reverse the sort order\n")
 			fmt.Fprintf(stdout, "  --refresh     Refresh quotas before sorting\n")
@@ -169,7 +170,7 @@ func SortCmd(stdout, stderr io.Writer, args ...string) int {
 	}
 
 	var isDesc bool
-	if res.Criterion == "quota" || res.Criterion == "hits" || res.Criterion == "usage" {
+	if res.Criterion == "smart" || res.Criterion == "quota" || res.Criterion == "hits" || res.Criterion == "usage" {
 		isDesc = !reverse
 	} else {
 		isDesc = reverse
@@ -228,7 +229,7 @@ func ReorderCmd(stdout, stderr io.Writer, args ...string) int {
 		fmt.Fprintf(stdout, "%sUsage:%s\n", clrBold, clrReset)
 		fmt.Fprintf(stdout, "  agy-pool move <account> <position|top|bottom|up|down>  (Move single account)\n")
 		fmt.Fprintf(stdout, "  agy-pool swap <account1> <account2>                   (Swap two accounts)\n")
-		fmt.Fprintf(stdout, "  agy-pool sort [quota|hits|name|email|status|id] [-r]   (Sort pool by criteria)\n")
+		fmt.Fprintf(stdout, "  agy-pool sort [smart|quota|hits|name|email|status|id] [-r] (Sort pool by criteria)\n")
 		fmt.Fprintf(stdout, "  agy-pool reorder <pos1> <pos2> ... <posN>             (Custom batch reordering)\n")
 		return 0
 	}
@@ -283,7 +284,7 @@ func ConfigCmd(stdout, stderr io.Writer, args ...string) int {
 	}
 
 	if len(positionals) == 0 {
-		strat := "max_quota"
+		strat := config.DefaultStrategy
 		if pool != nil && pool.Strategy != "" {
 			strat = pool.Strategy
 		}
@@ -332,7 +333,7 @@ func ConfigCmd(stdout, stderr io.Writer, args ...string) int {
 
 	case "strategy", "strat":
 		if val == nil {
-			strat := "max_quota"
+			strat := config.DefaultStrategy
 			if pool != nil && pool.Strategy != "" {
 				strat = pool.Strategy
 			}

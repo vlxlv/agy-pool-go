@@ -3,11 +3,19 @@ package scheduler
 import (
 	"math"
 	"sort"
+	"time"
 
+	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
+
+func init() {
+	accounts.SetSmartOrderHook(func(candidates []*storage.Account, pool *storage.Pool, now float64) []*storage.Account {
+		return OrderCandidates(candidates, config.StrategySmart, pool, now)
+	})
+}
 
 // FiveHourReserveFloor is the threshold below or equal to which an account's 5-hour quota is in reserve.
 const FiveHourReserveFloor = 0.15
@@ -75,6 +83,18 @@ func EffectiveWorstPace(capState quota.CapacityState) float64 {
 		}
 	}
 	return capState.WorstPace
+}
+
+// AccountRenewalTimes extracts renewal reset times in order of window significance (7D weekly, then 5H).
+func AccountRenewalTimes(capState quota.CapacityState) []time.Time {
+	var renews []time.Time
+	if capState.Reset7Time != nil && !capState.Reset7Time.IsZero() {
+		renews = append(renews, *capState.Reset7Time)
+	}
+	if capState.Reset5Time != nil && !capState.Reset5Time.IsZero() {
+		renews = append(renews, *capState.Reset5Time)
+	}
+	return renews
 }
 
 // OrderCandidates orders generation candidates according to the specified strategy.
@@ -157,6 +177,68 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				eligible = rotated
 			}
 		}
+
+	case config.StrategySmart:
+		var healthy []*storage.Account
+		var reserve []*storage.Account
+
+		for _, acc := range eligible {
+			if IsReserveCandidate(acc, now) {
+				reserve = append(reserve, acc)
+			} else {
+				healthy = append(healthy, acc)
+			}
+		}
+
+		smartCompare := func(a, b *storage.Account) bool {
+			capA := quota.ComputeCapacityState(a, now)
+			capB := quota.ComputeCapacityState(b, now)
+
+			timesA := AccountRenewalTimes(capA)
+			timesB := AccountRenewalTimes(capB)
+
+			for k := 0; k < len(timesA) || k < len(timesB); k++ {
+				var tA, tB time.Time
+				if k < len(timesA) {
+					tA = timesA[k].Truncate(time.Hour)
+				}
+				if k < len(timesB) {
+					tB = timesB[k].Truncate(time.Hour)
+				}
+
+				switch {
+				case tA.Equal(tB):
+					continue
+				case tA.IsZero() || tB.IsZero():
+					return tB.IsZero() // known renewal time goes before unknown
+				default:
+					return tA.Before(tB) // renews sooner goes first
+				}
+			}
+
+			hitsA, hitsB := a.GetHits(), b.GetHits()
+			if hitsA != hitsB {
+				return hitsA < hitsB // fewer hits preserves prompt cache
+			}
+
+			if capA.RawFloor != capB.RawFloor {
+				return capA.RawFloor > capB.RawFloor
+			}
+
+			return a.ID < b.ID
+		}
+
+		sort.SliceStable(healthy, func(i, j int) bool {
+			return smartCompare(healthy[i], healthy[j])
+		})
+
+		sort.SliceStable(reserve, func(i, j int) bool {
+			return smartCompare(reserve[i], reserve[j])
+		})
+
+		eligible = make([]*storage.Account, 0, len(healthy)+len(reserve))
+		eligible = append(eligible, healthy...)
+		eligible = append(eligible, reserve...)
 
 	default: // StrategyMaxQuota
 		var healthy []*storage.Account

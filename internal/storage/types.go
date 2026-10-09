@@ -287,7 +287,7 @@ func (p *Pool) RecordGenerationTelemetry(accountID string, now int64) {
 func NewEmptyPool() *Pool {
 	return &Pool{
 		Version:         1,
-		Strategy:        "max_quota",
+		Strategy:        "smart",
 		ActiveAccountID: nil,
 		Accounts:        make([]*Account, 0),
 	}

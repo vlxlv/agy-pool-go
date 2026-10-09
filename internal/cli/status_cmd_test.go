@@ -194,7 +194,7 @@ func TestStatusCmd_RunningDaemonWithRuntimeStats(t *testing.T) {
 		"GC      : 42 cycles",
 		"State   :",
 		"Pool    : 0 accounts (empty)",
-		"Strategy: max_quota",
+		"Strategy: smart",
 		"Healthy",
 	} {
 		if !strings.Contains(out, expected) {

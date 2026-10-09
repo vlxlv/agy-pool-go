@@ -30,7 +30,7 @@ func TestLoadMissingFileReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error loading missing file: %v", err)
 	}
-	if pool.Version != 1 || pool.Strategy != "max_quota" || len(pool.Accounts) != 0 {
+	if pool.Version != 1 || pool.Strategy != "smart" || len(pool.Accounts) != 0 {
 		t.Fatalf("unexpected empty pool: %+v", pool)
 	}
 }

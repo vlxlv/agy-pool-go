@@ -16,6 +16,27 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
+// SmartCandidateOrderFunc orders candidates using a smart strategy.
+type SmartCandidateOrderFunc func(candidates []*storage.Account, pool *storage.Pool, now float64) []*storage.Account
+
+var (
+	smartOrderHook SmartCandidateOrderFunc
+	smartOrderMu   sync.RWMutex
+)
+
+// SetSmartOrderHook registers the smart candidate ordering implementation.
+func SetSmartOrderHook(fn SmartCandidateOrderFunc) {
+	smartOrderMu.Lock()
+	defer smartOrderMu.Unlock()
+	smartOrderHook = fn
+}
+
+func getSmartOrderHook() SmartCandidateOrderFunc {
+	smartOrderMu.RLock()
+	defer smartOrderMu.RUnlock()
+	return smartOrderHook
+}
+
 // ANSI Color Codes
 const (
 	clrReset  = "\033[0m"
@@ -246,14 +267,14 @@ func SortAccounts(by string, reverse bool, refresh bool) (*SortResult, error) {
 		criterion = "quota"
 	}
 	validCriteria := map[string]bool{
-		"quota": true, "hits": true, "usage": true, "name": true,
+		"smart": true, "quota": true, "hits": true, "usage": true, "name": true,
 		"email": true, "status": true, "id": true, "created": true, "time": true,
 	}
 	if !validCriteria[criterion] {
-		return nil, fmt.Errorf("unknown sort criterion '%s'. Available criteria: quota, hits, name, email, status, id, created", by)
+		return nil, fmt.Errorf("unknown sort criterion '%s'. Available criteria: smart, quota, hits, name, email, status, id, created", by)
 	}
 
-	if refresh && criterion == "quota" {
+	if refresh && (criterion == "quota" || criterion == "smart") {
 		pool, err := storage.LoadPool()
 		if err == nil && pool != nil && len(pool.Accounts) > 0 {
 			prober, _ := getQuotaProber()
@@ -295,13 +316,38 @@ func SortAccounts(by string, reverse bool, refresh bool) (*SortResult, error) {
 			return errors.New("account pool is empty")
 		}
 
-		sort.SliceStable(pool.Accounts, func(i, j int) bool {
-			cmp := compareAccounts(pool.Accounts[i], pool.Accounts[j], criterion, nowTS)
-			if isReverse {
-				return cmp > 0
+		if criterion == "smart" {
+			orderFn := getSmartOrderHook()
+			var ordered []*storage.Account
+			if orderFn != nil {
+				ordered = orderFn(pool.Accounts, pool, float64(nowTS))
+			} else {
+				ordered = append([]*storage.Account{}, pool.Accounts...)
 			}
-			return cmp < 0
-		})
+			seen := make(map[string]bool, len(ordered))
+			for _, a := range ordered {
+				seen[a.ID] = true
+			}
+			for _, a := range pool.Accounts {
+				if a != nil && !seen[a.ID] {
+					ordered = append(ordered, a)
+				}
+			}
+			if reverse {
+				for i, j := 0, len(ordered)-1; i < j; i, j = i+1, j-1 {
+					ordered[i], ordered[j] = ordered[j], ordered[i]
+				}
+			}
+			pool.Accounts = ordered
+		} else {
+			sort.SliceStable(pool.Accounts, func(i, j int) bool {
+				cmp := compareAccounts(pool.Accounts[i], pool.Accounts[j], criterion, nowTS)
+				if isReverse {
+					return cmp > 0
+				}
+				return cmp < 0
+			})
+		}
 
 		hasActive := false
 		if pool.ActiveAccountID != nil {

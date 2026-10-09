@@ -18,6 +18,7 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/auth"
+	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
@@ -487,6 +488,22 @@ func FilterResponseHeaders(headers http.Header) http.Header {
 	return out
 }
 
+// attachDebugHeaders appends observable pool routing metadata headers to downstream responses.
+func attachDebugHeaders(h http.Header, acc *storage.Account, strategy string, affinityStatus string) {
+	if h == nil || acc == nil {
+		return
+	}
+	disp := accounts.DisplayAccountName(acc)
+	h.Set("X-Agy-Pool-Account", disp)
+	h.Set("X-Agy-Pool-Account-Id", acc.ID)
+	if strategy != "" {
+		h.Set("X-Agy-Pool-Strategy", strategy)
+	}
+	if affinityStatus != "" {
+		h.Set("X-Agy-Pool-Affinity", affinityStatus)
+	}
+}
+
 // SendBuffered writes a buffered HTTP response with Content-Length and Connection: close.
 func SendBuffered(w http.ResponseWriter, status int, headers http.Header, body []byte) {
 	committer := NewResponseCommitter(w)
@@ -552,11 +569,13 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	now := float64(NowFunc().Unix())
 	strategy := pool.Strategy
 	if strategy == "" {
-		strategy = "max_quota"
+		strategy = config.DefaultStrategy
 	}
 
 	var candidates []*storage.Account
 	var pendingClaimedID string
+	var sessionKey string
+	affinityStatus := "none"
 	if isGeneration {
 		if strategy == "round_robin" {
 			var rrErr error
@@ -566,6 +585,17 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
+		}
+
+		sessionKey = ExtractSessionKey(r, body)
+		if sessionKey != "" {
+			var matched bool
+			candidates, matched = GetAffinityManager().ApplyAffinity(candidates, sessionKey, NowFunc())
+			if matched {
+				affinityStatus = "hit"
+			} else {
+				affinityStatus = "new"
+			}
 		}
 
 		if confCand := SelectAndClaimConfirmationCandidate(pool.Accounts); confCand != nil {
@@ -653,6 +683,10 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		attempt++
+		currentAffinity := affinityStatus
+		if attempt > 1 {
+			currentAffinity = "failover"
+		}
 		if isGeneration {
 			observability.RecordRoutingDecision()
 			if attempt > 1 {
@@ -660,7 +694,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				hasFailedOver = true
 			}
 		}
-		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, selectionAuditCtx)
+		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, strategy, currentAffinity, selectionAuditCtx)
 		if acc.ID == pendingClaimedID {
 			ReleaseVerificationConfirmation(pendingClaimedID)
 			pendingClaimedID = ""
@@ -669,6 +703,9 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			observability.RecordGenerationSuccess()
 			if hasFailedOver {
 				observability.RecordFailoverSuccess()
+			}
+			if sessionKey != "" && acc != nil {
+				GetAffinityManager().Set(sessionKey, acc.ID, NowFunc())
 			}
 		}
 		if outcome.Err != nil {
@@ -682,6 +719,9 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// Only ActionFailoverNext may advance to another account.
 		if outcome.Action == ActionFailoverNext {
+			if sessionKey != "" {
+				GetAffinityManager().Delete(sessionKey)
+			}
 			continue
 		}
 
@@ -691,6 +731,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// All accounts exhausted
 	if !committer.IsCommitted() {
+		committer.Header().Set("X-Agy-Pool-Strategy", strategy)
 		logMessage("ALL EXHAUSTED", fmt.Sprintf("%s %s failed across all accounts: %v", r.Method, filepathBase(path), lastError))
 		http.Error(committer, fmt.Sprintf("All accounts in pool exhausted or unavailable: %v", lastError), http.StatusServiceUnavailable)
 	}
@@ -706,6 +747,8 @@ func (h *Handler) dispatchAccount(
 	acc *storage.Account,
 	clientUA string,
 	attempt int,
+	strategy string,
+	affinityStatus string,
 	auditCtx *SelectionAuditContext,
 ) DispatchOutcome {
 	if isGeneration && acc != nil && acc.ID != "" {
@@ -857,6 +900,7 @@ func (h *Handler) dispatchAccount(
 		observability.RecordNoReplayPrevented()
 
 		// Ambiguous transport failure: DO NOT REPLAY!
+		attachDebugHeaders(committer.Header(), acc, strategy, affinityStatus)
 		if IsTimeoutError(err) {
 			http.Error(committer, "Upstream request failed", http.StatusGatewayTimeout)
 		} else {
@@ -958,6 +1002,7 @@ func (h *Handler) dispatchAccount(
 
 		// Ordinary upstream error (400, 404, 500, etc.): Forward directly, DO NOT REPLAY!
 		notifyAudit(statusCode, "NonRetryableError")
+		attachDebugHeaders(resp.Header, acc, strategy, affinityStatus)
 		SendBuffered(committer, statusCode, resp.Header, errBody)
 		return DispatchOutcome{
 			Action: ActionTerminal,
@@ -982,6 +1027,7 @@ func (h *Handler) dispatchAccount(
 		if persistErr := RecordSuccess(acc, isGeneration); persistErr != nil {
 			logMessage("PROXY WARN", "failed to persist success bookkeeping")
 		}
+		attachDebugHeaders(resp.Header, acc, strategy, affinityStatus)
 		streamErr := SendStream(committer, statusCode, resp.Header, resp.Body)
 		if streamErr != nil {
 			observability.RecordNoReplayPrevented()
@@ -1001,6 +1047,7 @@ func (h *Handler) dispatchAccount(
 	if readErr != nil {
 		logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: read error: %v", r.Method, pathBase, dispName, readErr))
 		observability.RecordNoReplayPrevented()
+		attachDebugHeaders(committer.Header(), acc, strategy, affinityStatus)
 		if IsTimeoutError(readErr) {
 			http.Error(committer, "Upstream request failed", http.StatusGatewayTimeout)
 		} else {
@@ -1016,6 +1063,7 @@ func (h *Handler) dispatchAccount(
 	if persistErr := RecordSuccess(acc, isGeneration); persistErr != nil {
 		logMessage("PROXY WARN", "failed to persist success bookkeeping")
 	}
+	attachDebugHeaders(resp.Header, acc, strategy, affinityStatus)
 	SendBuffered(committer, statusCode, resp.Header, respBody)
 	return DispatchOutcome{
 		Action: ActionTerminal,

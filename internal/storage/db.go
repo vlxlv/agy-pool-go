@@ -201,7 +201,7 @@ func OpenStateDB(dbPath string) (*StateDB, error) {
 			return nil, fmt.Errorf("failed to initialize meta on %q: %w", dbPath, err)
 		}
 
-		if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('strategy', 'max_quota');"); err != nil {
+		if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('strategy', 'smart');"); err != nil {
 			_ = tx.Rollback()
 			_ = db.Close()
 			return nil, fmt.Errorf("failed to initialize strategy on %q: %w", dbPath, err)
@@ -410,7 +410,7 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 	}
 	defer rows.Close()
 
-	strategy := "max_quota"
+	strategy := "smart"
 	var activeID *string
 	var rrID *string
 	var showEmail *bool
@@ -671,7 +671,7 @@ func SavePoolToTx(tx *sql.Tx, pool *Pool) error {
 	// 1. Update runtime_global
 	strat := pool.Strategy
 	if strat == "" {
-		strat = "max_quota"
+		strat = "smart"
 	}
 	if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('strategy', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", strat); err != nil {
 		return fmt.Errorf("failed to save strategy: %w", err)

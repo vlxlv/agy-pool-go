@@ -677,7 +677,7 @@ func renderHeader(
 		gatewayStr = fmt.Sprintf("%sRUNNING%s%s", clrGreen, pidStr, clrReset)
 	}
 
-	strat := config.StrategyMaxQuota
+	strat := config.DefaultStrategy
 	if pool != nil && pool.Strategy != "" {
 		strat = pool.Strategy
 	}
