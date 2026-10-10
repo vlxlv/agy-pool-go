@@ -149,7 +149,7 @@ func TestExportAndImportPool(t *testing.T) {
 	tmp := setupIsolatedTestDir(t)
 
 	pool := storage.NewEmptyPool()
-	pool.Strategy = "round_robin"
+	pool.Strategy = "max_quota"
 	acc1 := &storage.Account{
 		ID:           "acc_1",
 		Email:        "user1@gmail.com",
@@ -208,7 +208,7 @@ func TestExportAndImportPool(t *testing.T) {
 	}
 
 	loaded, _ := storage.LoadPool()
-	if loaded.Strategy != "round_robin" {
+	if loaded.Strategy != "max_quota" {
 		t.Fatalf("strategy not restored: %q", loaded.Strategy)
 	}
 	if len(loaded.Accounts) != 2 {

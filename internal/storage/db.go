@@ -347,36 +347,6 @@ func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) (err er
 	return nil
 }
 
-// ReserveRoundRobinCandidates executes candidate ordering and advances the round_robin cursor
-// within ONE immediate SQLite transaction, updating ONLY the cursor in runtime_global.
-func (s *StateDB) ReserveRoundRobinCandidates(now float64, orderFn func(candidates []*Account, strategy string, pool *Pool, now float64) []*Account) ([]*Account, error) {
-	var candidates []*Account
-	err := s.Update(context.Background(), func(tx *sql.Tx) error {
-		pool, err := LoadPoolFromTx(tx)
-		if err != nil {
-			return err
-		}
-		if len(pool.Accounts) == 0 {
-			candidates = nil
-			return nil
-		}
-		ordered := orderFn(pool.Accounts, config.StrategyRoundRobin, pool, now)
-		if len(ordered) > 0 && ordered[0].ID != "" {
-			resID := ordered[0].ID
-			pool.RoundRobinLastAccountID = &resID
-			if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('round_robin_last_account_id', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", resID); err != nil {
-				return fmt.Errorf("failed to advance round_robin cursor: %w", err)
-			}
-		}
-		candidates = ordered
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return candidates, nil
-}
-
 func serializeAny(v any) *string {
 	if v == nil {
 		return nil
@@ -430,6 +400,9 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 		case "strategy":
 			if v.Valid && v.String != "" {
 				strategy = v.String
+				if strategy == "least_used" || strategy == "round_robin" {
+					strategy = "smart"
+				}
 			}
 		case "active_account_id":
 			if v.Valid && v.String != "" {
@@ -670,7 +643,7 @@ func SavePoolToTx(tx *sql.Tx, pool *Pool) error {
 
 	// 1. Update runtime_global
 	strat := pool.Strategy
-	if strat == "" {
+	if strat == "" || strat == "least_used" || strat == "round_robin" {
 		strat = "smart"
 	}
 	if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('strategy', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", strat); err != nil {
@@ -687,14 +660,9 @@ func SavePoolToTx(tx *sql.Tx, pool *Pool) error {
 		}
 	}
 
-	if pool.RoundRobinLastAccountID != nil && *pool.RoundRobinLastAccountID != "" {
-		if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('round_robin_last_account_id', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", *pool.RoundRobinLastAccountID); err != nil {
-			return fmt.Errorf("failed to save round_robin_last_account_id: %w", err)
-		}
-	} else {
-		if _, err := tx.Exec("DELETE FROM runtime_global WHERE key = 'round_robin_last_account_id'"); err != nil {
-			return fmt.Errorf("failed to delete round_robin_last_account_id: %w", err)
-		}
+	// Clean up legacy round_robin cursor if present
+	if _, err := tx.Exec("DELETE FROM runtime_global WHERE key = 'round_robin_last_account_id'"); err != nil {
+		return fmt.Errorf("failed to delete round_robin_last_account_id: %w", err)
 	}
 
 	if pool.ShowEmail != nil {

@@ -43,18 +43,29 @@ func TestStrategyCommand(t *testing.T) {
 	// 3. Set valid strategy -> exit 0
 	stdout.Reset()
 	stderr.Reset()
-	code = Main([]string{"strategy", "least_used"}, nil, &stdout, &stderr)
+	code = Main([]string{"strategy", "max_quota"}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit code 0 on setting valid strategy, got %d", code)
 	}
-	if !strings.Contains(stdout.String(), "✓ Load balancing strategy set to:") || !strings.Contains(stdout.String(), "least_used") {
+	if !strings.Contains(stdout.String(), "✓ Load balancing strategy set to:") || !strings.Contains(stdout.String(), "max_quota") {
 		t.Errorf("expected success message, got: %s", stdout.String())
 	}
 
 	// Verify persistence in storage
 	pool, _ := storage.LoadPool()
-	if pool.Strategy != "least_used" {
-		t.Errorf("expected strategy 'least_used' in pool, got %q", pool.Strategy)
+	if pool.Strategy != "max_quota" {
+		t.Errorf("expected strategy 'max_quota' in pool, got %q", pool.Strategy)
+	}
+
+	// 4. Deprecated strategies return clear deprecation error
+	stdout.Reset()
+	stderr.Reset()
+	code = Main([]string{"strategy", "least_used"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1 for deprecated strategy least_used, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "deprecated and removed") {
+		t.Errorf("expected deprecation message on stdout, got: %s", stdout.String())
 	}
 }
 

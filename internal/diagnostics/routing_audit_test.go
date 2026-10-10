@@ -217,35 +217,35 @@ func TestAudit_F_LegacyUnidentifiedWindows(t *testing.T) {
 	}
 }
 
-// Test G: least_used does not receive max_quota reserve violations
-func TestAudit_G_LeastUsed_NoReserveViolations(t *testing.T) {
+// Test G: smart strategy receives reserve violations when reserve account selected over healthy
+func TestAudit_G_Smart_ReserveViolations(t *testing.T) {
 	now := 1789560000.0
 	ts := time.Unix(int64(now), 0)
 
 	pool := &storage.Pool{
-		Strategy: config.StrategyLeastUsed,
+		Strategy: config.StrategySmart,
 		Accounts: []*storage.Account{
-			makeTestAccount("acc_work", "Work", floatPtr(0.10), floatPtr(0.50), now),     // 10% (Reserve under max_quota)
+			makeTestAccount("acc_work", "Work", floatPtr(0.10), floatPtr(0.50), now),     // 10% (Reserve)
 			makeTestAccount("acc_backup", "Backup", floatPtr(0.90), floatPtr(0.70), now), // 90% (Healthy)
 		},
 	}
 
 	ev := EvaluateRoutingAttempt(pool, "Work", 200, 1, "", ts, "")
-	if ev.Verdict != "pass" {
-		t.Fatalf("least_used should not receive reserve violation, got %q", ev.Verdict)
+	if ev.Verdict != "violation" {
+		t.Fatalf("smart expected violation when selecting reserve over healthy, got %q", ev.Verdict)
 	}
-	if !strings.Contains(ev.VerdictDetails, "not applicable") {
-		t.Fatalf("expected verdict details to note reserve headroom N/A, got %q", ev.VerdictDetails)
+	if !strings.Contains(ev.VerdictDetails, "Reserve account") {
+		t.Fatalf("expected verdict details to note reserve violation, got %q", ev.VerdictDetails)
 	}
 }
 
-// Test H: round_robin does not receive max_quota reserve violations
-func TestAudit_H_RoundRobin_NoReserveViolations(t *testing.T) {
+// Test H: custom or unknown strategy does not receive reserve violations
+func TestAudit_H_OtherStrategy_NoReserveViolations(t *testing.T) {
 	now := 1789560000.0
 	ts := time.Unix(int64(now), 0)
 
 	pool := &storage.Pool{
-		Strategy: config.StrategyRoundRobin,
+		Strategy: "custom_unmanaged",
 		Accounts: []*storage.Account{
 			makeTestAccount("acc_work", "Work", floatPtr(0.10), floatPtr(0.50), now),     // 10%
 			makeTestAccount("acc_backup", "Backup", floatPtr(0.90), floatPtr(0.70), now), // 90%
@@ -254,7 +254,7 @@ func TestAudit_H_RoundRobin_NoReserveViolations(t *testing.T) {
 
 	ev := EvaluateRoutingAttempt(pool, "Work", 200, 1, "", ts, "")
 	if ev.Verdict != "pass" {
-		t.Fatalf("round_robin should not receive reserve violation, got %q", ev.Verdict)
+		t.Fatalf("custom strategy should not receive reserve violation, got %q", ev.Verdict)
 	}
 }
 

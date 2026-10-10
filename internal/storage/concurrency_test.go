@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 )
 
 // TestStateDB_SerializableImmediateConcurrency tests that concurrent transactions
@@ -79,84 +78,6 @@ func TestStateDB_SerializableImmediateConcurrency(t *testing.T) {
 
 	if finalVal != expectedFinal {
 		t.Fatalf("lost updates detected! expected %d, got %d", expectedFinal, finalVal)
-	}
-}
-
-// TestStateDB_RoundRobinCursorIntegrityUnderConcurrency verifies that concurrent
-// round-robin cursor updates never corrupt the cursor or result in invalid account IDs.
-func TestStateDB_RoundRobinCursorIntegrityUnderConcurrency(t *testing.T) {
-	tmpDir := setupTestStorage(t)
-	dbPath := filepath.Join(tmpDir, "state.db")
-
-	sdb, err := OpenStateDB(dbPath)
-	if err != nil {
-		t.Fatalf("failed to open state db: %v", err)
-	}
-	defer sdb.Close()
-
-	// Seed 3 accounts
-	pool := NewEmptyPool()
-	pool.Accounts = []*Account{
-		{ID: "acc_1", Email: "acc1@example.com"},
-		{ID: "acc_2", Email: "acc2@example.com"},
-		{ID: "acc_3", Email: "acc3@example.com"},
-	}
-	err = sdb.Update(context.Background(), func(tx *sql.Tx) error {
-		return SavePoolToTx(tx, pool)
-	})
-	if err != nil {
-		t.Fatalf("failed to seed accounts: %v", err)
-	}
-
-	const goroutines = 25
-	const reservationsPerGoroutine = 20
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, goroutines)
-
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < reservationsPerGoroutine; i++ {
-				now := float64(time.Now().Unix())
-				candidates, err := sdb.ReserveRoundRobinCandidates(now, func(c []*Account, s string, p *Pool, n float64) []*Account {
-					return c
-				})
-				if err != nil {
-					errCh <- err
-					return
-				}
-				if len(candidates) != 3 {
-					errCh <- fmt.Errorf("expected 3 candidates, got %d", len(candidates))
-					return
-				}
-				primary := candidates[0]
-				if primary.ID != "acc_1" && primary.ID != "acc_2" && primary.ID != "acc_3" {
-					errCh <- fmt.Errorf("invalid candidate reserved: %s", primary.ID)
-					return
-				}
-			}
-		}()
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		t.Fatalf("concurrent RR reservation failed: %v", err)
-	}
-
-	// Verify final cursor is valid
-	var finalCursor string
-	err = sdb.View(context.Background(), func(tx *sql.Tx) error {
-		return tx.QueryRow("SELECT value FROM runtime_global WHERE key = 'round_robin_last_account_id'").Scan(&finalCursor)
-	})
-	if err != nil {
-		t.Fatalf("failed to read final RR cursor: %v", err)
-	}
-	if finalCursor != "acc_1" && finalCursor != "acc_2" && finalCursor != "acc_3" {
-		t.Fatalf("final RR cursor is invalid: %s", finalCursor)
 	}
 }
 

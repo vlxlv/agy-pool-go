@@ -307,6 +307,9 @@ func MigrateLegacyPool(sourcePath, targetDataDir string) (*MigrationResult, erro
 	if err := json.Unmarshal(sourceData, &pool); err != nil {
 		return nil, fmt.Errorf("corrupt or invalid legacy pool source %q: %w", absSource, err)
 	}
+	if pool.Strategy == "least_used" || pool.Strategy == "round_robin" {
+		pool.Strategy = "smart"
+	}
 
 	// 2. Prepare target directory under -D
 	if err := config.AssertSafeWritePath(targetDataDir); err != nil {

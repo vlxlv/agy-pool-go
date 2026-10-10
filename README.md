@@ -15,7 +15,7 @@ A high-performance, zero-CGO Go implementation and reverse proxy gateway for **A
 - **Zero-CGO Pure Go (`CGO_ENABLED=0`)**: Built on pure Go standard library and modern transpiled SQLite (`modernc.org/sqlite`). Fully static binaries cross-compile out-of-the-box for `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64`.
 - **High-Performance HTTP Reverse Proxy**: Non-blocking concurrent reverse proxy gateway listening locally (`127.0.0.1:8899`) with real-time SSE token streaming, request header filtering, and dynamic multi-account rotation.
 - **Strict No-Replay Transport Guarantees**: Enforces fail-safe upstream routing. Non-idempotent or in-flight POST streaming requests are never replayed across accounts upon ambiguous network failures, preventing duplicate generation charges.
-- **Intelligent Load Balancing & Failover**: Dynamically routes CLI generation requests based on configurable strategies (`max_quota`, `least_used`, `round_robin`). Automatically fails over on HTTP 429 rate limits or quota depletion while respecting upstream `Retry-After`.
+- **Intelligent Load Balancing & Failover**: Dynamically routes CLI generation requests based on configurable strategies (`smart` by default, and `max_quota`). Automatically fails over on HTTP 429 rate limits or quota depletion while respecting upstream `Retry-After`.
 - **Distinct CLI Domain Responsibilities**:
   - `agy-pool status`: Fast, script-friendly runtime summary (PID, memory, uptime, state.db schema, pool counts) without slow network quota refreshes.
   - `agy-pool list`: Compact account inventory and cached quota overview.

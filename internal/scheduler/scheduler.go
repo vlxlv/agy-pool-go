@@ -124,123 +124,7 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 	}
 
 	switch strategy {
-	case config.StrategyLeastUsed:
-		sort.SliceStable(eligible, func(i, j int) bool {
-			a, b := eligible[i], eligible[j]
-			hitsA, hitsB := a.GetHits(), b.GetHits()
-			if hitsA != hitsB {
-				return hitsA < hitsB
-			}
-
-			capA := quota.ComputeCapacityState(a, now)
-			capB := quota.ComputeCapacityState(b, now)
-
-			if capA.KnownWindowCount != capB.KnownWindowCount {
-				return capA.KnownWindowCount > capB.KnownWindowCount
-			}
-
-			rankA := quota.FreshnessRank(a, now)
-			rankB := quota.FreshnessRank(b, now)
-			if rankA != rankB {
-				return rankA > rankB
-			}
-
-			if capA.WorstPace != capB.WorstPace {
-				return capA.WorstPace > capB.WorstPace
-			}
-
-			if capA.TotalPace != capB.TotalPace {
-				return capA.TotalPace > capB.TotalPace
-			}
-
-			if capA.RawFloor != capB.RawFloor {
-				return capA.RawFloor > capB.RawFloor
-			}
-
-			return a.ID < b.ID
-		})
-
-	case config.StrategyRoundRobin:
-		if pool != nil && pool.RoundRobinLastAccountID != nil {
-			lastID := *pool.RoundRobinLastAccountID
-			foundIdx := -1
-			for i, a := range eligible {
-				if a.ID == lastID {
-					foundIdx = i
-					break
-				}
-			}
-			if foundIdx != -1 {
-				rotated := make([]*storage.Account, 0, len(eligible))
-				rotated = append(rotated, eligible[foundIdx+1:]...)
-				rotated = append(rotated, eligible[:foundIdx+1]...)
-				eligible = rotated
-			}
-		}
-
-	case config.StrategySmart:
-		var healthy []*storage.Account
-		var reserve []*storage.Account
-
-		for _, acc := range eligible {
-			if IsReserveCandidate(acc, now) {
-				reserve = append(reserve, acc)
-			} else {
-				healthy = append(healthy, acc)
-			}
-		}
-
-		smartCompare := func(a, b *storage.Account) bool {
-			capA := quota.ComputeCapacityState(a, now)
-			capB := quota.ComputeCapacityState(b, now)
-
-			timesA := AccountRenewalTimes(capA)
-			timesB := AccountRenewalTimes(capB)
-
-			for k := 0; k < len(timesA) || k < len(timesB); k++ {
-				var tA, tB time.Time
-				if k < len(timesA) {
-					tA = timesA[k].Truncate(time.Hour)
-				}
-				if k < len(timesB) {
-					tB = timesB[k].Truncate(time.Hour)
-				}
-
-				switch {
-				case tA.Equal(tB):
-					continue
-				case tA.IsZero() || tB.IsZero():
-					return tB.IsZero() // known renewal time goes before unknown
-				default:
-					return tA.Before(tB) // renews sooner goes first
-				}
-			}
-
-			hitsA, hitsB := a.GetHits(), b.GetHits()
-			if hitsA != hitsB {
-				return hitsA < hitsB // fewer hits preserves prompt cache
-			}
-
-			if capA.RawFloor != capB.RawFloor {
-				return capA.RawFloor > capB.RawFloor
-			}
-
-			return a.ID < b.ID
-		}
-
-		sort.SliceStable(healthy, func(i, j int) bool {
-			return smartCompare(healthy[i], healthy[j])
-		})
-
-		sort.SliceStable(reserve, func(i, j int) bool {
-			return smartCompare(reserve[i], reserve[j])
-		})
-
-		eligible = make([]*storage.Account, 0, len(healthy)+len(reserve))
-		eligible = append(eligible, healthy...)
-		eligible = append(eligible, reserve...)
-
-	default: // StrategyMaxQuota
+	case config.StrategyMaxQuota:
 		var healthy []*storage.Account
 		var reserve []*storage.Account
 
@@ -301,6 +185,68 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		eligible = make([]*storage.Account, 0, len(healthy)+len(reserve))
 		eligible = append(eligible, healthy...)
 		eligible = append(eligible, reserve...)
+
+	default: // StrategySmart (default strategy)
+		var healthy []*storage.Account
+		var reserve []*storage.Account
+
+		for _, acc := range eligible {
+			if IsReserveCandidate(acc, now) {
+				reserve = append(reserve, acc)
+			} else {
+				healthy = append(healthy, acc)
+			}
+		}
+
+		smartCompare := func(a, b *storage.Account) bool {
+			capA := quota.ComputeCapacityState(a, now)
+			capB := quota.ComputeCapacityState(b, now)
+
+			timesA := AccountRenewalTimes(capA)
+			timesB := AccountRenewalTimes(capB)
+
+			for k := 0; k < len(timesA) || k < len(timesB); k++ {
+				var tA, tB time.Time
+				if k < len(timesA) {
+					tA = timesA[k].Truncate(time.Hour)
+				}
+				if k < len(timesB) {
+					tB = timesB[k].Truncate(time.Hour)
+				}
+
+				switch {
+				case tA.Equal(tB):
+					continue
+				case tA.IsZero() || tB.IsZero():
+					return tB.IsZero() // known renewal time goes before unknown
+				default:
+					return tA.Before(tB) // renews sooner goes first
+				}
+			}
+
+			hitsA, hitsB := a.GetHits(), b.GetHits()
+			if hitsA != hitsB {
+				return hitsA < hitsB // fewer hits preserves prompt cache
+			}
+
+			if capA.RawFloor != capB.RawFloor {
+				return capA.RawFloor > capB.RawFloor
+			}
+
+			return a.ID < b.ID
+		}
+
+		sort.SliceStable(healthy, func(i, j int) bool {
+			return smartCompare(healthy[i], healthy[j])
+		})
+
+		sort.SliceStable(reserve, func(i, j int) bool {
+			return smartCompare(reserve[i], reserve[j])
+		})
+
+		eligible = make([]*storage.Account, 0, len(healthy)+len(reserve))
+		eligible = append(eligible, healthy...)
+		eligible = append(eligible, reserve...)
 	}
 
 	// Secondary tiers ordering: Depleted accounts ordered by raw_floor DESC, hits ASC
@@ -327,26 +273,4 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 // GetSchedulerSnapshot reads an authoritative point-in-time snapshot from state.db.
 func GetSchedulerSnapshot() (*storage.Pool, error) {
 	return storage.LoadPool()
-}
-
-// ReserveRoundRobinCandidates atomically selects candidate ordering and advances
-// the persisted round_robin cursor under an immediate SQLite transaction before network dispatch.
-func ReserveRoundRobinCandidates(now float64) ([]*storage.Account, error) {
-	sdb, err := storage.GetStateDB()
-	if err != nil {
-		return nil, err
-	}
-	return sdb.ReserveRoundRobinCandidates(now, OrderCandidates)
-}
-
-// ReserveRoundRobinAccount atomically reserves and returns the next account candidate.
-func ReserveRoundRobinAccount(now float64) (*storage.Account, error) {
-	candidates, err := ReserveRoundRobinCandidates(now)
-	if err != nil {
-		return nil, err
-	}
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-	return candidates[0], nil
 }

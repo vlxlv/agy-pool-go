@@ -168,7 +168,7 @@ func EvaluateRoutingAttempt(
 	event.ReserveCandidates = reserveCandidates
 
 	// 4. Violation semantics (Section 2 & Section 11)
-	if strategy == config.StrategyMaxQuota {
+	if strategy == config.StrategyMaxQuota || strategy == config.StrategySmart {
 		switch classification {
 		case TierHealthy:
 			event.Verdict = "pass"
@@ -267,7 +267,7 @@ func EvaluateFrozenRoutingEvent(ev proxy.RoutingEvent) RoutingAuditEvent {
 	}
 
 	tier := strings.Title(strings.ToLower(ev.Classification))
-	if strategy == config.StrategyMaxQuota {
+	if strategy == config.StrategyMaxQuota || strategy == config.StrategySmart {
 		switch tier {
 		case "Healthy":
 			auditEv.Verdict = "pass"

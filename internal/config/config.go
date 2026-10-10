@@ -15,15 +15,17 @@ import (
 	"time"
 )
 
-// Version is the agy-pool version string, default "0.1.0-beta.9", injectable via -ldflags.
-var Version = "0.1.0-beta.9"
+// Version is the agy-pool version string, default "0.1.0-beta.10", injectable via -ldflags.
+var Version = "0.1.0-beta.10"
 
 const (
-	// Strategy constants matching Python reference
-	StrategyMaxQuota   = "max_quota"
+	// Strategy constants
+	StrategySmart    = "smart"
+	StrategyMaxQuota = "max_quota"
+
+	// Deprecated: legacy strategies migrated to StrategySmart.
 	StrategyLeastUsed  = "least_used"
 	StrategyRoundRobin = "round_robin"
-	StrategySmart      = "smart"
 
 	// DefaultStrategy is the default load balancing strategy across the pool.
 	DefaultStrategy = StrategySmart
@@ -374,8 +376,11 @@ func LoadConfigFile(path string) (*StaticConfig, error) {
 	}
 
 	switch cfg.Scheduler.Strategy {
-	case StrategyMaxQuota, StrategyLeastUsed, StrategyRoundRobin, StrategySmart:
+	case StrategySmart, StrategyMaxQuota:
 		// Valid
+	case StrategyLeastUsed, StrategyRoundRobin:
+		// Deprecated strategies automatically migrated to smart
+		cfg.Scheduler.Strategy = StrategySmart
 	default:
 		return nil, fmt.Errorf("invalid scheduler strategy %q", cfg.Scheduler.Strategy)
 	}

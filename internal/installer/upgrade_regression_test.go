@@ -129,7 +129,7 @@ func TestUpgrade_ModelB_OfficialUpdaterOverwritesShimAndRepairFlow(t *testing.T)
 
 	// Pre-create unique custom config and synthetic state database
 	customConfig := filepath.Join(cfgDir, "config.json")
-	customConfigContent := `{"version":1,"server":{"listen":"127.0.0.1","port":9444},"scheduler":{"strategy":"least_used"}}`
+	customConfigContent := `{"version":1,"server":{"listen":"127.0.0.1","port":9444},"scheduler":{"strategy":"max_quota"}}`
 	_ = os.WriteFile(customConfig, []byte(customConfigContent), 0600)
 
 	stateDB := filepath.Join(dataDir, "state.db")

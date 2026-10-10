@@ -21,7 +21,7 @@ import (
 
 // ManageStrategy displays or updates the pool load balancing strategy.
 func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
-	validStrategies := []string{config.StrategyMaxQuota, config.StrategyLeastUsed, config.StrategyRoundRobin, config.StrategySmart}
+	validStrategies := []string{config.StrategySmart, config.StrategyMaxQuota}
 
 	pool, err := storage.LoadPool()
 	if err != nil {
@@ -37,9 +37,7 @@ func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 		fmt.Fprintf(stdout, "\nCurrent load balancing strategy: %s%s%s%s\n\n", clrBold, clrGreen, current, clrReset)
 		fmt.Fprintf(stdout, "Available strategies:\n")
 		fmt.Fprintf(stdout, "  • %ssmart%s       - Prioritizes accounts with quotas resetting soonest to minimize wasted quota, with hour truncation smoothing (Magpie Smart, default)\n", clrBold, clrReset)
-		fmt.Fprintf(stdout, "  • %smax_quota%s   - Prioritizes accounts with safest remaining 5-hour and weekly quota, taking reset times into account\n", clrBold, clrReset)
-		fmt.Fprintf(stdout, "  • %sleast_used%s  - Distributes load evenly to accounts with lowest AI generation count (Hits)\n", clrBold, clrReset)
-		fmt.Fprintf(stdout, "  • %sround_robin%s - Cycles through ready accounts in sequential rotation\n\n", clrBold, clrReset)
+		fmt.Fprintf(stdout, "  • %smax_quota%s   - Prioritizes accounts with safest remaining 5-hour and weekly quota, taking reset times into account\n\n", clrBold, clrReset)
 		fmt.Fprintf(stdout, "To update strategy: %sagy-pool strategy <name>%s\n\n", clrBold, clrReset)
 		return true
 	}
@@ -54,8 +52,13 @@ func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 	}
 
 	if !isValid {
-		fmt.Fprintf(stdout, "%s[Error] Invalid strategy '%s'. Choose from: %s%s\n",
-			clrRed, targetStrategy, strings.Join(validStrategies, ", "), clrReset)
+		if targetStrategy == "least_used" || targetStrategy == "round_robin" {
+			fmt.Fprintf(stdout, "%s[Error] Strategy '%s' has been deprecated and removed. Choose from: %s%s\n",
+				clrRed, targetStrategy, strings.Join(validStrategies, ", "), clrReset)
+		} else {
+			fmt.Fprintf(stdout, "%s[Error] Invalid strategy '%s'. Choose from: %s%s\n",
+				clrRed, targetStrategy, strings.Join(validStrategies, ", "), clrReset)
+		}
 		return false
 	}
 

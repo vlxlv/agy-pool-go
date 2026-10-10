@@ -276,7 +276,7 @@ func TestConfigMismatch_And_Tampering(t *testing.T) {
 	_ = WritePIDFile(ctxA.PIDFile(), pidInfo)
 
 	// Now modify config file on disk (hash changes)
-	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"version": 1, "server":{"port":%d,"listen":"127.0.0.1"},"scheduler":{"strategy":"round_robin"}}`, port)), 0o600)
+	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"version": 1, "server":{"port":%d,"listen":"127.0.0.1"},"scheduler":{"strategy":"max_quota"}}`, port)), 0o600)
 
 	// Re-resolve context with modified file
 	ctxModified, err := ResolveInstanceContext(dataDir, cfgFile, port, "127.0.0.1")

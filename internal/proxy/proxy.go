@@ -577,15 +577,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	var sessionKey string
 	affinityStatus := "none"
 	if isGeneration {
-		if strategy == "round_robin" {
-			var rrErr error
-			candidates, rrErr = scheduler.ReserveRoundRobinCandidates(now)
-			if rrErr != nil {
-				candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
-			}
-		} else {
-			candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
-		}
+		candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
 
 		sessionKey = ExtractSessionKey(r, body)
 		if sessionKey != "" {

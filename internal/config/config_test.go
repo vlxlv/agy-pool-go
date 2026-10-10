@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ func TestConstants(t *testing.T) {
 	if DepletedThreshold != 0.005 {
 		t.Fatalf("expected DepletedThreshold 0.005, got %f", DepletedThreshold)
 	}
-	if StrategyMaxQuota != "max_quota" || StrategyLeastUsed != "least_used" || StrategyRoundRobin != "round_robin" {
+	if StrategySmart != "smart" || StrategyMaxQuota != "max_quota" {
 		t.Fatalf("unexpected strategy constants")
 	}
 }
@@ -371,5 +372,23 @@ func TestConfigExampleJsonValidation(t *testing.T) {
 	}
 	if cfg.Logging.MaxSizeBytes != DefaultMaxLogBytes || cfg.Logging.BackupCount != DefaultBackupLogCount {
 		t.Errorf("unexpected logging config: %+v", cfg.Logging)
+	}
+}
+
+func TestConfig_DeprecatedStrategiesMigrated(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, strat := range []string{"least_used", "round_robin"} {
+		cfgPath := filepath.Join(tmpDir, "config_"+strat+".json")
+		content := fmt.Sprintf(`{"version":1,"server":{"listen":"127.0.0.1","port":8899},"scheduler":{"strategy":%q}}`, strat)
+		if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+			t.Fatalf("failed to write test config: %v", err)
+		}
+		cfg, err := LoadConfigFile(cfgPath)
+		if err != nil {
+			t.Fatalf("failed to load config with strategy %q: %v", strat, err)
+		}
+		if cfg.Scheduler.Strategy != StrategySmart {
+			t.Errorf("expected strategy %q to migrate to %q, got %q", strat, StrategySmart, cfg.Scheduler.Strategy)
+		}
 	}
 }

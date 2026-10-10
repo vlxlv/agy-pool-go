@@ -39,7 +39,7 @@ func TestSaveAndLoadRoundtripAndPermissions(t *testing.T) {
 	setupTestStorage(t)
 
 	p := NewEmptyPool()
-	p.Strategy = "round_robin"
+	p.Strategy = "max_quota"
 	p.Accounts = append(p.Accounts, &Account{
 		ID:           "acc_1",
 		Name:         "First",
@@ -65,7 +65,7 @@ func TestSaveAndLoadRoundtripAndPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPool failed: %v", err)
 	}
-	if loaded.Strategy != "round_robin" || len(loaded.Accounts) != 1 {
+	if loaded.Strategy != "max_quota" || len(loaded.Accounts) != 1 {
 		t.Fatalf("loaded pool mismatched: %+v", loaded)
 	}
 	if loaded.Accounts[0].ID != "acc_1" || loaded.Accounts[0].RequestCount != 42 {
@@ -88,7 +88,7 @@ func TestCorruptFileReturnsError(t *testing.T) {
 
 	// PoolTransaction must also fail and NOT overwrite corrupt file
 	txErr := PoolTransaction(func(pool *Pool) error {
-		pool.Strategy = "least_used"
+		pool.Strategy = "smart"
 		return nil
 	})
 	if txErr == nil {
@@ -113,7 +113,7 @@ func TestFailedTransactionAborts(t *testing.T) {
 
 	errExpected := errors.New("simulated business error")
 	err := PoolTransaction(func(pool *Pool) error {
-		pool.Strategy = "least_used"
+		pool.Strategy = "smart"
 		return errExpected
 	})
 
@@ -276,8 +276,8 @@ func TestMigrateLegacyPool(t *testing.T) {
 	if res.ActiveAccountID != "acc_1" {
 		t.Fatalf("expected active account acc_1, got %s", res.ActiveAccountID)
 	}
-	if res.Strategy != "least_used" {
-		t.Fatalf("expected strategy least_used, got %s", res.Strategy)
+	if res.Strategy != "smart" {
+		t.Fatalf("expected strategy smart, got %s", res.Strategy)
 	}
 
 	// Verify source was completely untouched
@@ -425,9 +425,6 @@ func TestMigrateSplitJSONToDB(t *testing.T) {
 		}
 		if a.LastQuota == nil || a.LastQuota.RemainingFraction == nil || *a.LastQuota.RemainingFraction != 0.75 {
 			return fmt.Errorf("quota not preserved: %+v", a.LastQuota)
-		}
-		if p.RoundRobinLastAccountID == nil || *p.RoundRobinLastAccountID != "acc_split1" {
-			return fmt.Errorf("round robin cursor not preserved: %v", p.RoundRobinLastAccountID)
 		}
 		return nil
 	})

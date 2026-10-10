@@ -56,7 +56,6 @@ func RunSingleSimulation(simAccs []SimAccount, pace float64, strategy string, no
 	accs := make([]SimAccount, len(simAccs))
 	copy(accs, simAccs)
 
-	rrCursor := 0
 	var firstEmptyAccID string
 	var firstEmptySec *float64
 	var firstStallSec *float64
@@ -183,17 +182,7 @@ func RunSingleSimulation(simAccs []SimAccount, pace float64, strategy string, no
 		}
 
 		var selected *SimAccount
-		if strategy == "round_robin" {
-			selected = eligible[rrCursor%len(eligible)]
-			rrCursor = (rrCursor + 1) % len(eligible)
-		} else if strategy == "least_used" {
-			selected = eligible[0]
-			for _, a := range eligible[1:] {
-				if a.SimHits < selected.SimHits {
-					selected = a
-				}
-			}
-		} else { // max_quota
+		if strategy == "max_quota" {
 			selected = eligible[0]
 			for _, a := range eligible[1:] {
 				if a.Q5 > selected.Q5 {
@@ -205,6 +194,29 @@ func RunSingleSimulation(simAccs []SimAccount, pace float64, strategy string, no
 						if a.SimHits < selected.SimHits {
 							selected = a
 						}
+					}
+				}
+			}
+		} else { // smart (default)
+			selected = eligible[0]
+			for _, a := range eligible[1:] {
+				// Prioritize account renewing soonest
+				aRenew := a.ResetWTS
+				if aRenew <= 0 || (a.Reset5TS > 0 && a.Reset5TS < aRenew) {
+					aRenew = a.Reset5TS
+				}
+				selRenew := selected.ResetWTS
+				if selRenew <= 0 || (selected.Reset5TS > 0 && selected.Reset5TS < selRenew) {
+					selRenew = selected.Reset5TS
+				}
+
+				if aRenew > 0 && (selRenew <= 0 || aRenew < selRenew) {
+					selected = a
+				} else if aRenew == selRenew {
+					if a.SimHits < selected.SimHits {
+						selected = a
+					} else if a.SimHits == selected.SimHits && a.Q5 > selected.Q5 {
+						selected = a
 					}
 				}
 			}

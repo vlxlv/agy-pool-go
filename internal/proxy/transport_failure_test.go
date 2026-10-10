@@ -796,68 +796,6 @@ func TestExplicitOrdinaryError_NoReplay(t *testing.T) {
 	}
 }
 
-// 15. Round-Robin cursor is NOT rolled back on ambiguous failure
-func TestRoundRobin_CursorNotRolledBackOnFailure(t *testing.T) {
-	setupTwoAccountPool(t)
-	defer resetProviders()
-
-	_ = storage.PoolTransaction(func(pool *storage.Pool) error {
-		pool.Strategy = "round_robin"
-		return nil
-	})
-
-	var acc1Attempts, acc2Attempts int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.Header.Get("Authorization"), "acc_1") {
-			atomic.AddInt32(&acc1Attempts, 1)
-			// Ambrupt close -> ambiguous failure
-			hj, ok := w.(http.Hijacker)
-			if ok {
-				conn, _, _ := hj.Hijack()
-				_ = conn.Close()
-			}
-			return
-		}
-		atomic.AddInt32(&acc2Attempts, 1)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"result":"acc2_success"}`))
-	}))
-	defer upstream.Close()
-
-	u, _ := url.Parse(upstream.URL)
-	BackendHostProvider = func() string { return u.Host }
-	BackendURLProvider = func() string { return upstream.URL }
-
-	handler := NewHandler()
-
-	// Request 1: targets acc_1, fails ambiguously -> 502
-	req1 := httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader(`{}`))
-	rec1 := httptest.NewRecorder()
-	handler.ServeHTTP(rec1, req1)
-
-	if rec1.Result().StatusCode != http.StatusBadGateway {
-		t.Fatalf("req1 status = %d, want 502 Bad Gateway", rec1.Result().StatusCode)
-	}
-	if count := atomic.LoadInt32(&acc1Attempts); count != 1 {
-		t.Fatalf("req1 acc_1 attempts = %d, want 1", count)
-	}
-	if count := atomic.LoadInt32(&acc2Attempts); count != 0 {
-		t.Fatalf("req1 acc_2 attempts = %d, want 0", count)
-	}
-
-	// Request 2: RR cursor was NOT rolled back, so it must pick acc_2!
-	req2 := httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader(`{}`))
-	rec2 := httptest.NewRecorder()
-	handler.ServeHTTP(rec2, req2)
-
-	if rec2.Result().StatusCode != http.StatusOK {
-		t.Fatalf("req2 status = %d, want 200 OK from acc_2", rec2.Result().StatusCode)
-	}
-	if count := atomic.LoadInt32(&acc2Attempts); count != 1 {
-		t.Fatalf("req2 acc_2 attempts = %d, want 1", count)
-	}
-}
-
 // 16. Counter semantics: consistent accounting, no double-counting
 func TestCounterSemantics_Consistent(t *testing.T) {
 	setupTwoAccountPool(t)
