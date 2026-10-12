@@ -763,7 +763,7 @@ func TestSmartStrategy_UserObservedSingleAccountDrainPrevented(t *testing.T) {
 				ResetTime: "2026-09-16T12:34:00Z", // resets in 34m
 			},
 			GeminiWeekly: &storage.QuotaWindow{
-				Fraction:  floatPtr(0.23), // constrained weekly budget!
+				Fraction:  floatPtr(0.23),         // constrained weekly budget!
 				ResetTime: "2026-09-18T13:00:00Z", // resets in ~2 days
 			},
 			UpdatedAt: int64Ptr(int64(now - 10)),
