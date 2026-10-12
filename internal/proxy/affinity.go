@@ -114,8 +114,8 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 	nowSecs := float64(now.Unix())
 	for i, acc := range candidates {
 		if acc != nil && acc.ID == boundID {
-			// Only keep affinity if account is healthy and not in cooldown or restricted
-			if !scheduler.IsRestricted(acc) && (acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs) {
+			// Only keep affinity if account is healthy, not in reserve, and not in cooldown or restricted
+			if !scheduler.IsRestricted(acc) && !scheduler.IsReserveCandidate(acc, nowSecs) && (acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs) {
 				targetIdx = i
 			}
 			break

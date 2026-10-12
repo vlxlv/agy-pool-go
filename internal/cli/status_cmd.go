@@ -36,8 +36,8 @@ func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 	if targetStrategy == "" {
 		fmt.Fprintf(stdout, "\nCurrent load balancing strategy: %s%s%s%s\n\n", clrBold, clrGreen, current, clrReset)
 		fmt.Fprintf(stdout, "Available strategies:\n")
-		fmt.Fprintf(stdout, "  • %ssmart%s       - Prioritizes accounts with quotas resetting soonest to minimize wasted quota, with hour truncation smoothing (Magpie Smart, default)\n", clrBold, clrReset)
-		fmt.Fprintf(stdout, "  • %smax_quota%s   - Prioritizes accounts with safest remaining 5-hour and weekly quota, taking reset times into account\n\n", clrBold, clrReset)
+		fmt.Fprintf(stdout, "  • %ssmart%s       - Multi-account concurrent rotation with imminent reset harvesting and low-quota protection (default)\n", clrBold, clrReset)
+		fmt.Fprintf(stdout, "  • %smax_quota%s   - Balances across accounts by highest remaining 5-hour and weekly quota headroom\n\n", clrBold, clrReset)
 		fmt.Fprintf(stdout, "To update strategy: %sagy-pool strategy <name>%s\n\n", clrBold, clrReset)
 		return true
 	}

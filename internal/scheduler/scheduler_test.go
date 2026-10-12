@@ -652,10 +652,6 @@ func TestSmartStrategy_FiveHourOnlyVsWeekly(t *testing.T) {
 		ID:     "acc_weekly",
 		Status: "active",
 		LastQuota: &storage.QuotaState{
-			Gemini5H: &storage.QuotaWindow{
-				Fraction:  floatPtr(0.80),
-				ResetTime: "2026-09-16T14:00:00Z",
-			},
 			GeminiWeekly: &storage.QuotaWindow{
 				Fraction:  floatPtr(0.80),
 				ResetTime: "2026-09-19T10:00:00Z", // renews in ~3 days
@@ -747,5 +743,267 @@ func TestSmartStrategy_CooldownSink(t *testing.T) {
 	ordered := OrderCandidates([]*storage.Account{accCooldown, accDepleted, accHealthy}, config.StrategySmart, nil, now)
 	if len(ordered) != 3 || ordered[0].ID != "healthy" || ordered[1].ID != "depleted" || ordered[2].ID != "cooldown" {
 		t.Fatalf("expected [healthy, depleted, cooldown], got [%s, %s, %s]", ordered[0].ID, ordered[1].ID, ordered[2].ID)
+	}
+}
+
+func TestSmartStrategy_UserObservedSingleAccountDrainPrevented(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// Real production bug snapshot:
+	// Backup had sooner weekly reset (in 2 days) but only 23% weekly quota and 42% 5H quota.
+	// Main, Work, Life had later weekly resets (in 6-7 days) but 97-99% quota.
+	// The old smart algorithm hammered Backup because its weekly reset was sooner.
+	// The redesigned smart algorithm MUST protect Backup and dispatch healthy high-headroom accounts!
+	backup := &storage.Account{
+		ID:     "Backup",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.42),
+				ResetTime: "2026-09-16T12:34:00Z", // resets in 34m
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.23), // constrained weekly budget!
+				ResetTime: "2026-09-18T13:00:00Z", // resets in ~2 days
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	mainAcc := &storage.Account{
+		ID:     "Main",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.97),
+				ResetTime: "2026-09-16T16:54:00Z", // resets in ~5h
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.99),
+				ResetTime: "2026-09-23T11:00:00Z", // resets in ~7 days
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{backup, mainAcc}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "Main" {
+		t.Fatalf("redesigned smart MUST prioritize Main (97%% headroom) over Backup (23%% headroom), got %s first", ordered[0].ID)
+	}
+}
+
+func TestSmartStrategy_ExpiringQuotaHarvesting(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// Account A has 80% 5H quota and resets in 25 minutes (expiring quota).
+	// Account B has 95% 5H quota and resets in 4.5 hours.
+	// Redesigned smart should harvest Account A before its reset so quota isn't wasted!
+	accExpiring := &storage.Account{
+		ID:     "acc_expiring",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.80),
+				ResetTime: "2026-09-16T12:25:00Z", // resets in 25m <= 90m
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-22T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	accCruising := &storage.Account{
+		ID:     "acc_cruising",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.95),
+				ResetTime: "2026-09-16T16:30:00Z", // resets in 4.5h > 90m
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.95),
+				ResetTime: "2026-09-22T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accCruising, accExpiring}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_expiring" {
+		t.Fatalf("expected expiring account to be harvested first, got %s", ordered[0].ID)
+	}
+}
+
+func TestSmartStrategy_LowQuotaAccountProtectedFromHarvest(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// Account Low has only 20% 5H quota and resets in 25 minutes.
+	// Because headroom is < 30%, it has no surplus quota to harvest and must NOT be drained into 429!
+	// Account Healthy (90% quota) should be chosen instead.
+	accLow := &storage.Account{
+		ID:     "acc_low",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.20), // low headroom!
+				ResetTime: "2026-09-16T12:25:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-22T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	accHealthy := &storage.Account{
+		ID:     "acc_healthy",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-16T16:30:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-22T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accLow, accHealthy}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_healthy" {
+		t.Fatalf("expected healthy account to be preferred over low account, got %s", ordered[0].ID)
+	}
+}
+
+func TestSmartStrategy_BalancedCruisingLoadDistribution(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// Three accounts with ~96-97% quota and same 5h reset window.
+	// Should balance load by request hits smoothly.
+	acc1 := &storage.Account{
+		ID:           "acc1",
+		Status:       "active",
+		RequestCount: 100,
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.97),
+				ResetTime: "2026-09-16T16:50:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.99),
+				ResetTime: "2026-09-23T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	acc2 := &storage.Account{
+		ID:           "acc2",
+		Status:       "active",
+		RequestCount: 10, // lowest hits
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.96),
+				ResetTime: "2026-09-16T16:50:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.99),
+				ResetTime: "2026-09-23T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{acc1, acc2}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc2" {
+		t.Fatalf("expected acc2 (lowest hits: 10) to be ordered first, got %s", ordered[0].ID)
+	}
+}
+
+func TestSmartStrategy_StrictWeakOrderingTransitivity(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// Create diverse accounts across different headroom tiers, hits, and reset times
+	accs := []*storage.Account{
+		{
+			ID: "acc_top_10hits", RequestCount: 10, Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.95), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.95), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		},
+		{
+			ID: "acc_top_50hits", RequestCount: 50, Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.95), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		},
+		{
+			ID: "acc_mid_5hits", RequestCount: 5, Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.65), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.70), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		},
+		{
+			ID: "acc_mid_20hits", RequestCount: 20, Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.70), ResetTime: "2026-09-16T15:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.70), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		},
+		{
+			ID: "acc_low_1hit", RequestCount: 1, Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.35), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.35), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		},
+		{
+			ID: "acc_harvest_30m", RequestCount: 100, Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-16T12:30:00Z"}, // resets in 30m!
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		},
+	}
+
+	ordered := OrderCandidates(accs, config.StrategySmart, nil, now)
+	if len(ordered) != len(accs) {
+		t.Fatalf("expected all %d accounts ordered, got %d", len(accs), len(ordered))
+	}
+
+	// Verify harvest account is ordered first despite 100 hits
+	if ordered[0].ID != "acc_harvest_30m" {
+		t.Fatalf("expected expiring harvest account to be first, got %s", ordered[0].ID)
+	}
+
+	// Verify top-tier accounts precede mid-tier and low-tier
+	indices := make(map[string]int)
+	for i, a := range ordered {
+		indices[a.ID] = i
+	}
+
+	// Within top tier (>= 80%): 10 hits before 50 hits
+	if indices["acc_top_10hits"] > indices["acc_top_50hits"] {
+		t.Fatalf("expected acc_top_10hits before acc_top_50hits")
+	}
+
+	// Top tier before mid tier
+	if indices["acc_top_50hits"] > indices["acc_mid_5hits"] {
+		t.Fatalf("expected top tier before mid tier")
+	}
+
+	// Mid tier before low tier
+	if indices["acc_mid_20hits"] > indices["acc_low_1hit"] {
+		t.Fatalf("expected mid tier before low tier")
 	}
 }

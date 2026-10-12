@@ -85,16 +85,75 @@ func EffectiveWorstPace(capState quota.CapacityState) float64 {
 	return capState.WorstPace
 }
 
-// AccountRenewalTimes extracts renewal reset times in order of window significance (7D weekly, then 5H).
-func AccountRenewalTimes(capState quota.CapacityState) []time.Time {
-	var renews []time.Time
-	if capState.Reset7Time != nil && !capState.Reset7Time.IsZero() {
-		renews = append(renews, *capState.Reset7Time)
+// Smart scheduling constants
+const (
+	SmartHarvest5HWindow     = 90 * time.Minute
+	SmartHarvestWeeklyWindow = 36 * time.Hour
+	SmartHarvestMinHeadroom  = 0.30
+)
+
+// smartHeadroomTier maps an account's bottleneck headroom to discrete tiers (20% bands).
+// This guarantees strict weak ordering (transitivity) in sorting while enabling
+// active concurrent multi-account rotation within each health band.
+func smartHeadroomTier(headroom float64) int {
+	switch {
+	case headroom >= 0.80:
+		return 4 // Prime: 80% - 100%
+	case headroom >= 0.60:
+		return 3 // Healthy: 60% - 80%
+	case headroom >= 0.40:
+		return 2 // Moderate: 40% - 60%
+	case headroom >= 0.20:
+		return 1 // Low/Conservation: 20% - 40%
+	default:
+		return 0 // Near Reserve: < 20%
 	}
+}
+
+// SmartHarvestCandidate checks if an account qualifies for harvest mode:
+// it must have sufficient headroom (RawFloor >= 30%) and an upcoming reset
+// (either 5H within 90m or Weekly within 36h). Returns (earliestResetTime, true).
+func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (time.Time, bool) {
+	if capState.RawFloor < SmartHarvestMinHeadroom {
+		return time.Time{}, false
+	}
+
+	var best time.Time
+	hasBest := false
+
 	if capState.Reset5Time != nil && !capState.Reset5Time.IsZero() {
-		renews = append(renews, *capState.Reset5Time)
+		rem5 := capState.Reset5Time.Sub(nowTime)
+		if rem5 > 0 && rem5 <= SmartHarvest5HWindow {
+			best = *capState.Reset5Time
+			hasBest = true
+		}
 	}
-	return renews
+
+	if capState.Reset7Time != nil && !capState.Reset7Time.IsZero() {
+		rem7 := capState.Reset7Time.Sub(nowTime)
+		if rem7 > 0 && rem7 <= SmartHarvestWeeklyWindow {
+			if !hasBest || capState.Reset7Time.Before(best) {
+				best = *capState.Reset7Time
+				hasBest = true
+			}
+		}
+	}
+
+	return best, hasBest
+}
+
+// NextUpcomingReset returns the earliest upcoming reset time for the account.
+func NextUpcomingReset(capState quota.CapacityState) *time.Time {
+	var earliest *time.Time
+	if capState.Reset5Time != nil && !capState.Reset5Time.IsZero() {
+		earliest = capState.Reset5Time
+	}
+	if capState.Reset7Time != nil && !capState.Reset7Time.IsZero() {
+		if earliest == nil || capState.Reset7Time.Before(*earliest) {
+			earliest = capState.Reset7Time
+		}
+	}
+	return earliest
 }
 
 // OrderCandidates orders generation candidates according to the specified strategy.
@@ -198,39 +257,74 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 			}
 		}
 
+		nowTime := time.Unix(int64(now), 0)
+
 		smartCompare := func(a, b *storage.Account) bool {
 			capA := quota.ComputeCapacityState(a, now)
 			capB := quota.ComputeCapacityState(b, now)
 
-			timesA := AccountRenewalTimes(capA)
-			timesB := AccountRenewalTimes(capB)
-
-			for k := 0; k < len(timesA) || k < len(timesB); k++ {
-				var tA, tB time.Time
-				if k < len(timesA) {
-					tA = timesA[k].Truncate(time.Hour)
-				}
-				if k < len(timesB) {
-					tB = timesB[k].Truncate(time.Hour)
-				}
-
-				switch {
-				case tA.Equal(tB):
-					continue
-				case tA.IsZero() || tB.IsZero():
-					return tB.IsZero() // known renewal time goes before unknown
-				default:
-					return tA.Before(tB) // renews sooner goes first
-				}
+			// 1. Freshness rank (prefer freshly probed accounts when unknown)
+			rankA := quota.FreshnessRank(a, now)
+			rankB := quota.FreshnessRank(b, now)
+			if rankA != rankB {
+				return rankA > rankB
 			}
 
+			// 2. Harvest Mode: Prioritize accounts with surplus headroom (>= 30%)
+			// that are about to reset (5H <= 90m, WK <= 36h) to capture expiring quota.
+			tA, harvestA := SmartHarvestCandidate(capA, nowTime)
+			tB, harvestB := SmartHarvestCandidate(capB, nowTime)
+
+			if harvestA != harvestB {
+				return harvestA // Qualifying harvest account wins over cruising account
+			}
+			if harvestA && harvestB {
+				// Both have expiring quota: consume sooner reset first (hour resolution)
+				truncA := tA.Truncate(time.Hour)
+				truncB := tB.Truncate(time.Hour)
+				if !truncA.Equal(truncB) {
+					return truncA.Before(truncB)
+				}
+				// Equal reset hour: higher headroom tier first
+				tierA := smartHeadroomTier(capA.RawFloor)
+				tierB := smartHeadroomTier(capB.RawFloor)
+				if tierA != tierB {
+					return tierA > tierB
+				}
+				hitsA, hitsB := a.GetHits(), b.GetHits()
+				if hitsA != hitsB {
+					return hitsA < hitsB
+				}
+				return a.ID < b.ID
+			}
+
+			// 3. Cruising Mode: Headroom Health Tier (Discrete 20% bands)
+			// Accounts in higher tiers strictly take precedence over lower tiers.
+			tierA := smartHeadroomTier(capA.RawFloor)
+			tierB := smartHeadroomTier(capB.RawFloor)
+			if tierA != tierB {
+				return tierA > tierB
+			}
+
+			// 4. Multi-Account Concurrent Load Balancing:
+			// Within the same health tier, distribute traffic across all accounts by request hits.
+			// This maximizes active multi-account utilization and parallel 5H rolling recoveries.
 			hitsA, hitsB := a.GetHits(), b.GetHits()
 			if hitsA != hitsB {
-				return hitsA < hitsB // fewer hits preserves prompt cache
+				return hitsA < hitsB
 			}
 
-			if capA.RawFloor != capB.RawFloor {
-				return capA.RawFloor > capB.RawFloor
+			// 5. Renewal Timing: when hits and tier are tied, prefer the account that resets sooner
+			nextA := NextUpcomingReset(capA)
+			nextB := NextUpcomingReset(capB)
+			if nextA != nil && nextB != nil {
+				truncA := nextA.Truncate(time.Hour)
+				truncB := nextB.Truncate(time.Hour)
+				if !truncA.Equal(truncB) {
+					return truncA.Before(truncB)
+				}
+			} else if nextA != nil || nextB != nil {
+				return nextA != nil
 			}
 
 			return a.ID < b.ID
