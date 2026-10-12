@@ -587,3 +587,66 @@ func TestVerificationPending_NoReplayAfterCommit(t *testing.T) {
 		t.Fatal("expected pending_1 claim to be released after committed failure")
 	}
 }
+
+// 8. Force token refresh on verification pending confirmation candidate:
+// When an account is in StatusVerificationPending, generation confirmation must force-refresh
+// the access token so that a stale, invalidated token is not dispatched to upstream.
+func TestVerificationPending_ForcesTokenRefreshOnConfirmation(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+	ClearAllVerificationConfirmationClaims()
+	t.Cleanup(ClearAllVerificationConfirmationClaims)
+
+	var forceReceived bool
+	TokenRefresherWithForce = func(account *storage.Account, force bool) (string, error) {
+		if account.ID == "pending_cand" {
+			forceReceived = force
+		}
+		return "fresh-token-" + account.ID, nil
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	BackendHostProvider = func() string { return u.Host }
+	BackendURLProvider = func() string { return upstream.URL }
+
+	fraction := 0.9
+	pool := storage.NewEmptyPool()
+	cand := &storage.Account{
+		ID:        "pending_cand",
+		Email:     "pending_cand@example.com",
+		Status:    storage.StatusVerificationPending,
+		LastQuota: &storage.QuotaState{RemainingFraction: &fraction},
+	}
+	pool.Accounts = []*storage.Account{cand}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	handler := NewHandler()
+	req := httptest.NewRequest("POST", "/v1/models/gemini:streamGenerateContent", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if !forceReceived {
+		t.Fatal("expected force=true during token refresh for StatusVerificationPending account")
+	}
+
+	storedPool, err := storage.LoadPool()
+	if err != nil {
+		t.Fatalf("LoadPool failed: %v", err)
+	}
+	stored := storage.FindAccount(storedPool, cand)
+	if stored == nil {
+		t.Fatal("stored account not found")
+	}
+	if stored.Status != "" {
+		t.Fatalf("expected status to transition to Ready on success, got %q", stored.Status)
+	}
+}

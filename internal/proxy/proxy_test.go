@@ -30,6 +30,7 @@ func resetProviders() {
 	BackendURLProvider = nil
 	UserAgentProvider = nil
 	TokenRefresher = nil
+	TokenRefresherWithForce = nil
 	QuotaRefresher = quota.ScheduleQuotaRefreshSimple
 	LogRotator = nil
 	NowFunc = time.Now

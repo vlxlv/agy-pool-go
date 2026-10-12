@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -1006,4 +1007,67 @@ func TestSmartStrategy_StrictWeakOrderingTransitivity(t *testing.T) {
 	if indices["acc_mid_20hits"] > indices["acc_low_1hit"] {
 		t.Fatalf("expected mid tier before low tier")
 	}
+}
+
+func TestInFlightConcurrency_MaxQuotaAndSmart(t *testing.T) {
+	observability.ResetInFlight()
+	defer observability.ResetInFlight()
+
+	now := 1700000000.0
+	// accBusy has 100% quota, 0 hits
+	accBusy := &storage.Account{
+		ID:   "acc_busy",
+		Name: "BusyAccount",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(1.0), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(1.0), ResetTime: "2026-09-23T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+	// accIdle has 70% quota, 10 hits
+	accIdle := &storage.Account{
+		ID:           "acc_idle",
+		Name:         "IdleAccount",
+		RequestCount: 10,
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.7), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.7), ResetTime: "2026-09-23T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+
+	// When both are idle, accBusy wins under max_quota and smart (higher quota / tier)
+	orderedMQ := OrderCandidates([]*storage.Account{accIdle, accBusy}, config.StrategyMaxQuota, nil, now)
+	if orderedMQ[0].ID != "acc_busy" {
+		t.Fatalf("expected acc_busy to win when both idle, got %s", orderedMQ[0].ID)
+	}
+
+	orderedSmart := OrderCandidates([]*storage.Account{accIdle, accBusy}, config.StrategySmart, nil, now)
+	if orderedSmart[0].ID != "acc_busy" {
+		t.Fatalf("expected acc_busy to win when both idle under smart, got %s", orderedSmart[0].ID)
+	}
+
+	// Mark accBusy as in-flight (1 active request)
+	done := observability.StartInFlightGeneration("acc_busy")
+	defer done()
+
+	// Under max_quota, accIdle must now be ordered BEFORE accBusy
+	orderedMQInFlight := OrderCandidates([]*storage.Account{accBusy, accIdle}, config.StrategyMaxQuota, nil, now)
+	if orderedMQInFlight[0].ID != "acc_idle" {
+		t.Fatalf("expected idle account to precede busy account under max_quota, got %s", orderedMQInFlight[0].ID)
+	}
+
+	// Under smart, accIdle must also be ordered BEFORE accBusy
+	orderedSmartInFlight := OrderCandidates([]*storage.Account{accBusy, accIdle}, config.StrategySmart, nil, now)
+	if orderedSmartInFlight[0].ID != "acc_idle" {
+		t.Fatalf("expected idle account to precede busy account under smart, got %s", orderedSmartInFlight[0].ID)
+	}
+
+	// If accIdle also gets an in-flight request, both have in-flight=1, tie-breaking restores accBusy first
+	doneIdle := observability.StartInFlightGeneration("acc_idle")
+	orderedTied := OrderCandidates([]*storage.Account{accIdle, accBusy}, config.StrategySmart, nil, now)
+	if orderedTied[0].ID != "acc_busy" {
+		t.Fatalf("expected acc_busy to win tie-break when both have equal in-flight, got %s", orderedTied[0].ID)
+	}
+	doneIdle()
 }

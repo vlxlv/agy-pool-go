@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/url"
@@ -8,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/term"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
@@ -182,17 +185,35 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		label := accounts.DisplayAccountName(acc)
 		if verificationURL == "" {
-			if acc.Status == storage.StatusVerificationPending {
-				fmt.Fprintf(stdout, "Verification challenge cleared for %s. Status is Verification Pending; waiting for generation confirmation.\n", label)
-			} else {
-				fmt.Fprintf(stdout, "Verification is not required for %s.\n", label)
-			}
+			fmt.Fprintf(stdout, "%s🎉 Verification Successful! Account is Ready!%s\n", clrGreen, clrReset)
 			return 0
 		}
 		fmt.Fprintf(stdout, "Verification required for %s.\n", label)
 		fmt.Fprintln(stdout, "Open the verification URL shown below:")
 		if safeURL, ok := redactUserURL(verificationURL); ok {
 			fmt.Fprintln(stdout, safeURL)
+			_ = accounts.DefaultBrowserOpener(verificationURL)
+			renderTerminalQRCode(stdout, verificationURL)
+			fmt.Fprintln(stdout, "\nInstructions:")
+			fmt.Fprintln(stdout, "  1. Complete Google verification in your browser or scan the QR code with your phone.")
+			fmt.Fprintln(stdout, "  2. Wait until redirected to 'auth_success_gemini' (Verification Successful).")
+			fmt.Fprintln(stdout, "  3. Re-run 'agy-pool verify' to confirm.")
+
+			if stdin != nil {
+				if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+					fmt.Fprintf(stdout, "\nPress [Enter] here once verification is completed in browser...")
+					scanner := bufio.NewScanner(stdin)
+					if scanner.Scan() {
+						fmt.Fprintf(stdout, "\nRe-probing status for %s...\n", label)
+						recheckAcc, _, err := accounts.VerifyAccount(target)
+						if err == nil && recheckAcc != nil && recheckAcc.Status != storage.StatusValidationRequired {
+							fmt.Fprintf(stdout, "%s🎉 Verification Successful! Account is Ready!%s\n", clrGreen, clrReset)
+						} else {
+							fmt.Fprintf(stdout, "Account still appears restricted. If you just completed verification, wait a few moments and re-run 'agy-pool verify %s'.\n", target)
+						}
+					}
+				}
+			}
 		} else {
 			fmt.Fprintln(stdout, "Re-run login/re-authentication for this account.")
 		}

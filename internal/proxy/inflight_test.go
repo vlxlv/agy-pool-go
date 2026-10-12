@@ -179,3 +179,108 @@ func TestInFlight_Lifecycle(t *testing.T) {
 		t.Errorf("expected in-flight to return to 0 after SSE stream truncation, got %d", inFlight)
 	}
 }
+
+// TestInFlight_ConcurrentDispatchDistribution verifies that when account 1 is actively running
+// a generation request, a concurrent generation request automatically routes to idle account 2.
+func TestInFlight_ConcurrentDispatchDistribution(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+	observability.Reset()
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock_token_" + account.ID, nil }
+
+	now := time.Now().Unix()
+	frac := 0.95
+	acc1 := &storage.Account{
+		ID:        "acc_flight_1",
+		Name:      "FlightAcc1",
+		Status:    "ready",
+		CreatedAt: &now,
+		LastQuota: &storage.QuotaState{RemainingFraction: &frac},
+	}
+	acc2 := &storage.Account{
+		ID:        "acc_flight_2",
+		Name:      "FlightAcc2",
+		Status:    "ready",
+		CreatedAt: &now,
+		LastQuota: &storage.QuotaState{RemainingFraction: &frac},
+	}
+	pool := &storage.Pool{
+		Version:  1,
+		Strategy: "smart",
+		Accounts: []*storage.Account{acc1, acc2},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	req1Started := make(chan struct{})
+	req2Started := make(chan struct{})
+	releaseAll := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHdr := r.Header.Get("Authorization")
+		if authHdr == "Bearer mock_token_acc_flight_1" {
+			close(req1Started)
+			<-releaseAll
+		} else if authHdr == "Bearer mock_token_acc_flight_2" {
+			close(req2Started)
+			<-releaseAll
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"candidates":[]}`))
+	}))
+	defer upstream.Close()
+
+	origBackend := BackendURLProvider
+	BackendURLProvider = func() string { return upstream.URL }
+	defer func() { BackendURLProvider = origBackend }()
+
+	handler := NewHandler()
+
+	var wg sync.WaitGroup
+	// Launch request 1 -> should pick acc_flight_1 (first in pool)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest("POST", "/v1/models/gemini-pro:streamGenerateContent", nil)
+		rec := httptest.NewRecorder()
+		handler.HandleProxy(rec, req)
+	}()
+
+	// Wait for request 1 to be in-flight on acc_flight_1
+	select {
+	case <-req1Started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for request 1 to start")
+	}
+
+	// While request 1 is running, launch concurrent request 2 -> must be routed to acc_flight_2
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest("POST", "/v1/models/gemini-pro:streamGenerateContent", nil)
+		rec := httptest.NewRecorder()
+		handler.HandleProxy(rec, req)
+	}()
+
+	// Wait for request 2 to be received by upstream on acc_flight_2
+	select {
+	case <-req2Started:
+		// Success: concurrent request 2 was routed to acc_flight_2!
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for concurrent request 2 to route to acc_flight_2")
+	}
+
+	// Release both requests and wait for completion
+	close(releaseAll)
+	wg.Wait()
+
+	if f1 := observability.GetInFlightGeneration("acc_flight_1"); f1 != 0 {
+		t.Errorf("expected acc_flight_1 in-flight to return to 0, got %d", f1)
+	}
+	if f2 := observability.GetInFlightGeneration("acc_flight_2"); f2 != 0 {
+		t.Errorf("expected acc_flight_2 in-flight to return to 0, got %d", f2)
+	}
+}

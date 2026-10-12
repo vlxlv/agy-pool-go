@@ -90,7 +90,7 @@ func clearValidationRestrictionCAS(targetAcc *storage.Account, snap restrictionS
 			return fmt.Errorf("account '%s' does not exist in pool", targetAcc.ID)
 		}
 		if snap.matches(current) {
-			current.Status = storage.StatusVerificationPending
+			current.Status = ""
 			current.ValidationURL = nil
 			current.RateLimitedUntil = nil
 			current.LastQuota = newQuota
@@ -1160,7 +1160,7 @@ func VerifyAccount(target string) (*storage.Account, string, error) {
 		} else {
 			targetAcc.LastQuota = q
 			if wasValidationRequired && targetAcc.Status == "" {
-				targetAcc.Status = storage.StatusVerificationPending
+				targetAcc.Status = ""
 				targetAcc.ValidationURL = nil
 				targetAcc.RateLimitedUntil = nil
 				if hook := getBeforeClearHook(); hook != nil {

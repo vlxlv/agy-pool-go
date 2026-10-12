@@ -694,8 +694,8 @@ func TestVerifyAccount_ClearsValidationRequiredOnSuccess(t *testing.T) {
 	if formattedURL != "" {
 		t.Fatalf("expected empty formattedURL, got %q", formattedURL)
 	}
-	if acc.Status != storage.StatusVerificationPending {
-		t.Fatalf("expected acc.Status to be verification_pending, got %q", acc.Status)
+	if acc.Status != "" {
+		t.Fatalf("expected acc.Status to be empty (Ready), got %q", acc.Status)
 	}
 	if acc.ValidationURL != nil {
 		t.Fatalf("expected acc.ValidationURL to be nil, got %v", acc.ValidationURL)
@@ -713,8 +713,8 @@ func TestVerifyAccount_ClearsValidationRequiredOnSuccess(t *testing.T) {
 	if stored == nil {
 		t.Fatal("stored account not found")
 	}
-	if stored.Status != storage.StatusVerificationPending {
-		t.Fatalf("persisted Status = %q, want verification_pending", stored.Status)
+	if stored.Status != "" {
+		t.Fatalf("persisted Status = %q, want empty (Ready)", stored.Status)
 	}
 	if stored.ValidationURL != nil {
 		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)
@@ -1242,8 +1242,8 @@ func TestVerifyAccount_AllowsSelfAccessTokenRefresh(t *testing.T) {
 	if resAcc == nil {
 		t.Fatal("expected non-nil account")
 	}
-	if resAcc.Status != storage.StatusVerificationPending {
-		t.Fatalf("expected Status to be verification_pending, got %q", resAcc.Status)
+	if resAcc.Status != "" {
+		t.Fatalf("expected Status to be empty (Ready), got %q", resAcc.Status)
 	}
 	if resAcc.ValidationURL != nil {
 		t.Fatalf("expected ValidationURL to be nil, got %v", resAcc.ValidationURL)
@@ -1261,8 +1261,8 @@ func TestVerifyAccount_AllowsSelfAccessTokenRefresh(t *testing.T) {
 	if stored == nil {
 		t.Fatal("stored account not found")
 	}
-	if stored.Status != storage.StatusVerificationPending {
-		t.Fatalf("persisted Status = %q, want verification_pending", stored.Status)
+	if stored.Status != "" {
+		t.Fatalf("persisted Status = %q, want empty (Ready)", stored.Status)
 	}
 	if stored.ValidationURL != nil {
 		t.Fatalf("persisted ValidationURL = %v, want nil", stored.ValidationURL)

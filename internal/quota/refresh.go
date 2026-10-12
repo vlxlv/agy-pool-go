@@ -153,7 +153,9 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 		return nil, errors.New("[FAIL-CLOSED TEST GUARD] refusing external quota query in test mode without mock backend")
 	}
 
-	forceRefresh := account.Status == storage.StatusValidationRequired || account.Status == storage.StatusAuthError
+	forceRefresh := account.Status == storage.StatusValidationRequired ||
+		account.Status == storage.StatusAuthError ||
+		(account.ValidationURL != nil && *account.ValidationURL != "")
 	at, err := doRefreshToken(account, forceRefresh)
 	if err != nil {
 		if forceRefresh && account.AccessToken != "" {
@@ -292,6 +294,7 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 					}
 				}
 				if foundQuota {
+					probeAndApplyValidationChallenge(ctx, headers, account)
 					return finalizeAndPersistQuota(account, quotaData)
 				}
 			}
@@ -308,6 +311,7 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 		return nil, fallbackErr
 	}
 
+	probeAndApplyValidationChallenge(ctx, headers, account)
 	return finalizeAndPersistQuota(account, quotaData)
 }
 
@@ -407,6 +411,91 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, account
 	}
 
 	return errors.New("model response contained no quota information")
+}
+
+func probeAndApplyValidationChallenge(ctx context.Context, headers http.Header, account *storage.Account) {
+	if account == nil {
+		return
+	}
+	if (account.ValidationURL == nil || *account.ValidationURL == "") && account.Status != storage.StatusValidationRequired {
+		return
+	}
+	loadURL := getBackendURLBase() + "/v1internal:loadCodeAssist"
+	req, err := http.NewRequestWithContext(ctx, "POST", loadURL, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return
+	}
+	req.Header = headers
+
+	resp, err := getHTTPClient().Do(req)
+	if err != nil {
+		if account.ValidationURL != nil && *account.ValidationURL != "" {
+			account.Status = storage.StatusValidationRequired
+		}
+		return
+	}
+	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	if auth.IsValidationError(resp.StatusCode, bodyBytes) {
+		vURL := auth.ExtractValidationURL(bodyBytes)
+		if vURL == "" && account.ValidationURL != nil {
+			vURL = *account.ValidationURL
+		}
+		applyValidationRequired(account, vURL)
+		return
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		var res struct {
+			IneligibleTiers []struct {
+				ReasonCode    string `json:"reasonCode"`
+				ValidationURL string `json:"validationUrl"`
+			} `json:"ineligibleTiers"`
+		}
+		if err := json.Unmarshal(bodyBytes, &res); err == nil && len(res.IneligibleTiers) > 0 {
+			for _, tier := range res.IneligibleTiers {
+				if strings.EqualFold(tier.ReasonCode, "VALIDATION_REQUIRED") {
+					vURL := tier.ValidationURL
+					if vURL == "" && account.ValidationURL != nil {
+						vURL = *account.ValidationURL
+					}
+					applyValidationRequired(account, vURL)
+					return
+				}
+			}
+		}
+
+		account.Status = ""
+		account.ValidationURL = nil
+		account.RateLimitedUntil = nil
+		return
+	}
+
+	if account.ValidationURL != nil && *account.ValidationURL != "" {
+		account.Status = storage.StatusValidationRequired
+	}
+}
+
+func applyValidationRequired(account *storage.Account, vURL string) {
+	account.Status = storage.StatusValidationRequired
+	if vURL != "" {
+		account.ValidationURL = &vURL
+	}
+	now := float64(time.Now().Unix())
+	cooldown := now + 86400.0
+	account.RateLimitedUntil = &cooldown
+	_ = poolTransaction(func(pool *storage.Pool) error {
+		stored := storage.FindAccount(pool, account)
+		if stored != nil {
+			stored.Status = storage.StatusValidationRequired
+			if vURL != "" {
+				stored.ValidationURL = &vURL
+			}
+			stored.RateLimitedUntil = &cooldown
+		}
+		return nil
+	})
 }
 
 // finalizeAndPersistQuota persists quota telemetry without changing auth state.

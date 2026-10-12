@@ -7,6 +7,7 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -198,6 +199,12 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		const paceEpsilon = 0.005
 
 		maxQuotaCompare := func(a, b *storage.Account) bool {
+			flightA := observability.GetInFlightGeneration(a.ID)
+			flightB := observability.GetInFlightGeneration(b.ID)
+			if flightA != flightB {
+				return flightA < flightB
+			}
+
 			capA := quota.ComputeCapacityState(a, now)
 			capB := quota.ComputeCapacityState(b, now)
 
@@ -260,6 +267,15 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		nowTime := time.Unix(int64(now), 0)
 
 		smartCompare := func(a, b *storage.Account) bool {
+			// 0. Active In-Flight Concurrency:
+			// Distribute concurrent requests across idle accounts.
+			// An account with fewer active in-flight requests is strictly preferred.
+			flightA := observability.GetInFlightGeneration(a.ID)
+			flightB := observability.GetInFlightGeneration(b.ID)
+			if flightA != flightB {
+				return flightA < flightB
+			}
+
 			capA := quota.ComputeCapacityState(a, now)
 			capB := quota.ComputeCapacityState(b, now)
 
@@ -343,9 +359,14 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		eligible = append(eligible, reserve...)
 	}
 
-	// Secondary tiers ordering: Depleted accounts ordered by raw_floor DESC, hits ASC
+	// Secondary tiers ordering: Depleted accounts ordered by in_flight ASC, raw_floor DESC, hits ASC
 	sort.SliceStable(depleted, func(i, j int) bool {
 		a, b := depleted[i], depleted[j]
+		flightA := observability.GetInFlightGeneration(a.ID)
+		flightB := observability.GetInFlightGeneration(b.ID)
+		if flightA != flightB {
+			return flightA < flightB
+		}
 		capA := quota.ComputeCapacityState(a, now)
 		capB := quota.ComputeCapacityState(b, now)
 

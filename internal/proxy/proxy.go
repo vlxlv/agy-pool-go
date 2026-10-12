@@ -30,7 +30,8 @@ var (
 	BackendHostProvider func() string
 	BackendURLProvider  func() string
 	UserAgentProvider   func() string
-	TokenRefresher      func(account *storage.Account) (string, error)
+	TokenRefresher          func(account *storage.Account) (string, error)
+	TokenRefresherWithForce func(account *storage.Account, force bool) (string, error)
 	QuotaRefresher      func(account *storage.Account) = quota.ScheduleQuotaRefreshSimple
 	LogRotator          func()
 	NowFunc                       = time.Now
@@ -328,11 +329,15 @@ func GetUserAgent() string {
 	return quota.DefaultUA
 }
 
-func doRefreshToken(account *storage.Account) (string, error) {
+func doRefreshToken(account *storage.Account, forceOpt ...bool) (string, error) {
+	force := len(forceOpt) > 0 && forceOpt[0]
+	if TokenRefresherWithForce != nil {
+		return TokenRefresherWithForce(account, force)
+	}
 	if TokenRefresher != nil {
 		return TokenRefresher(account)
 	}
-	return auth.RefreshToken(account)
+	return auth.RefreshToken(account, forceOpt...)
 }
 
 func doScheduleQuotaRefresh(account *storage.Account) {
@@ -832,7 +837,8 @@ func (h *Handler) dispatchAccount(
 		EmitRoutingEvent(ev)
 	}
 
-	at, err := doRefreshToken(acc)
+	forceToken := isGeneration && acc != nil && acc.Status == storage.StatusVerificationPending
+	at, err := doRefreshToken(acc, forceToken)
 	if err != nil {
 		logMessage("PROXY WARN", fmt.Sprintf("Token refresh failed for %s: %v. Switching to next account...", accounts.DisplayAccountName(acc), err))
 		notifyAudit(401, "TokenRefreshFailed")
