@@ -27,16 +27,16 @@ import (
 
 // Dynamic provider hooks for testing and entrypoint configuration.
 var (
-	BackendHostProvider func() string
-	BackendURLProvider  func() string
-	UserAgentProvider   func() string
+	BackendHostProvider     func() string
+	BackendURLProvider      func() string
+	UserAgentProvider       func() string
 	TokenRefresher          func(account *storage.Account) (string, error)
 	TokenRefresherWithForce func(account *storage.Account, force bool) (string, error)
-	QuotaRefresher      func(account *storage.Account) = quota.ScheduleQuotaRefreshSimple
-	LogRotator          func()
-	NowFunc                       = time.Now
-	LogWriter           io.Writer = os.Stderr
-	logMu               sync.Mutex
+	QuotaRefresher          func(account *storage.Account) = quota.ScheduleQuotaRefreshSimple
+	LogRotator              func()
+	NowFunc                           = time.Now
+	LogWriter               io.Writer = os.Stderr
+	logMu                   sync.Mutex
 
 	// AuditObserver is an optional hook invoked asynchronously outside the generation hot path.
 	AuditObserver func(accountName string, status int, attempt int, failoverReason string, path string)
