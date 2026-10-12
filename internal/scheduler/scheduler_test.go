@@ -839,14 +839,14 @@ func TestSmartStrategy_LowQuotaAccountProtectedFromHarvest(t *testing.T) {
 	now := 1789560000.0 // 2026-09-16T12:00:00Z
 
 	// Account Low has only 20% 5H quota and resets in 25 minutes.
-	// Because headroom is < 30%, it has no surplus quota to harvest and must NOT be drained into 429!
+	// Because headroom is < 25%, it has no surplus quota to harvest and must NOT be drained into 429!
 	// Account Healthy (90% quota) should be chosen instead.
 	accLow := &storage.Account{
 		ID:     "acc_low",
 		Status: "active",
 		LastQuota: &storage.QuotaState{
 			Gemini5H: &storage.QuotaWindow{
-				Fraction:  floatPtr(0.20), // low headroom!
+				Fraction:  floatPtr(0.20), // low headroom (< 25%)!
 				ResetTime: "2026-09-16T12:25:00Z",
 			},
 			GeminiWeekly: &storage.QuotaWindow{
@@ -875,6 +875,48 @@ func TestSmartStrategy_LowQuotaAccountProtectedFromHarvest(t *testing.T) {
 	ordered := OrderCandidates([]*storage.Account{accLow, accHealthy}, config.StrategySmart, nil, now)
 	if len(ordered) != 2 || ordered[0].ID != "acc_healthy" {
 		t.Fatalf("expected healthy account to be preferred over low account, got %s", ordered[0].ID)
+	}
+}
+
+func TestSmartStrategy_HarvestSurplusAbove25Percent(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// Account Harvest has 27% headroom (>= 25%) and resets in 25 minutes.
+	// It should qualify for harvest and take priority over a cruising account (90% quota, 4.5h reset).
+	accHarvest := &storage.Account{
+		ID:     "acc_harvest_27pct",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.27),
+				ResetTime: "2026-09-16T12:25:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-22T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+	accCruising := &storage.Account{
+		ID:     "acc_cruising",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-16T16:30:00Z",
+			},
+			GeminiWeekly: &storage.QuotaWindow{
+				Fraction:  floatPtr(0.90),
+				ResetTime: "2026-09-22T12:00:00Z",
+			},
+			UpdatedAt: int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accCruising, accHarvest}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_harvest_27pct" {
+		t.Fatalf("expected 27%% harvest account to be preferred before reset, got %s", ordered[0].ID)
 	}
 }
 

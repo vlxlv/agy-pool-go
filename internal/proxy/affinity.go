@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -16,6 +17,10 @@ import (
 // DefaultAffinityTTL is the duration a conversation stays with the account that answered it,
 // matching upstream prompt cache warm windows (5 minutes, as in Magpie).
 const DefaultAffinityTTL = 5 * time.Minute
+
+// MaxAffinityInFlight is the maximum number of concurrent in-flight generation requests
+// an account can serve before affinity pinning is bypassed to prevent concurrency hot-spots and 429s.
+const MaxAffinityInFlight = 2
 
 type affinityRecord struct {
 	accountID string
@@ -114,8 +119,11 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 	nowSecs := float64(now.Unix())
 	for i, acc := range candidates {
 		if acc != nil && acc.ID == boundID {
-			// Only keep affinity if account is healthy, not in reserve, and not in cooldown or restricted
-			if !scheduler.IsRestricted(acc) && !scheduler.IsReserveCandidate(acc, nowSecs) && (acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs) {
+			// Only keep affinity if account is healthy, not in reserve, not in cooldown or restricted,
+			// and active in-flight concurrency does not exceed MaxAffinityInFlight threshold.
+			if !scheduler.IsRestricted(acc) && !scheduler.IsReserveCandidate(acc, nowSecs) &&
+				(acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs) &&
+				observability.GetInFlightGeneration(acc.ID) < MaxAffinityInFlight {
 				targetIdx = i
 			}
 			break

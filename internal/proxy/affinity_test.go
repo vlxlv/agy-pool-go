@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -119,5 +120,47 @@ func TestAttachDebugHeaders(t *testing.T) {
 	}
 	if got := h.Get("X-Agy-Pool-Affinity"); got != "hit" {
 		t.Fatalf("expected hit, got %q", got)
+	}
+}
+
+func TestApplyAffinity_BypassedOnHighInFlight(t *testing.T) {
+	observability.ResetInFlight()
+	defer observability.ResetInFlight()
+
+	mgr := NewAffinityManager(5 * time.Minute)
+	now := time.Now()
+
+	accA := &storage.Account{ID: "acc-affinity-busy"}
+	accB := &storage.Account{ID: "acc-affinity-idle"}
+	candidates := []*storage.Account{accB, accA}
+
+	mgr.Set("session-concurrent", "acc-affinity-busy", now)
+
+	// 1. With in-flight = 0, affinity is applied and accA is moved to the front
+	reordered, applied := mgr.ApplyAffinity(candidates, "session-concurrent", now)
+	if !applied || reordered[0].ID != "acc-affinity-busy" {
+		t.Fatalf("expected acc-affinity-busy to be moved to front when idle")
+	}
+
+	// 2. With in-flight = 1 (< MaxAffinityInFlight = 2), affinity is still applied
+	done1 := observability.StartInFlightGeneration("acc-affinity-busy")
+	reordered1, applied1 := mgr.ApplyAffinity(candidates, "session-concurrent", now)
+	if !applied1 || reordered1[0].ID != "acc-affinity-busy" {
+		t.Fatalf("expected acc-affinity-busy to still get affinity when in-flight=1")
+	}
+
+	// 3. With in-flight = 2 (>= MaxAffinityInFlight), affinity is bypassed to protect against 429 hot-spots
+	done2 := observability.StartInFlightGeneration("acc-affinity-busy")
+	reordered2, applied2 := mgr.ApplyAffinity(candidates, "session-concurrent", now)
+	if applied2 || reordered2[0].ID != "acc-affinity-idle" {
+		t.Fatalf("expected affinity to be bypassed when in-flight >= MaxAffinityInFlight, got applied=%v first=%s", applied2, reordered2[0].ID)
+	}
+
+	// 4. Once requests finish and in-flight drops back below threshold, affinity resumes
+	done2()
+	done1()
+	reorderedResumed, appliedResumed := mgr.ApplyAffinity(candidates, "session-concurrent", now)
+	if !appliedResumed || reorderedResumed[0].ID != "acc-affinity-busy" {
+		t.Fatalf("expected affinity to resume after in-flight drops")
 	}
 }

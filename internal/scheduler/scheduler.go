@@ -90,7 +90,7 @@ func EffectiveWorstPace(capState quota.CapacityState) float64 {
 const (
 	SmartHarvest5HWindow     = 90 * time.Minute
 	SmartHarvestWeeklyWindow = 36 * time.Hour
-	SmartHarvestMinHeadroom  = 0.30
+	SmartHarvestMinHeadroom  = 0.25
 )
 
 // smartHeadroomTier maps an account's bottleneck headroom to discrete tiers (20% bands).
@@ -112,7 +112,7 @@ func smartHeadroomTier(headroom float64) int {
 }
 
 // SmartHarvestCandidate checks if an account qualifies for harvest mode:
-// it must have sufficient headroom (RawFloor >= 30%) and an upcoming reset
+// it must have sufficient headroom (RawFloor >= 25%) and an upcoming reset
 // (either 5H within 90m or Weekly within 36h). Returns (earliestResetTime, true).
 func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (time.Time, bool) {
 	if capState.RawFloor < SmartHarvestMinHeadroom {
@@ -286,7 +286,7 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				return rankA > rankB
 			}
 
-			// 2. Harvest Mode: Prioritize accounts with surplus headroom (>= 30%)
+			// 2. Harvest Mode: Prioritize accounts with surplus headroom (>= 25%)
 			// that are about to reset (5H <= 90m, WK <= 36h) to capture expiring quota.
 			tA, harvestA := SmartHarvestCandidate(capA, nowTime)
 			tB, harvestB := SmartHarvestCandidate(capB, nowTime)
