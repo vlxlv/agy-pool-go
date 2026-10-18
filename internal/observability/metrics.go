@@ -176,8 +176,16 @@ func FormatNumber(n uint64) string {
 var (
 	inFlightMu       sync.RWMutex
 	inFlightCounts   = make(map[string]int64)
+	remoteInFlight   map[string]int64
 	onInFlightChange func()
 )
+
+// SetRemoteInFlight replaces the snapshot of in-flight counts held by other processes sharing the pool.
+func SetRemoteInFlight(m map[string]int64) {
+	inFlightMu.Lock()
+	remoteInFlight = m
+	inFlightMu.Unlock()
+}
 
 // SetOnInFlightChange registers a callback invoked whenever an in-flight generation starts or finishes.
 func SetOnInFlightChange(fn func()) {
@@ -222,11 +230,12 @@ func StartInFlightGeneration(accountID string) func() {
 	}
 }
 
-// GetInFlightGeneration returns the current in-flight generation request count for an account.
+// GetInFlightGeneration returns the current in-flight generation request count for an account,
+// including the last snapshot of other processes' requests.
 func GetInFlightGeneration(accountID string) int64 {
 	inFlightMu.RLock()
 	defer inFlightMu.RUnlock()
-	return inFlightCounts[accountID]
+	return inFlightCounts[accountID] + remoteInFlight[accountID]
 }
 
 // GetAllInFlightGenerations returns a map snapshot of all accounts with positive in-flight requests.
@@ -253,5 +262,6 @@ func GetAllInFlightGenerations() map[string]int64 {
 func ResetInFlight() {
 	inFlightMu.Lock()
 	inFlightCounts = make(map[string]int64)
+	remoteInFlight = nil
 	inFlightMu.Unlock()
 }
