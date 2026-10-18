@@ -362,3 +362,83 @@ func TestInFlight_BurstSpreadsAcrossAccounts(t *testing.T) {
 		}
 	}
 }
+
+// TestInFlight_HundredConcurrentUnknownQuota covers a cold-start burst: 100 simultaneous generation
+// requests on 5 accounts with no quota data at all must spread exactly evenly (20 each).
+func TestInFlight_HundredConcurrentUnknownQuota(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+	observability.Reset()
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock_token_" + account.ID, nil }
+	QuotaRefresher = func(*storage.Account) {} // unknown quota must not trigger real network refreshes
+
+	const accountsN, requestsN = 5, 100
+	now := time.Now().Unix()
+	pool := &storage.Pool{Version: 1, Strategy: "smart"}
+	for i := 0; i < accountsN; i++ {
+		id := fmt.Sprintf("acc_cold_%d", i)
+		pool.Accounts = append(pool.Accounts, &storage.Account{ID: id, Name: id, Status: "ready", CreatedAt: &now})
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	var mu sync.Mutex
+	seen := map[string]int{}
+	arrived := make(chan struct{}, requestsN)
+	releaseAll := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("Authorization")]++
+		mu.Unlock()
+		arrived <- struct{}{}
+		<-releaseAll
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"candidates":[]}`))
+	}))
+	defer upstream.Close()
+
+	origBackend := BackendURLProvider
+	BackendURLProvider = func() string { return upstream.URL }
+	defer func() { BackendURLProvider = origBackend }()
+
+	handler := NewHandler()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < requestsN; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			req := httptest.NewRequest("POST", "/v1/models/gemini-pro:streamGenerateContent", nil)
+			handler.HandleProxy(httptest.NewRecorder(), req)
+		}()
+	}
+	close(start)
+	for i := 0; i < requestsN; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			close(releaseAll)
+			t.Fatalf("timed out after %d/%d requests reached upstream", i, requestsN)
+		}
+	}
+	close(releaseAll)
+	wg.Wait()
+
+	if len(seen) != accountsN {
+		t.Fatalf("expected all %d accounts used, got %v", accountsN, seen)
+	}
+	for auth, n := range seen {
+		if n != requestsN/accountsN {
+			t.Errorf("%s got %d requests, want %d (all: %v)", auth, n, requestsN/accountsN, seen)
+		}
+	}
+	for _, acc := range pool.Accounts {
+		if f := observability.GetInFlightGeneration(acc.ID); f != 0 {
+			t.Errorf("expected %s in-flight to return to 0, got %d", acc.ID, f)
+		}
+	}
+}
