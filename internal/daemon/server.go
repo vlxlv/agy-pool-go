@@ -160,6 +160,24 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	refresherDone := make(chan struct{})
 	go func() {
 		defer close(refresherDone)
+		sweep := func() {
+			pool, err := storage.LoadPool()
+			if err == nil && pool != nil {
+				now := float64(time.Now().Unix())
+				for _, acc := range pool.Accounts {
+					if acc == nil || acc.Status == storage.StatusDisabled {
+						continue
+					}
+					if quota.RefreshNeeded(acc, now) {
+						if QuotaRefresher != nil {
+							QuotaRefresher(acc)
+						}
+					}
+				}
+			}
+		}
+		// Sweep once at startup so cold-start traffic is not routed on unknown quota for a whole interval.
+		sweep()
 		ticker := time.NewTicker(refreshInterval)
 		defer ticker.Stop()
 		for {
@@ -167,20 +185,7 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 			case <-serverCtx.Done():
 				return
 			case <-ticker.C:
-				pool, err := storage.LoadPool()
-				if err == nil && pool != nil {
-					now := float64(time.Now().Unix())
-					for _, acc := range pool.Accounts {
-						if acc == nil || acc.Status == storage.StatusDisabled {
-							continue
-						}
-						if quota.RefreshNeeded(acc, now) {
-							if QuotaRefresher != nil {
-								QuotaRefresher(acc)
-							}
-						}
-					}
-				}
+				sweep()
 			}
 		}
 	}()
