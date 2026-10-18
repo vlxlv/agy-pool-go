@@ -2,10 +2,12 @@ package scheduler
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
@@ -838,16 +840,16 @@ func TestSmartStrategy_ExpiringQuotaHarvesting(t *testing.T) {
 func TestSmartStrategy_LowQuotaAccountProtectedFromHarvest(t *testing.T) {
 	now := 1789560000.0 // 2026-09-16T12:00:00Z
 
-	// Account Low has only 20% 5H quota and resets in 25 minutes.
-	// Because headroom is < 25%, it has no surplus quota to harvest and must NOT be drained into 429!
+	// Account Low has only 20% 5H quota and resets in 80 minutes.
+	// The harvest floor at 80m is 25% * 80/90 ≈ 22%, so it is not yet harvested and must NOT be drained into 429!
 	// Account Healthy (90% quota) should be chosen instead.
 	accLow := &storage.Account{
 		ID:     "acc_low",
 		Status: "active",
 		LastQuota: &storage.QuotaState{
 			Gemini5H: &storage.QuotaWindow{
-				Fraction:  floatPtr(0.20), // low headroom (< 25%)!
-				ResetTime: "2026-09-16T12:25:00Z",
+				Fraction:  floatPtr(0.20), // below the 80m harvest floor
+				ResetTime: "2026-09-16T13:20:00Z",
 			},
 			GeminiWeekly: &storage.QuotaWindow{
 				Fraction:  floatPtr(0.90),
@@ -1112,4 +1114,32 @@ func TestInFlightConcurrency_MaxQuotaAndSmart(t *testing.T) {
 		t.Fatalf("expected acc_busy to win tie-break when both have equal in-flight, got %s", orderedTied[0].ID)
 	}
 	doneIdle()
+}
+
+func TestSmartHarvestCandidate_DecayingFloor(t *testing.T) {
+	nowTime := time.Unix(1789560000, 0) // 2026-09-16T12:00:00Z
+	in := func(d time.Duration) *time.Time { r := nowTime.Add(d); return &r }
+	weeklyFar := in(5 * 24 * time.Hour)
+
+	cases := []struct {
+		name   string
+		q5, q7 float64
+		reset5 *time.Time
+		want   bool
+	}{
+		{"5H leftover right before reset is harvested", 0.15, 0.90, in(10 * time.Minute), true},
+		{"5H leftover too early in window is kept", 0.15, 0.90, in(80 * time.Minute), false},
+		{"5H harvest never drains a low weekly window", 0.90, 0.15, in(10 * time.Minute), false},
+		{"5H reset outside harvest window", 0.90, 0.90, in(3 * time.Hour), false},
+	}
+	for _, tc := range cases {
+		q5, q7 := tc.q5, tc.q7
+		capState := quota.CapacityState{
+			Q5: &q5, Q7: &q7, Q5Known: true, Q7Known: true,
+			RawFloor: math.Min(q5, q7), Reset5Time: tc.reset5, Reset7Time: weeklyFar,
+		}
+		if _, got := SmartHarvestCandidate(capState, nowTime); got != tc.want {
+			t.Errorf("%s: got harvest=%v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
