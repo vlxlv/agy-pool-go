@@ -132,3 +132,35 @@ func TestQuotaCapacityGoldenCases(t *testing.T) {
 		})
 	}
 }
+
+// Absolute window reset timestamps must win over the legacy relative *_reset_sec fields,
+// which are never refreshed and would otherwise keep the reset "N seconds from now" forever.
+func TestComputeCapacityState_AbsoluteResetBeatsLegacySeconds(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+	acc := &storage.Account{
+		ID:                   "acc_legacy_sec",
+		Gemini5HResetSec:     floatPtr(4 * 3600), // stale: claims 4h left
+		GeminiWeeklyResetSec: floatPtr(6 * 24 * 3600),
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.5), ResetTime: "2026-09-16T12:30:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.5), ResetTime: "2026-09-17T12:00:00Z"},
+		},
+	}
+	c := ComputeCapacityState(acc, now)
+	if want := time.Date(2026, 9, 16, 12, 30, 0, 0, time.UTC); c.Reset5Time == nil || !c.Reset5Time.Equal(want) {
+		t.Errorf("Reset5Time = %v, want %v", c.Reset5Time, want)
+	}
+	if want := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC); c.Reset7Time == nil || !c.Reset7Time.Equal(want) {
+		t.Errorf("Reset7Time = %v, want %v", c.Reset7Time, want)
+	}
+	if want := 1800.0 / 18000.0; math.Abs(c.R5-want) > 1e-9 {
+		t.Errorf("R5 = %v, want %v", c.R5, want)
+	}
+
+	// Without an absolute timestamp, the legacy seconds field is still used.
+	acc.LastQuota.Gemini5H.ResetTime = ""
+	c = ComputeCapacityState(acc, now)
+	if want := time.Unix(int64(now)+4*3600, 0).UTC(); c.Reset5Time == nil || !c.Reset5Time.Equal(want) {
+		t.Errorf("fallback Reset5Time = %v, want %v", c.Reset5Time, want)
+	}
+}
