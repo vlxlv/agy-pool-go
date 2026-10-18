@@ -1095,25 +1095,39 @@ func TestInFlightConcurrency_MaxQuotaAndSmart(t *testing.T) {
 	done := observability.StartInFlightGeneration("acc_busy")
 	defer done()
 
-	// Under max_quota, accIdle must now be ordered BEFORE accBusy
+	// Under new ordering, busy high-tier account outranks idle low-tier account
 	orderedMQInFlight := OrderCandidates([]*storage.Account{accBusy, accIdle}, config.StrategyMaxQuota, nil, now)
-	if orderedMQInFlight[0].ID != "acc_idle" {
-		t.Fatalf("expected idle account to precede busy account under max_quota, got %s", orderedMQInFlight[0].ID)
+	if orderedMQInFlight[0].ID != "acc_busy" {
+		t.Fatalf("expected busy high-tier account to precede idle low-tier account under max_quota, got %s", orderedMQInFlight[0].ID)
 	}
 
-	// Under smart, accIdle must also be ordered BEFORE accBusy
 	orderedSmartInFlight := OrderCandidates([]*storage.Account{accBusy, accIdle}, config.StrategySmart, nil, now)
-	if orderedSmartInFlight[0].ID != "acc_idle" {
-		t.Fatalf("expected idle account to precede busy account under smart, got %s", orderedSmartInFlight[0].ID)
+	if orderedSmartInFlight[0].ID != "acc_busy" {
+		t.Fatalf("expected busy high-tier account to precede idle low-tier account under smart, got %s", orderedSmartInFlight[0].ID)
 	}
 
-	// If accIdle also gets an in-flight request, both have in-flight=1, tie-breaking restores accBusy first
-	doneIdle := observability.StartInFlightGeneration("acc_idle")
-	orderedTied := OrderCandidates([]*storage.Account{accIdle, accBusy}, config.StrategySmart, nil, now)
-	if orderedTied[0].ID != "acc_busy" {
-		t.Fatalf("expected acc_busy to win tie-break when both have equal in-flight, got %s", orderedTied[0].ID)
+	// accSameTierIdle is in the same tier/quota level (100% quota) with more hits (5 vs 0)
+	accSameTierIdle := &storage.Account{
+		ID:           "acc_same_tier_idle",
+		Name:         "SameTierIdleAccount",
+		RequestCount: 5,
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(1.0), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(1.0), ResetTime: "2026-09-23T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
 	}
-	doneIdle()
+
+	// Within the same tier, idle account outranks busy account despite higher hits
+	orderedSmartSameTier := OrderCandidates([]*storage.Account{accBusy, accSameTierIdle}, config.StrategySmart, nil, now)
+	if orderedSmartSameTier[0].ID != "acc_same_tier_idle" {
+		t.Fatalf("expected idle same-tier account to precede busy same-tier account under smart, got %s", orderedSmartSameTier[0].ID)
+	}
+
+	orderedMQSameTier := OrderCandidates([]*storage.Account{accBusy, accSameTierIdle}, config.StrategyMaxQuota, nil, now)
+	if orderedMQSameTier[0].ID != "acc_same_tier_idle" {
+		t.Fatalf("expected idle same-tier account to precede busy same-tier account under max_quota, got %s", orderedMQSameTier[0].ID)
+	}
 }
 
 func TestSmartHarvestCandidate_DecayingFloor(t *testing.T) {
@@ -1174,5 +1188,170 @@ func TestSmartStrategy_OverWeeklyPaceHeldBack(t *testing.T) {
 	}
 	if IsReserveCandidate(accFast, now) {
 		t.Error("over-pace account must keep its healthy label; only routing order changes")
+	}
+}
+
+func TestOrderCandidates_InFlight_TierPrecedence(t *testing.T) {
+	observability.ResetInFlight()
+	defer observability.ResetInFlight()
+
+	now := 1700000000.0
+
+	// (a) busy high-tier account outranks idle low-tier account
+	t.Run("busy high-tier outranks idle low-tier", func(t *testing.T) {
+		accHighBusy := &storage.Account{
+			ID:     "acc_high_busy",
+			Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		}
+		accLowIdle := &storage.Account{
+			ID:     "acc_low_idle",
+			Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.70), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.70), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		}
+
+		done := observability.StartInFlightGeneration("acc_high_busy")
+		defer done()
+
+		// Under Smart: Tier 4 (0.90) > Tier 3 (0.70)
+		orderedSmart := OrderCandidates([]*storage.Account{accLowIdle, accHighBusy}, config.StrategySmart, nil, now)
+		if len(orderedSmart) < 2 || orderedSmart[0].ID != "acc_high_busy" {
+			t.Fatalf("expected busy high-tier account to outrank idle low-tier account under smart, got %s", orderedSmart[0].ID)
+		}
+
+		// Under MaxQuota: RawFloor 0.90 > 0.70
+		orderedMQ := OrderCandidates([]*storage.Account{accLowIdle, accHighBusy}, config.StrategyMaxQuota, nil, now)
+		if len(orderedMQ) < 2 || orderedMQ[0].ID != "acc_high_busy" {
+			t.Fatalf("expected busy high-tier account to outrank idle low-tier account under max_quota, got %s", orderedMQ[0].ID)
+		}
+	})
+
+	// (b) idle same-tier account outranks busy same-tier account
+	t.Run("idle same-tier outranks busy same-tier cruising", func(t *testing.T) {
+		accSameTierBusy := &storage.Account{
+			ID:           "acc_same_busy",
+			Status:       "active",
+			RequestCount: 0,
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		}
+		accSameTierIdle := &storage.Account{
+			ID:           "acc_same_idle",
+			Status:       "active",
+			RequestCount: 20, // more hits
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		}
+
+		done := observability.StartInFlightGeneration("acc_same_busy")
+		defer done()
+
+		// Under Smart
+		orderedSmart := OrderCandidates([]*storage.Account{accSameTierBusy, accSameTierIdle}, config.StrategySmart, nil, now)
+		if len(orderedSmart) < 2 || orderedSmart[0].ID != "acc_same_idle" {
+			t.Fatalf("expected idle same-tier account to outrank busy same-tier account under smart, got %s", orderedSmart[0].ID)
+		}
+
+		// Under MaxQuota
+		orderedMQ := OrderCandidates([]*storage.Account{accSameTierBusy, accSameTierIdle}, config.StrategyMaxQuota, nil, now)
+		if len(orderedMQ) < 2 || orderedMQ[0].ID != "acc_same_idle" {
+			t.Fatalf("expected idle same-tier account to outrank busy same-tier account under max_quota, got %s", orderedMQ[0].ID)
+		}
+	})
+
+	t.Run("idle same-tier outranks busy same-tier harvest", func(t *testing.T) {
+		// Both qualify for harvest with identical reset time (in 30 mins) and identical tier (RawFloor 0.50 -> Tier 2)
+		nowTime := time.Unix(1789560000, 0)
+		nowF := float64(nowTime.Unix())
+		reset5 := nowTime.Add(30 * time.Minute).Format(time.RFC3339)
+		reset7 := nowTime.Add(5 * 24 * time.Hour).Format(time.RFC3339)
+
+		accHarvestBusy := &storage.Account{
+			ID:           "acc_harvest_busy",
+			Status:       "active",
+			RequestCount: 0,
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.50), ResetTime: reset5},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.50), ResetTime: reset7},
+				UpdatedAt:    int64Ptr(int64(nowF - 10)),
+			},
+		}
+		accHarvestIdle := &storage.Account{
+			ID:           "acc_harvest_idle",
+			Status:       "active",
+			RequestCount: 20, // more hits
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.50), ResetTime: reset5},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.50), ResetTime: reset7},
+				UpdatedAt:    int64Ptr(int64(nowF - 10)),
+			},
+		}
+
+		done := observability.StartInFlightGeneration("acc_harvest_busy")
+		defer done()
+
+		orderedSmart := OrderCandidates([]*storage.Account{accHarvestBusy, accHarvestIdle}, config.StrategySmart, nil, nowF)
+		if len(orderedSmart) < 2 || orderedSmart[0].ID != "acc_harvest_idle" {
+			t.Fatalf("expected idle harvest account to outrank busy harvest account under smart, got %s", orderedSmart[0].ID)
+		}
+	})
+}
+
+func TestOrderCandidates_Smart_UnknownQuotaSortsAfterKnownQuota(t *testing.T) {
+	now := 1789560000.0
+
+	// (c) under smart, an unknown-quota account sorts after a known-quota one.
+	accKnown := &storage.Account{
+		ID:           "acc_known",
+		Status:       "active",
+		RequestCount: 100, // high hits
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.75), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.75), ResetTime: "2026-09-23T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 50)),
+		},
+	}
+
+	// accUnknownFresh has 0 hits and very fresh probe timestamp (FreshnessRank 2), but KnownWindowCount is 0
+	accUnknownFresh := &storage.Account{
+		ID:           "acc_unknown_fresh",
+		Status:       "active",
+		RequestCount: 0,
+		LastQuota: &storage.QuotaState{
+			UpdatedAt: int64Ptr(int64(now - 1)),
+		},
+	}
+
+	// accUnknownNil has nil LastQuota
+	accUnknownNil := &storage.Account{
+		ID:           "acc_unknown_nil",
+		Status:       "active",
+		RequestCount: 0,
+	}
+
+	// Known quota account must outrank fresh unknown account
+	ordered1 := OrderCandidates([]*storage.Account{accUnknownFresh, accKnown}, config.StrategySmart, nil, now)
+	if len(ordered1) < 2 || ordered1[0].ID != "acc_known" {
+		t.Fatalf("expected known-quota account to outrank fresh unknown-quota account under smart, got %s", ordered1[0].ID)
+	}
+
+	// Known quota account must outrank nil-quota unknown account
+	ordered2 := OrderCandidates([]*storage.Account{accUnknownNil, accKnown}, config.StrategySmart, nil, now)
+	if len(ordered2) < 2 || ordered2[0].ID != "acc_known" {
+		t.Fatalf("expected known-quota account to outrank nil-quota unknown account under smart, got %s", ordered2[0].ID)
 	}
 }
