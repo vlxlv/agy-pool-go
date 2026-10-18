@@ -527,6 +527,9 @@ func SendBuffered(w http.ResponseWriter, status int, headers http.Header, body [
 	committer.Flush()
 }
 
+// selectionMu serializes generation candidate ordering with the first account's in-flight reservation.
+var selectionMu sync.Mutex
+
 // Handler implements the HTTP proxy handler matching Python SmartProxyHandler.
 type Handler struct{}
 
@@ -581,7 +584,13 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	var pendingClaimedID string
 	var sessionKey string
 	affinityStatus := "none"
+	var reservedID string
+	var reservedDone func()
 	if isGeneration {
+		// Ordering reads in-flight counts, so ordering and reserving the first pick must be atomic,
+		// otherwise a burst of requests all see In-Flight=0 and pick the same account.
+		// shortcut: in-process reservation only; in-flight counters are per process, upgrade to a DB conditional update if multiple proxy processes share one pool.
+		selectionMu.Lock()
 		candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
 
 		sessionKey = ExtractSessionKey(r, body)
@@ -605,6 +614,20 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}()
 			candidates = append([]*storage.Account{confCand}, candidates...)
 		}
+
+		// Reserve the account the dispatch loop below will try first (same skip rule).
+		for _, acc := range candidates {
+			if scheduler.IsRestricted(acc) && acc.ID != pendingClaimedID {
+				continue
+			}
+			if acc != nil && acc.ID != "" {
+				reservedID = acc.ID
+				reservedDone = observability.StartInFlightGeneration(acc.ID)
+				defer reservedDone()
+			}
+			break
+		}
+		selectionMu.Unlock()
 	} else {
 		// Non-generation: prefer active account, deprioritize restricted/cooldown accounts
 		activeID := ""
@@ -691,7 +714,11 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				hasFailedOver = true
 			}
 		}
-		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, strategy, currentAffinity, selectionAuditCtx)
+		var reservation func()
+		if acc.ID == reservedID {
+			reservation, reservedID = reservedDone, ""
+		}
+		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, strategy, currentAffinity, selectionAuditCtx, reservation)
 		if acc.ID == pendingClaimedID {
 			ReleaseVerificationConfirmation(pendingClaimedID)
 			pendingClaimedID = ""
@@ -747,8 +774,11 @@ func (h *Handler) dispatchAccount(
 	strategy string,
 	affinityStatus string,
 	auditCtx *SelectionAuditContext,
+	reservation func(), // in-flight slot already taken at selection time; nil means take one now
 ) DispatchOutcome {
-	if isGeneration && acc != nil && acc.ID != "" {
+	if reservation != nil {
+		defer reservation()
+	} else if isGeneration && acc != nil && acc.ID != "" {
 		done := observability.StartInFlightGeneration(acc.ID)
 		defer done()
 	}
