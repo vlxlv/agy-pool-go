@@ -232,12 +232,6 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		const paceEpsilon = 0.005
 
 		maxQuotaCompare := func(a, b *storage.Account) bool {
-			flightA := observability.GetInFlightGeneration(a.ID)
-			flightB := observability.GetInFlightGeneration(b.ID)
-			if flightA != flightB {
-				return flightA < flightB
-			}
-
 			capA := quota.ComputeCapacityState(a, now)
 			capB := quota.ComputeCapacityState(b, now)
 
@@ -263,6 +257,12 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 
 			if math.Abs(capA.RawFloor-capB.RawFloor) > paceEpsilon {
 				return capA.RawFloor > capB.RawFloor
+			}
+
+			flightA := observability.GetInFlightGeneration(a.ID)
+			flightB := observability.GetInFlightGeneration(b.ID)
+			if flightA != flightB {
+				return flightA < flightB
 			}
 
 			hitsA, hitsB := a.GetHits(), b.GetHits()
@@ -300,17 +300,14 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 		nowTime := time.Unix(int64(now), 0)
 
 		smartCompare := func(a, b *storage.Account) bool {
-			// 0. Active In-Flight Concurrency:
-			// Distribute concurrent requests across idle accounts.
-			// An account with fewer active in-flight requests is strictly preferred.
-			flightA := observability.GetInFlightGeneration(a.ID)
-			flightB := observability.GetInFlightGeneration(b.ID)
-			if flightA != flightB {
-				return flightA < flightB
-			}
-
 			capA := quota.ComputeCapacityState(a, now)
 			capB := quota.ComputeCapacityState(b, now)
+
+			knownA := capA.KnownWindowCount > 0
+			knownB := capB.KnownWindowCount > 0
+			if knownA != knownB {
+				return knownA
+			}
 
 			// 1. Freshness rank (prefer freshly probed accounts when unknown)
 			rankA := quota.FreshnessRank(a, now)
@@ -340,6 +337,11 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				if tierA != tierB {
 					return tierA > tierB
 				}
+				flightA := observability.GetInFlightGeneration(a.ID)
+				flightB := observability.GetInFlightGeneration(b.ID)
+				if flightA != flightB {
+					return flightA < flightB
+				}
 				hitsA, hitsB := a.GetHits(), b.GetHits()
 				if hitsA != hitsB {
 					return hitsA < hitsB
@@ -353,6 +355,12 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 			tierB := smartHeadroomTier(capB.RawFloor)
 			if tierA != tierB {
 				return tierA > tierB
+			}
+
+			flightA := observability.GetInFlightGeneration(a.ID)
+			flightB := observability.GetInFlightGeneration(b.ID)
+			if flightA != flightB {
+				return flightA < flightB
 			}
 
 			// 4. Multi-Account Concurrent Load Balancing:
