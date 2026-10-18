@@ -1143,3 +1143,36 @@ func TestSmartHarvestCandidate_DecayingFloor(t *testing.T) {
 		}
 	}
 }
+
+func TestSmartStrategy_OverWeeklyPaceHeldBack(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// accFast would win on hits, but has spent 55% of its week with 6.5 days left (pace ≈ -0.48).
+	accFast := &storage.Account{
+		ID: "acc_fast", Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(1.0), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.45), ResetTime: "2026-09-23T00:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+	// accOnPace has more hits but is on weekly pace (3 days left, pace ≈ +0.07).
+	accOnPace := &storage.Account{
+		ID: "acc_on_pace", Status: "active", RequestCount: 50,
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.5), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.5), ResetTime: "2026-09-19T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+
+	for _, strategy := range []string{config.StrategySmart, config.StrategyMaxQuota} {
+		ordered := OrderCandidates([]*storage.Account{accFast, accOnPace}, strategy, nil, now)
+		if ordered[0].ID != "acc_on_pace" {
+			t.Errorf("%s: expected on-pace account first, got %s", strategy, ordered[0].ID)
+		}
+	}
+	if IsReserveCandidate(accFast, now) {
+		t.Error("over-pace account must keep its healthy label; only routing order changes")
+	}
+}
