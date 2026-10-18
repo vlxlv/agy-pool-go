@@ -164,3 +164,25 @@ func TestComputeCapacityState_AbsoluteResetBeatsLegacySeconds(t *testing.T) {
 		t.Errorf("fallback Reset5Time = %v, want %v", c.Reset5Time, want)
 	}
 }
+
+func TestComputeCapacityState_MissingResetAndWeeklyOnly(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+
+	// Fraction known but no reset time: treat the window as just started (r=1), never as resetting soon.
+	noReset := &storage.Account{LastQuota: &storage.QuotaState{
+		Gemini5H: &storage.QuotaWindow{Fraction: floatPtr(0.6)},
+	}}
+	c := ComputeCapacityState(noReset, now)
+	if c.R5 != 1.0 || c.Reset5Time != nil || c.Pace5 == nil || math.Abs(*c.Pace5-(-0.4)) > 1e-9 {
+		t.Errorf("missing reset: R5=%v Reset5Time=%v Pace5=%v, want R5=1 no reset pace=-0.4", c.R5, c.Reset5Time, c.Pace5)
+	}
+
+	// Only the weekly window reported: one known window, 5H unknown rather than zero.
+	weeklyOnly := &storage.Account{LastQuota: &storage.QuotaState{
+		GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.3), ResetTime: "2026-09-19T12:00:00Z"},
+	}}
+	c = ComputeCapacityState(weeklyOnly, now)
+	if c.KnownWindowCount != 1 || c.Q5Known || !c.Q7Known || c.IsDepleted || math.Abs(c.RawFloor-0.3) > 1e-9 {
+		t.Errorf("weekly only: known=%d q5Known=%v q7Known=%v depleted=%v floor=%v", c.KnownWindowCount, c.Q5Known, c.Q7Known, c.IsDepleted, c.RawFloor)
+	}
+}
