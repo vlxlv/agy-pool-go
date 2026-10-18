@@ -111,12 +111,29 @@ func smartHeadroomTier(headroom float64) int {
 	}
 }
 
-// SmartHarvestCandidate checks if an account qualifies for harvest mode:
-// it must have sufficient headroom (RawFloor >= 25%) and an upcoming reset
-// (either 5H within 90m or Weekly within 36h). Returns (earliestResetTime, true).
+// smartHarvestFloor is the headroom an expiring window needs to be harvested. It decays linearly
+// from SmartHarvestMinHeadroom at the start of the harvest window to the depleted threshold at reset,
+// so small leftovers are still spent right before they expire.
+func smartHarvestFloor(rem, window time.Duration) float64 {
+	floor := SmartHarvestMinHeadroom * float64(rem) / float64(window)
+	if floor < config.DepletedThreshold {
+		return config.DepletedThreshold
+	}
+	return floor
+}
+
+// SmartHarvestCandidate checks if an account qualifies for harvest mode: an upcoming reset
+// (either 5H within 90m or Weekly within 36h) whose expiring window still has at least
+// smartHarvestFloor headroom, while the other (non-expiring) window keeps the full 25%.
+// Legacy combined fractions keep the flat RawFloor >= 25% rule. Returns (earliestResetTime, true).
 func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (time.Time, bool) {
-	if capState.RawFloor < SmartHarvestMinHeadroom {
+	legacy := !capState.Q5Known && !capState.Q7Known
+	if legacy && capState.RawFloor < SmartHarvestMinHeadroom {
 		return time.Time{}, false
+	}
+	// atLeast reports whether a window is unknown or has at least min headroom.
+	atLeast := func(known bool, q *float64, min float64) bool {
+		return legacy || !known || q == nil || *q >= min
 	}
 
 	var best time.Time
@@ -124,7 +141,9 @@ func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (tim
 
 	if capState.Reset5Time != nil && !capState.Reset5Time.IsZero() {
 		rem5 := capState.Reset5Time.Sub(nowTime)
-		if rem5 > 0 && rem5 <= SmartHarvest5HWindow {
+		if rem5 > 0 && rem5 <= SmartHarvest5HWindow &&
+			atLeast(capState.Q5Known, capState.Q5, smartHarvestFloor(rem5, SmartHarvest5HWindow)) &&
+			atLeast(capState.Q7Known, capState.Q7, SmartHarvestMinHeadroom) {
 			best = *capState.Reset5Time
 			hasBest = true
 		}
@@ -132,7 +151,9 @@ func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (tim
 
 	if capState.Reset7Time != nil && !capState.Reset7Time.IsZero() {
 		rem7 := capState.Reset7Time.Sub(nowTime)
-		if rem7 > 0 && rem7 <= SmartHarvestWeeklyWindow {
+		if rem7 > 0 && rem7 <= SmartHarvestWeeklyWindow &&
+			atLeast(capState.Q7Known, capState.Q7, smartHarvestFloor(rem7, SmartHarvestWeeklyWindow)) &&
+			atLeast(capState.Q5Known, capState.Q5, SmartHarvestMinHeadroom) {
 			if !hasBest || capState.Reset7Time.Before(best) {
 				best = *capState.Reset7Time
 				hasBest = true
