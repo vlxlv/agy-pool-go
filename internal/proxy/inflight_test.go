@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -282,5 +283,82 @@ func TestInFlight_ConcurrentDispatchDistribution(t *testing.T) {
 	}
 	if f2 := observability.GetInFlightGeneration("acc_flight_2"); f2 != 0 {
 		t.Errorf("expected acc_flight_2 in-flight to return to 0, got %d", f2)
+	}
+}
+
+// TestInFlight_BurstSpreadsAcrossAccounts verifies that simultaneous generation requests reserve
+// distinct idle accounts at selection time instead of all picking the same one.
+func TestInFlight_BurstSpreadsAcrossAccounts(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+	observability.Reset()
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock_token_" + account.ID, nil }
+
+	const n = 12
+	now := time.Now().Unix()
+	frac := 0.95
+	pool := &storage.Pool{Version: 1, Strategy: "smart"}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("acc_burst_%d", i)
+		pool.Accounts = append(pool.Accounts, &storage.Account{
+			ID: id, Name: id, Status: "ready", CreatedAt: &now,
+			LastQuota: &storage.QuotaState{RemainingFraction: &frac},
+		})
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	var mu sync.Mutex
+	seen := map[string]int{}
+	arrived := make(chan struct{}, n)
+	releaseAll := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("Authorization")]++
+		mu.Unlock()
+		arrived <- struct{}{}
+		<-releaseAll
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"candidates":[]}`))
+	}))
+	defer upstream.Close()
+
+	origBackend := BackendURLProvider
+	BackendURLProvider = func() string { return upstream.URL }
+	defer func() { BackendURLProvider = origBackend }()
+
+	handler := NewHandler()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			req := httptest.NewRequest("POST", "/v1/models/gemini-pro:streamGenerateContent", nil)
+			handler.HandleProxy(httptest.NewRecorder(), req)
+		}()
+	}
+	close(start)
+	for i := 0; i < n; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for request %d to reach upstream", i+1)
+		}
+	}
+	close(releaseAll)
+	wg.Wait()
+
+	if len(seen) != n {
+		t.Errorf("expected %d distinct accounts for %d concurrent requests, got %v", n, n, seen)
+	}
+	for _, acc := range pool.Accounts {
+		if f := observability.GetInFlightGeneration(acc.ID); f != 0 {
+			t.Errorf("expected %s in-flight to return to 0, got %d", acc.ID, f)
+		}
 	}
 }
