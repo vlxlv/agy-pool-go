@@ -121,7 +121,7 @@ agy-pool-go/
 │   ├── auth/                       # OAuth client, token refresh, single-flight
 │   ├── accounts/                   # Account lifecycle, target matching, import/export
 │   ├── quota/                      # Quota parsing, freshness classification, formatting
-│   ├── scheduler/                  # max_quota, least_used, round_robin engine
+│   ├── scheduler/                  # smart, max_quota engine
 │   ├── proxy/                      # HTTP/1.1 reverse proxy, SSE streaming, failover
 │   ├── daemon/                     # Process supervisor, PID management, log rotation
 │   ├── diagnostics/                # Doctor health checks, environment inspection
@@ -192,9 +192,9 @@ The file `~/.gemini/agy-pool-accounts.json` contains a JSON object:
 ```
 
 - `version` (int, required): Schema version (currently `1`).
-- `strategy` (string, required): One of `"max_quota"`, `"least_used"`, `"round_robin"`. Default: `"max_quota"`.
+- `strategy` (string, required): One of `"smart"`, `"max_quota"` (`"least_used"`/`"round_robin"` are migrated to `"smart"`). Default: `"smart"`.
 - `active_account_id` (string or null, required): ID of the currently designated active account.
-- `round_robin_last_account_id` (string or null, optional): Persisted reservation cursor for round-robin.
+- `round_robin_last_account_id` (string or null, optional): Legacy round-robin cursor; read for compatibility, unused.
 - `accounts` (array of objects, required): Ordered list of account records.
 
 ### Account Record Schema `[COMPATIBILITY REQUIRED]`
@@ -487,6 +487,8 @@ $$\text{known\_window\_count} = \begin{cases} 1 & \text{if legacy combined fract
 
 #### Sort Tuple for `max_quota` (Descending) `[FROZEN]`
 
+At runtime, accounts with fewer in-flight generation requests are compared first; the tuple below orders ties.
+
 ```python
 (
     known_window_count,         # Prefer accounts with 2 measured windows over 1
@@ -498,31 +500,10 @@ $$\text{known\_window\_count} = \begin{cases} 1 & \text{if legacy combined fract
 )
 ```
 
-### Strategy: `least_used` `[FROZEN]`
+### Removed strategies: `least_used`, `round_robin`
 
-Primary criterion is generation count (`gen_count`, falling back to `request_count`), breaking ties by reset-aware capacity:
-
-#### Sort Tuple for `least_used` (Ascending) `[FROZEN]`
-
-```python
-(
-    hits,                       # Lowest generation count first
-    -known_window_count,        # Prefer dual-window evidence
-    -quota_freshness_rank,      # Prefer fresh telemetry
-    -worst_pace,                # Higher worst pace tie-break
-    -total_pace,                # Higher total pace tie-break
-    -raw_floor,                 # Higher raw floor tie-break
-    id                          # Deterministic string ID tie-break
-)
-```
-
-### Strategy: `round_robin` `[FROZEN]`
-
-1. **Persistent Reservation Cursor**: Stored at `pool["round_robin_last_account_id"]`.
-2. **Atomic Selection-at-Reservation**: Under `pool_transaction`, the scheduler rotates the eligible account list starting immediately *after* `round_robin_last_account_id`.
-3. **Cursor Advancement**: The cursor is updated to the chosen account's ID **BEFORE** upstream network dispatch begins.
-4. **No Rollback on Upstream Failure**: If upstream dispatch fails, the cursor remains advanced. Concurrent generation requests cannot reserve the same next account.
-5. **Non-RR Strategies**: `max_quota` and `least_used` MUST NOT mutate `round_robin_last_account_id`.
+Removed in `8307c88`. A pool whose `strategy` is `least_used` or `round_robin` is migrated to `smart` on import
+(and any unknown strategy is ordered as `smart`); `round_robin_last_account_id` is still read for compatibility but no longer used.
 
 ---
 
@@ -842,9 +823,7 @@ testdata/
 │   └── retry_after_variants.json   # Integer, RFC 2822, and RFC 7231 headers
 │
 ├── scheduler/
-│   ├── max_quota_vectors.json      # Inputs and expected rankings
-│   ├── least_used_tie_breaks.json  # Hits + pace tie-break vectors
-│   └── round_robin_rotations.json  # Multi-cycle reservation sequences
+│   └── max_quota_vectors.json      # Inputs and expected rankings
 │
 ├── proxy/
 │   ├── normal_generation.json      # Request/response transcript
@@ -898,7 +877,7 @@ A differential test script (`scripts/dual-test.sh`) executes identical operation
 1. `internal/config`: Path resolution, test mode, fail-closed guards.
 2. `internal/storage`: Atomic JSON persistence, sidecar `.lock`, crash resilience.
 3. `internal/quota`: Quota normalization, reset time parsing, capacity state calculations.
-4. `internal/scheduler`: `max_quota`, `least_used`, `round_robin` candidate ranking and reservation.
+4. `internal/scheduler`: `smart`, `max_quota` candidate ranking.
 
 ### Exit Gate:
 - 100% pass on `testdata/pool/`, `testdata/quota/`, and `testdata/scheduler/` golden fixtures.
