@@ -589,45 +589,63 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if isGeneration {
 		// Ordering reads in-flight counts, so ordering and reserving the first pick must be atomic,
 		// otherwise a burst of requests all see In-Flight=0 and pick the same account.
-		// shortcut: in-process reservation only; in-flight counters are per process, upgrade to a DB conditional update if multiple proxy processes share one pool.
+		// selectionMu covers this process; the DB write transaction covers other processes sharing the pool.
 		selectionMu.Lock()
-		candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
-
 		sessionKey = ExtractSessionKey(r, body)
-		if sessionKey != "" {
-			var matched bool
-			candidates, matched = GetAffinityManager().ApplyAffinity(candidates, sessionKey, NowFunc())
-			if matched {
-				affinityStatus = "hit"
-			} else {
-				affinityStatus = "new"
-			}
-		}
+		picked := false
+		pick := func(remote map[string]int64) string {
+			picked = true
+			observability.SetRemoteInFlight(remote)
+			candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
 
-		if confCand := SelectAndClaimConfirmationCandidate(pool.Accounts); confCand != nil {
-			pendingClaimedID = confCand.ID
+			if sessionKey != "" {
+				var matched bool
+				candidates, matched = GetAffinityManager().ApplyAffinity(candidates, sessionKey, NowFunc())
+				if matched {
+					affinityStatus = "hit"
+				} else {
+					affinityStatus = "new"
+				}
+			}
+
+			if confCand := SelectAndClaimConfirmationCandidate(pool.Accounts); confCand != nil {
+				pendingClaimedID = confCand.ID
+				candidates = append([]*storage.Account{confCand}, candidates...)
+			}
+
+			// Reserve the account the dispatch loop below will try first (same skip rule).
+			for _, acc := range candidates {
+				if scheduler.IsRestricted(acc) && acc.ID != pendingClaimedID {
+					continue
+				}
+				if acc != nil && acc.ID != "" {
+					reservedID = acc.ID
+					reservedDone = observability.StartInFlightGeneration(acc.ID)
+				}
+				break
+			}
+			return reservedID
+		}
+		_, leaseRelease, _ := storage.ReserveInFlight(pick)
+		if !picked {
+			// State DB unavailable: fall back to the in-process reservation alone.
+			pick(nil)
+		}
+		selectionMu.Unlock()
+
+		if pendingClaimedID != "" {
 			defer func() {
 				if pendingClaimedID != "" {
 					ReleaseVerificationConfirmation(pendingClaimedID)
 					pendingClaimedID = ""
 				}
 			}()
-			candidates = append([]*storage.Account{confCand}, candidates...)
 		}
-
-		// Reserve the account the dispatch loop below will try first (same skip rule).
-		for _, acc := range candidates {
-			if scheduler.IsRestricted(acc) && acc.ID != pendingClaimedID {
-				continue
-			}
-			if acc != nil && acc.ID != "" {
-				reservedID = acc.ID
-				reservedDone = observability.StartInFlightGeneration(acc.ID)
-				defer reservedDone()
-			}
-			break
+		if reservedDone != nil {
+			localDone := reservedDone
+			reservedDone = func() { localDone(); leaseRelease() }
+			defer reservedDone()
 		}
-		selectionMu.Unlock()
 	} else {
 		// Non-generation: prefer active account, deprioritize restricted/cooldown accounts
 		activeID := ""
@@ -781,6 +799,9 @@ func (h *Handler) dispatchAccount(
 	} else if isGeneration && acc != nil && acc.ID != "" {
 		done := observability.StartInFlightGeneration(acc.ID)
 		defer done()
+		if release, err := storage.LeaseInFlight(acc.ID); err == nil {
+			defer release()
+		}
 	}
 
 	dispName := accounts.DisplayAccountName(acc)

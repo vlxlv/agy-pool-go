@@ -213,6 +213,12 @@ func OpenStateDB(dbPath string) (*StateDB, error) {
 		}
 	}
 
+	// Additive table, created on existing DBs too, so no schema version bump is needed.
+	if _, err := db.Exec(inflightLeaseDDL); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to create in-flight lease table on %q: %w", dbPath, err)
+	}
+
 	_ = EnsureFilePermissions(dbPath)
 
 	return &StateDB{
