@@ -280,23 +280,17 @@ func ComputeCapacityState(acc *storage.Account, now float64) CapacityState {
 		reset7 = acc.GeminiWeeklyReset
 	}
 
+	// Absolute reset timestamps win; the legacy relative *_reset_sec fields are only a fallback,
+	// because "now + sec" never counts down and would override fresh quota data.
 	resetRatio := func(secVal *float64, reset any, windowSecs float64) float64 {
-		if secVal != nil {
-			rem := *secVal
-			if rem <= 0 {
-				return 1.0
-			}
-			ratio := rem / windowSecs
-			if ratio > 1.0 {
-				return 1.0
-			}
-			return ratio
-		}
-		ts := ParseISOOrTimestamp(reset)
-		if ts == nil {
+		var rem float64
+		if ts := ParseISOOrTimestamp(reset); ts != nil {
+			rem = *ts - now
+		} else if secVal != nil {
+			rem = *secVal
+		} else {
 			return 1.0
 		}
-		rem := *ts - now
 		if rem <= 0 {
 			return 1.0
 		}
@@ -369,24 +363,20 @@ func ComputeCapacityState(acc *storage.Account, now float64) CapacityState {
 
 	var reset5Time, reset7Time *time.Time
 
-	if acc.Gemini5HResetSec != nil {
+	if ep := ParseISOOrTimestamp(reset5); ep != nil {
+		tm := time.Unix(int64(*ep), 0).UTC()
+		reset5Time = &tm
+	} else if acc.Gemini5HResetSec != nil {
 		tm := time.Unix(int64(now+*acc.Gemini5HResetSec), 0).UTC()
 		reset5Time = &tm
-	} else if reset5 != nil {
-		if ep := ParseISOOrTimestamp(reset5); ep != nil {
-			tm := time.Unix(int64(*ep), 0).UTC()
-			reset5Time = &tm
-		}
 	}
 
-	if acc.GeminiWeeklyResetSec != nil {
+	if ep := ParseISOOrTimestamp(reset7); ep != nil {
+		tm := time.Unix(int64(*ep), 0).UTC()
+		reset7Time = &tm
+	} else if acc.GeminiWeeklyResetSec != nil {
 		tm := time.Unix(int64(now+*acc.GeminiWeeklyResetSec), 0).UTC()
 		reset7Time = &tm
-	} else if reset7 != nil {
-		if ep := ParseISOOrTimestamp(reset7); ep != nil {
-			tm := time.Unix(int64(*ep), 0).UTC()
-			reset7Time = &tm
-		}
 	}
 
 	return CapacityState{
