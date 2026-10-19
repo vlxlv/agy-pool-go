@@ -57,15 +57,15 @@ func TestStrategyCommand(t *testing.T) {
 		t.Errorf("expected strategy 'max_quota' in pool, got %q", pool.Strategy)
 	}
 
-	// 4. Deprecated strategies return clear deprecation error
+	// 4. Removed strategies return invalid strategy error
 	stdout.Reset()
 	stderr.Reset()
 	code = Main([]string{"strategy", "least_used"}, nil, &stdout, &stderr)
 	if code != 1 {
-		t.Fatalf("expected exit code 1 for deprecated strategy least_used, got %d", code)
+		t.Fatalf("expected exit code 1 for removed strategy least_used, got %d", code)
 	}
-	if !strings.Contains(stdout.String(), "deprecated and removed") {
-		t.Errorf("expected deprecation message on stdout, got: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "Invalid strategy") {
+		t.Errorf("expected invalid strategy message on stdout, got: %s", stdout.String())
 	}
 }
 

@@ -23,10 +23,6 @@ const (
 	StrategySmart    = "smart"
 	StrategyMaxQuota = "max_quota"
 
-	// Deprecated: legacy strategies migrated to StrategySmart.
-	StrategyLeastUsed  = "least_used"
-	StrategyRoundRobin = "round_robin"
-
 	// DefaultStrategy is the default load balancing strategy across the pool.
 	DefaultStrategy = StrategySmart
 
@@ -48,6 +44,15 @@ const (
 	DefaultMaxLogBytes    = 5 * 1024 * 1024 // 5 MB
 	DefaultBackupLogCount = 1
 )
+
+// MigrateLegacyStrategy maps strategies removed in 8307c88 (least_used, round_robin) to smart,
+// so configs, pools and state DBs written by older versions keep loading.
+func MigrateLegacyStrategy(s string) string {
+	if s == "least_used" || s == "round_robin" {
+		return StrategySmart
+	}
+	return s
+}
 
 // QuotaRefreshBackoff contains the retry intervals for failed quota refreshes
 var QuotaRefreshBackoff = []time.Duration{
@@ -375,12 +380,10 @@ func LoadConfigFile(path string) (*StaticConfig, error) {
 		return nil, fmt.Errorf("invalid server listen address %q", cfg.Server.Listen)
 	}
 
+	cfg.Scheduler.Strategy = MigrateLegacyStrategy(cfg.Scheduler.Strategy)
 	switch cfg.Scheduler.Strategy {
 	case StrategySmart, StrategyMaxQuota:
 		// Valid
-	case StrategyLeastUsed, StrategyRoundRobin:
-		// Deprecated strategies automatically migrated to smart
-		cfg.Scheduler.Strategy = StrategySmart
 	default:
 		return nil, fmt.Errorf("invalid scheduler strategy %q", cfg.Scheduler.Strategy)
 	}

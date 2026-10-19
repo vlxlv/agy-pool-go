@@ -1447,7 +1447,7 @@ func TestSymlinkToProductionRejected(t *testing.T) {
 	}
 }
 
-func TestRemoveAccountRepairsActiveAndRRCursor(t *testing.T) {
+func TestRemoveAccountRepairsActive(t *testing.T) {
 	setupIsolatedTestDir(t)
 
 	// 1. Setup 3 accounts: acc_1, acc_2, acc_3
@@ -1458,12 +1458,11 @@ func TestRemoveAccountRepairsActiveAndRRCursor(t *testing.T) {
 		{ID: "acc_3", Email: "third@example.com", AccessToken: "token-acc-3"},
 	}
 	p.ActiveAccountID = &p.Accounts[0].ID
-	p.RoundRobinLastAccountID = &p.Accounts[1].ID
 	if err := storage.SavePool(p); err != nil {
 		t.Fatalf("failed to save initial pool: %v", err)
 	}
 
-	// 2. Remove middle account (acc_2), which is the RR cursor
+	// 2. Remove middle account (acc_2)
 	rem, err := RemoveAccount("acc_2")
 	if err != nil {
 		t.Fatalf("RemoveAccount acc_2 failed: %v", err)
@@ -1482,10 +1481,6 @@ func TestRemoveAccountRepairsActiveAndRRCursor(t *testing.T) {
 	// Active account should still be acc_1
 	if loaded.ActiveAccountID == nil || *loaded.ActiveAccountID != "acc_1" {
 		t.Fatalf("active account corrupted: got %v, want acc_1", loaded.ActiveAccountID)
-	}
-	// RR cursor was pointing to acc_2, must be repaired to nil
-	if loaded.RoundRobinLastAccountID != nil {
-		t.Fatalf("RR cursor pointing to deleted account was not repaired to nil: got %s", *loaded.RoundRobinLastAccountID)
 	}
 
 	// 3. Remove active account (acc_1)
@@ -1527,9 +1522,6 @@ func TestRemoveAccountRepairsActiveAndRRCursor(t *testing.T) {
 	}
 	if loaded.ActiveAccountID != nil {
 		t.Fatalf("active account not nil after removing final account: got %v", loaded.ActiveAccountID)
-	}
-	if loaded.RoundRobinLastAccountID != nil {
-		t.Fatalf("RR cursor not nil after removing final account: got %v", loaded.RoundRobinLastAccountID)
 	}
 }
 

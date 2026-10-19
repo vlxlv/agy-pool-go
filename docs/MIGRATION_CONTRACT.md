@@ -186,7 +186,6 @@ The file `~/.gemini/agy-pool-accounts.json` contains a JSON object:
   "version": 1,
   "strategy": "max_quota",
   "active_account_id": "acc_1",
-  "round_robin_last_account_id": "acc_2",
   "accounts": []
 }
 ```
@@ -194,7 +193,6 @@ The file `~/.gemini/agy-pool-accounts.json` contains a JSON object:
 - `version` (int, required): Schema version (currently `1`).
 - `strategy` (string, required): One of `"smart"`, `"max_quota"` (`"least_used"`/`"round_robin"` are migrated to `"smart"`). Default: `"smart"`.
 - `active_account_id` (string or null, required): ID of the currently designated active account.
-- `round_robin_last_account_id` (string or null, optional): Legacy round-robin cursor; read for compatibility, unused.
 - `accounts` (array of objects, required): Ordered list of account records.
 
 ### Account Record Schema `[COMPATIBILITY REQUIRED]`
@@ -503,7 +501,7 @@ At runtime, accounts with fewer in-flight generation requests are compared first
 ### Removed strategies: `least_used`, `round_robin`
 
 Removed in `8307c88`. A pool whose `strategy` is `least_used` or `round_robin` is migrated to `smart` on import
-(and any unknown strategy is ordered as `smart`); `round_robin_last_account_id` is still read for compatibility but no longer used.
+(and any unknown strategy is ordered as `smart`); `round_robin_last_account_id` is ignored on load and scrubbed from the state DB on save.
 
 ---
 
@@ -1048,7 +1046,7 @@ Performance goals are secondary to correctness. Parity comes first, optimization
 ## 40. Explicit Non-Goals for Go Initial Release (`v0.1.0-alpha.1`)
 
 The following features are explicitly **OUT OF SCOPE** for the initial Go rewrite:
-- Adding new load balancing strategies beyond `max_quota`, `least_used`, and `round_robin`.
+- Adding new load balancing strategies beyond `smart` and `max_quota`.
 - Live in-flight token consumption estimation.
 - Redesigning the terminal UI, progress bars, or color palettes.
 - Re-architecting storage from JSON to SQLite or relational databases.

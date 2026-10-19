@@ -312,6 +312,9 @@ func TestMigrateLegacyPool(t *testing.T) {
 	if dbPool.ActiveAccountID == nil || *dbPool.ActiveAccountID != "acc_1" {
 		t.Fatalf("unexpected active account in migrated state.db: %v", dbPool.ActiveAccountID)
 	}
+	if dbPool.Strategy != "smart" {
+		t.Fatalf("expected migrated state.db strategy smart, got %s", dbPool.Strategy)
+	}
 
 	targetAccounts := filepath.Join(targetDir, "accounts.json")
 	loaded, err := ReadPoolUnlocked(targetAccounts)
@@ -320,6 +323,9 @@ func TestMigrateLegacyPool(t *testing.T) {
 	}
 	if len(loaded.Accounts) != 2 || loaded.Accounts[0].ID != "acc_1" || loaded.Accounts[1].ID != "acc_2" {
 		t.Fatalf("unexpected migrated accounts in target pool: %+v", loaded.Accounts)
+	}
+	if loaded.Strategy != "smart" {
+		t.Fatalf("expected migrated target accounts.json strategy smart, got %s", loaded.Strategy)
 	}
 
 	// Verify fail-closed guard refuses protected production destination
@@ -359,11 +365,9 @@ func TestMigrateSplitJSONToDB(t *testing.T) {
 
 	// 2. Create runtime.json
 	active := "acc_split1"
-	rr := "acc_split1"
 	rt := TargetRuntimeFile{
-		Version:                 1,
-		ActiveAccountID:         &active,
-		RoundRobinLastAccountID: &rr,
+		Version:         1,
+		ActiveAccountID: &active,
 		AccountsRuntime: map[string]*TargetAccountRuntimeRecord{
 			"acc_split1": {
 				Status:       "active",

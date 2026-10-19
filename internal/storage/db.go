@@ -445,7 +445,6 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 
 	strategy := "smart"
 	var activeID *string
-	var rrID *string
 	var showEmail *bool
 	var accountOrder []string
 	var genEvents []GenerationEvent
@@ -462,10 +461,7 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 		switch k.String {
 		case "strategy":
 			if v.Valid && v.String != "" {
-				strategy = v.String
-				if strategy == "least_used" || strategy == "round_robin" {
-					strategy = "smart"
-				}
+				strategy = config.MigrateLegacyStrategy(v.String)
 			}
 		case "active_account_id":
 			if v.Valid && v.String != "" {
@@ -473,10 +469,7 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 				activeID = &val
 			}
 		case "round_robin_last_account_id":
-			if v.Valid && v.String != "" {
-				val := v.String
-				rrID = &val
-			}
+			// written by older versions; ignored
 		case "show_email":
 			if v.Valid && v.String != "" {
 				b := v.String == "1" || v.String == "true"
@@ -687,14 +680,13 @@ func LoadPoolFromTx(tx *sql.Tx) (*Pool, error) {
 	}
 
 	return &Pool{
-		Version:                 1,
-		Strategy:                strategy,
-		ActiveAccountID:         activeID,
-		RoundRobinLastAccountID: rrID,
-		ShowEmail:               showEmail,
-		Accounts:                accountsList,
-		GenerationEvents:        genEvents,
-		Extra:                   poolExtra,
+		Version:          1,
+		Strategy:         strategy,
+		ActiveAccountID:  activeID,
+		ShowEmail:        showEmail,
+		Accounts:         accountsList,
+		GenerationEvents: genEvents,
+		Extra:            poolExtra,
 	}, nil
 }
 
@@ -705,8 +697,8 @@ func SavePoolToTx(tx *sql.Tx, pool *Pool) error {
 	}
 
 	// 1. Update runtime_global
-	strat := pool.Strategy
-	if strat == "" || strat == "least_used" || strat == "round_robin" {
+	strat := config.MigrateLegacyStrategy(pool.Strategy)
+	if strat == "" {
 		strat = "smart"
 	}
 	if _, err := tx.Exec("INSERT INTO runtime_global (key, value) VALUES ('strategy', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", strat); err != nil {
@@ -723,7 +715,7 @@ func SavePoolToTx(tx *sql.Tx, pool *Pool) error {
 		}
 	}
 
-	// Clean up legacy round_robin cursor if present
+	// Clean up legacy round_robin cursor written by older versions
 	if _, err := tx.Exec("DELETE FROM runtime_global WHERE key = 'round_robin_last_account_id'"); err != nil {
 		return fmt.Errorf("failed to delete round_robin_last_account_id: %w", err)
 	}

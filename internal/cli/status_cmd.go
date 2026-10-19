@@ -52,13 +52,8 @@ func ManageStrategy(targetStrategy string, stdout, stderr io.Writer) bool {
 	}
 
 	if !isValid {
-		if targetStrategy == "least_used" || targetStrategy == "round_robin" {
-			fmt.Fprintf(stdout, "%s[Error] Strategy '%s' has been deprecated and removed. Choose from: %s%s\n",
-				clrRed, targetStrategy, strings.Join(validStrategies, ", "), clrReset)
-		} else {
-			fmt.Fprintf(stdout, "%s[Error] Invalid strategy '%s'. Choose from: %s%s\n",
-				clrRed, targetStrategy, strings.Join(validStrategies, ", "), clrReset)
-		}
+		fmt.Fprintf(stdout, "%s[Error] Invalid strategy '%s'. Choose from: %s%s\n",
+			clrRed, targetStrategy, strings.Join(validStrategies, ", "), clrReset)
 		return false
 	}
 
