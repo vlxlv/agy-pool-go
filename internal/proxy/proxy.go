@@ -627,10 +627,15 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			return reservedID
 		}
-		_, leaseRelease, _ := storage.ReserveInFlight(pick)
+		_, leaseRelease, leaseErr := storage.ReserveInFlight(pick)
 		if !picked {
-			// State DB unavailable: fall back to the in-process reservation alone.
+			// State DB unavailable or busy: fall back to the in-process reservation alone.
 			pick(nil)
+		}
+		if leaseErr != nil && reservedID != "" {
+			// Other processes sharing the pool will not see this request's in-flight load.
+			observability.RecordLeaseFallback()
+			logMessage("PROXY WARN", fmt.Sprintf("in-flight lease not recorded for %s, balancing on local counts: %v", reservedID, leaseErr))
 		}
 		selectionMu.Unlock()
 

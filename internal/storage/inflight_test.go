@@ -90,3 +90,33 @@ func TestReserveInFlightGivesUpWhenWriteLockBusy(t *testing.T) {
 		t.Fatalf("ReserveInFlight after lock released = %v", err)
 	}
 }
+
+func TestReserveInFlightWaitsOutBriefInProcessWriter(t *testing.T) {
+	setupTestStorage(t)
+	sdb, err := GetStateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdWriteMu := func(d time.Duration) {
+		sdb.writeMu.Lock()
+		go func() { time.Sleep(d); sdb.writeMu.Unlock() }()
+	}
+
+	// A routine write (e.g. a lease release) finishing within the budget must not cause a fallback.
+	holdWriteMu(30 * time.Millisecond)
+	_, release, err := ReserveInFlight(func(map[string]int64) string { return "a" })
+	release()
+	if err != nil {
+		t.Fatalf("ReserveInFlight behind a 30ms writer = %v, want success", err)
+	}
+
+	// A writer holding past the budget still yields ErrWriteBusy without calling pick.
+	holdWriteMu(3 * reserveBusyTimeout)
+	called := false
+	_, release, err = ReserveInFlight(func(map[string]int64) string { called = true; return "a" })
+	release()
+	if !errors.Is(err, ErrWriteBusy) || called {
+		t.Fatalf("ReserveInFlight behind a long writer = %v, pick called = %v; want ErrWriteBusy without pick", err, called)
+	}
+	time.Sleep(3 * reserveBusyTimeout) // let the holder release before cleanup
+}
