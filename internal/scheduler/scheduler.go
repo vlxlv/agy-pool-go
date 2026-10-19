@@ -69,10 +69,10 @@ func IsReserveCapacity(capState quota.CapacityState) bool {
 // routing holds the account back. Accounts with >= 70% weekly quota left are never affected.
 const WeeklyPaceSlack = 0.30
 
-// overWeeklyPace reports whether an account is spending its week faster than time passes, so routing
+// OverWeeklyPace reports whether an account is spending its week faster than time passes, so routing
 // can move it behind on-pace accounts and concurrency cannot drain one weekly quota early in the cycle.
-// It only affects candidate ordering; reserve labels, audit and affinity still use IsReserveCandidate.
-func overWeeklyPace(acc *storage.Account, now float64) bool {
+// Ordering and affinity use it; reserve labels and audit still use IsReserveCandidate.
+func OverWeeklyPace(acc *storage.Account, now float64) bool {
 	c := quota.ComputeCapacityState(acc, now)
 	return c.Q7Known && c.Pace7 != nil && c.Reset7Time != nil && *c.Pace7 < -WeeklyPaceSlack-1e-9 // epsilon keeps q7 >= 0.70 exempt despite float rounding
 }
@@ -258,7 +258,7 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 	var healthy []*storage.Account
 	var reserve []*storage.Account
 	for _, acc := range eligible {
-		if IsReserveCapacity(keys[acc].cap) || overWeeklyPace(acc, now) {
+		if IsReserveCapacity(keys[acc].cap) || OverWeeklyPace(acc, now) {
 			reserve = append(reserve, acc)
 		} else {
 			healthy = append(healthy, acc)

@@ -120,10 +120,10 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 	nowSecs := float64(now.Unix())
 	for i, acc := range candidates {
 		if acc != nil && acc.ID == boundID {
-			// Only keep affinity if account is healthy, not in reserve, not depleted, not in cooldown or restricted,
-			// and active in-flight concurrency does not exceed MaxAffinityInFlight threshold.
+			// Only keep affinity if account is healthy, not in reserve, not depleted, not over weekly pace,
+			// not in cooldown or restricted, and in-flight concurrency is below MaxAffinityInFlight.
 			if !scheduler.IsRestricted(acc) && !scheduler.IsReserveCandidate(acc, nowSecs) &&
-				!quota.ComputeCapacityState(acc, nowSecs).IsDepleted &&
+				!quota.ComputeCapacityState(acc, nowSecs).IsDepleted && !scheduler.OverWeeklyPace(acc, nowSecs) &&
 				(acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs) &&
 				observability.GetInFlightGeneration(acc.ID) < MaxAffinityInFlight {
 				targetIdx = i
