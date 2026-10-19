@@ -737,3 +737,21 @@ func TestDoctor_NativeIntegrationDiagnostics(t *testing.T) {
 		t.Errorf("expected shim/self warning, got:\n%s", buf.String())
 	}
 }
+
+func TestLeaseFallbackRateHigh(t *testing.T) {
+	cases := []struct {
+		fallbacks, decisions uint64
+		want                 bool
+	}{
+		{0, 0, false},
+		{0, 5000, false},
+		{1, 100, false}, // exactly 1% is tolerated
+		{2, 100, true},
+		{11, 1000, true},
+	}
+	for _, c := range cases {
+		if got := LeaseFallbackRateHigh(c.fallbacks, c.decisions); got != c.want {
+			t.Errorf("LeaseFallbackRateHigh(%d, %d) = %v, want %v", c.fallbacks, c.decisions, got, c.want)
+		}
+	}
+}
