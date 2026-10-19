@@ -106,6 +106,7 @@ var (
 
 func init() {
 	go runAuditWorker()
+	quota.WarnHook = func(msg string) { logMessage("QUOTA WARN", msg) }
 }
 
 func runAuditWorker() {

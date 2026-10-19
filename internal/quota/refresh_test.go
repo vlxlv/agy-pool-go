@@ -620,6 +620,9 @@ func TestQueryQuota_FallbackIgnoresNonGeminiDefaultModel(t *testing.T) {
 
 	BackendURLBaseProvider = func() string { return ts.URL }
 	TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
+	var warnings []string
+	WarnHook = func(msg string) { warnings = append(warnings, msg) }
+	t.Cleanup(func() { WarnHook = nil })
 
 	acc := &storage.Account{ID: "acc-fallback"}
 	_ = storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}})
@@ -630,5 +633,8 @@ func TestQueryQuota_FallbackIgnoresNonGeminiDefaultModel(t *testing.T) {
 	}
 	if res.Gemini5H == nil || *res.Gemini5H.Fraction != 0.94 || res.Gemini5H.ResetTime != geminiReset {
 		t.Errorf("expected Gemini 5h from gemini model (0.94, %s), got %+v", geminiReset, res.Gemini5H)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "no Gemini buckets") {
+		t.Errorf("expected one no-Gemini-buckets warning, got %q", warnings)
 	}
 }

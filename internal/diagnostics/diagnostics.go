@@ -20,6 +20,8 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
+	"github.com/vlxlv/agy-pool-go/internal/quota"
+	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 	_ "modernc.org/sqlite"
 )
@@ -735,6 +737,20 @@ func RunDoctor(out io.Writer) bool {
 			if len(pool.Accounts) == 0 {
 				fmt.Fprintf(out, "    %s↳ Pool is empty. Run 'agy-pool login' or 'agy-pool import-current'.%s\n",
 					clrYellow, clrReset)
+				warningsFound++
+			}
+
+			var notRenewed []string
+			for _, a := range pool.Accounts {
+				if a != nil && !scheduler.IsRestricted(a) && quota.GeminiQuotaNotRenewed(a) {
+					notRenewed = append(notRenewed, accounts.DisplayAccountName(a))
+				}
+			}
+			if len(notRenewed) > 0 {
+				fmt.Fprintf(out, "  %s⚠%s Gemini Quota: last refresh did not renew a Gemini window for %s\n",
+					clrYellow, clrReset, strings.Join(notRenewed, ", "))
+				fmt.Fprintf(out, "    %s↳ Upstream may have changed its quota response; check 'agy-pool logs' for QUOTA WARN.%s\n",
+					clrDim, clrReset)
 				warningsFound++
 			}
 

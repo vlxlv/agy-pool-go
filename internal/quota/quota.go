@@ -155,6 +155,24 @@ func Freshness(acc *storage.Account, now float64) FreshnessInfo {
 	}
 }
 
+// GeminiQuotaNotRenewed reports whether the latest refresh left a Gemini window missing or still at a
+// reset time from before that refresh, which means upstream stopped reporting it.
+func GeminiQuotaNotRenewed(acc *storage.Account) bool {
+	if acc == nil || acc.LastQuota == nil || acc.LastQuota.UpdatedAt == nil || *acc.LastQuota.UpdatedAt <= 0 {
+		return false
+	}
+	updated := float64(*acc.LastQuota.UpdatedAt)
+	for _, w := range []*storage.QuotaWindow{acc.LastQuota.Gemini5H, acc.LastQuota.GeminiWeekly} {
+		if w == nil {
+			return true
+		}
+		if ts := ParseISOOrTimestamp(w.ResetTime); ts != nil && *ts <= updated {
+			return true
+		}
+	}
+	return false
+}
+
 // FreshnessRank returns the scheduling confidence rank:
 // fresh (2), aging (2), stale (1), unknown (0)
 func FreshnessRank(acc *storage.Account, now float64) int {
