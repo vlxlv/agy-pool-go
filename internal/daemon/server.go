@@ -175,6 +175,9 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 					}
 				}
 			}
+			if sdb, err := storage.GetStateDB(); err == nil {
+				_ = sdb.CheckpointPassive()
+			}
 		}
 		// Sweep once at startup so cold-start traffic is not routed on unknown quota for a whole interval.
 		sweep()
