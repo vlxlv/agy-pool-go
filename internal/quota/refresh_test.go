@@ -599,3 +599,36 @@ func TestQuotaFreshness_429InvalidationSemantics(t *testing.T) {
 		t.Errorf("expected GeminiWeekly fraction 0.85 preserved, got %+v", acc.LastQuota.GeminiWeekly)
 	}
 }
+
+// The fallback must not take the Gemini 5h window from a non-Gemini default agent model.
+func TestQueryQuota_FallbackIgnoresNonGeminiDefaultModel(t *testing.T) {
+	setupQuotaTestDir(t)
+
+	claudeReset := time.Now().Add(5 * time.Hour).UTC().Format(time.RFC3339)
+	geminiReset := time.Now().Add(3 * time.Hour).UTC().Format(time.RFC3339)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "retrieveUserQuotaSummary") {
+			fmt.Fprint(w, `{"groups":[]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"defaultAgentModelId":"claude-sonnet-4-6","models":{
+			"claude-sonnet-4-6":{"quotaInfo":{"remainingFraction":1,"resetTime":%q}},
+			"gemini-3.8-flash-tiered":{"quotaInfo":{"remainingFraction":0.94,"resetTime":%q}}}}`, claudeReset, geminiReset)
+	}))
+	defer ts.Close()
+
+	BackendURLBaseProvider = func() string { return ts.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
+
+	acc := &storage.Account{ID: "acc-fallback"}
+	_ = storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}})
+
+	res, err := QueryQuota(acc)
+	if err != nil {
+		t.Fatalf("QueryQuota failed: %v", err)
+	}
+	if res.Gemini5H == nil || *res.Gemini5H.Fraction != 0.94 || res.Gemini5H.ResetTime != geminiReset {
+		t.Errorf("expected Gemini 5h from gemini model (0.94, %s), got %+v", geminiReset, res.Gemini5H)
+	}
+}
