@@ -186,3 +186,38 @@ func TestComputeCapacityState_MissingResetAndWeeklyOnly(t *testing.T) {
 		t.Errorf("weekly only: known=%d q5Known=%v q7Known=%v depleted=%v floor=%v", c.KnownWindowCount, c.Q5Known, c.Q7Known, c.IsDepleted, c.RawFloor)
 	}
 }
+
+func TestFreshness_ResetPassedOnlyAfterSnapshotIsStale(t *testing.T) {
+	now := float64(time.Now().Unix())
+	at := func(offset float64) string { return time.Unix(int64(now+offset), 0).UTC().Format(time.RFC3339) }
+	acc := func(updatedAgo, weeklyReset float64) *storage.Account {
+		return &storage.Account{LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.9), ResetTime: at(3600)},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.8), ResetTime: at(weeklyReset)},
+			UpdatedAt:    int64Ptr(int64(now - updatedAgo)),
+		}}
+	}
+
+	// Refreshed 10s ago, yet upstream still reports a weekly reset from an hour ago: not renewed, not stale.
+	notRenewed := acc(10, -3600)
+	if c := Freshness(notRenewed, now).Class; c != "fresh" {
+		t.Errorf("reset already past at snapshot: class = %s, want fresh", c)
+	}
+	if !GeminiQuotaNotRenewed(notRenewed) {
+		t.Errorf("expected GeminiQuotaNotRenewed for a window whose reset predates the refresh")
+	}
+
+	// Snapshot taken before a reset that has since passed: the data is outdated, so stale.
+	if c := Freshness(acc(30, -10), now).Class; c != "stale" {
+		t.Errorf("reset passed after snapshot: class = %s, want stale", c)
+	}
+
+	healthy := acc(10, 86400)
+	if GeminiQuotaNotRenewed(healthy) {
+		t.Errorf("did not expect GeminiQuotaNotRenewed for future resets")
+	}
+	healthy.LastQuota.GeminiWeekly = nil
+	if !GeminiQuotaNotRenewed(healthy) {
+		t.Errorf("expected GeminiQuotaNotRenewed when a Gemini window is missing")
+	}
+}
