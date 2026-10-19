@@ -202,7 +202,7 @@ func EvaluateRoutingAttempt(
 			event.VerdictDetails = "Selected account quota classification cannot be determined from authoritative state"
 		}
 	} else {
-		// least_used or round_robin (Section 11)
+		// strategies without reserve headroom rules
 		event.Verdict = "pass"
 		event.VerdictDetails = fmt.Sprintf("Reserve headroom checks not applicable to strategy %s", strategy)
 	}

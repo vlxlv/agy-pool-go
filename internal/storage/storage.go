@@ -307,9 +307,7 @@ func MigrateLegacyPool(sourcePath, targetDataDir string) (*MigrationResult, erro
 	if err := json.Unmarshal(sourceData, &pool); err != nil {
 		return nil, fmt.Errorf("corrupt or invalid legacy pool source %q: %w", absSource, err)
 	}
-	if pool.Strategy == "least_used" || pool.Strategy == "round_robin" {
-		pool.Strategy = "smart"
-	}
+	pool.Strategy = config.MigrateLegacyStrategy(pool.Strategy)
 
 	// 2. Prepare target directory under -D
 	if err := config.AssertSafeWritePath(targetDataDir); err != nil {
@@ -406,9 +404,6 @@ func MigrateSplitJSONToDB(sourceDir, targetDataDir string) (*MigrationResult, er
 		if err := json.Unmarshal(data, &rf); err == nil {
 			if rf.ActiveAccountID != nil {
 				pool.ActiveAccountID = rf.ActiveAccountID
-			}
-			if rf.RoundRobinLastAccountID != nil {
-				pool.RoundRobinLastAccountID = rf.RoundRobinLastAccountID
 			}
 			for _, acc := range pool.Accounts {
 				if rRec, ok := rf.AccountsRuntime[acc.ID]; ok && rRec != nil {

@@ -66,7 +66,6 @@ def main():
         "version": 1,
         "strategy": "max_quota",
         "active_account_id": "acc_1",
-        "round_robin_last_account_id": "acc_2",
         "accounts": [
             {
                 "id": "acc_1",
@@ -269,34 +268,6 @@ def main():
             "now": fixed_now
         },
         {
-            "id": "all_healthy_least_used",
-            "strategy": "least_used",
-            "pool": valid_3_accounts,
-            "candidates": valid_3_accounts["accounts"],
-            "now": fixed_now
-        },
-        {
-            "id": "round_robin_with_cursor",
-            "strategy": "round_robin",
-            "pool": valid_3_accounts,
-            "candidates": valid_3_accounts["accounts"],
-            "now": fixed_now
-        },
-        {
-            "id": "round_robin_no_cursor",
-            "strategy": "round_robin",
-            "pool": {**valid_3_accounts, "round_robin_last_account_id": None},
-            "candidates": valid_3_accounts["accounts"],
-            "now": fixed_now
-        },
-        {
-            "id": "round_robin_stale_cursor",
-            "strategy": "round_robin",
-            "pool": {**valid_3_accounts, "round_robin_last_account_id": "acc_deleted"},
-            "candidates": valid_3_accounts["accounts"],
-            "now": fixed_now
-        },
-        {
             "id": "multi_tier_fallback",
             "strategy": "max_quota",
             "pool": {},
@@ -324,29 +295,6 @@ def main():
                     "id": "acc_eligible_high",
                     "gen_count": 5,
                     "last_quota": {"gemini_5h": {"fraction": 0.85, "reset_time": "2026-09-16T16:00:00Z"}, "updated_at": int(fixed_now - 10)}
-                }
-            ],
-            "now": fixed_now
-        },
-        {
-            "id": "least_used_tie_breaking",
-            "strategy": "least_used",
-            "pool": {},
-            "candidates": [
-                {
-                    "id": "acc_tie_1",
-                    "gen_count": 10,
-                    "last_quota": {"gemini_5h": {"fraction": 0.60, "reset_time": "2026-09-16T16:00:00Z"}, "gemini_weekly": {"fraction": 0.70, "reset_time": "2026-09-23T12:00:00Z"}, "updated_at": int(fixed_now - 10)}
-                },
-                {
-                    "id": "acc_tie_2",
-                    "gen_count": 10,
-                    "last_quota": {"gemini_5h": {"fraction": 0.80, "reset_time": "2026-09-16T16:00:00Z"}, "gemini_weekly": {"fraction": 0.90, "reset_time": "2026-09-23T12:00:00Z"}, "updated_at": int(fixed_now - 10)}
-                },
-                {
-                    "id": "acc_lowest_hits",
-                    "gen_count": 2,
-                    "last_quota": {"gemini_5h": {"fraction": 0.20, "reset_time": "2026-09-16T16:00:00Z"}, "updated_at": int(fixed_now - 10)}
                 }
             ],
             "now": fixed_now

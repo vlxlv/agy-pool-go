@@ -38,9 +38,6 @@ func TestLoadGoldenPoolFixtures(t *testing.T) {
 	if validPool.ActiveAccountID == nil || *validPool.ActiveAccountID != "acc_1" {
 		t.Fatalf("expected active_account_id acc_1")
 	}
-	if validPool.RoundRobinLastAccountID == nil || *validPool.RoundRobinLastAccountID != "acc_2" {
-		t.Fatalf("expected round_robin_last_account_id acc_2")
-	}
 
 	// 3. Legacy alpha.9 pool
 	legacyBytes, err := os.ReadFile(filepath.Join(testdataDir, "legacy_alpha9.json"))

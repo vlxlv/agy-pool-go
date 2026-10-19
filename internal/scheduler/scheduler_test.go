@@ -38,10 +38,6 @@ func TestSchedulerOrderingGoldenCases(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.TestID, func(t *testing.T) {
-			if tc.Strategy == "least_used" || tc.Strategy == "round_robin" {
-				t.Skip("deprecated strategy: " + tc.Strategy)
-				return
-			}
 			ordered := OrderCandidates(tc.Candidates, tc.Strategy, tc.Pool, tc.Now)
 			var actualIDs []string
 			for _, a := range ordered {
@@ -333,7 +329,7 @@ func TestMaxQuota_ReserveHeadroom_UnknownMissingWindow(t *testing.T) {
 	}
 }
 
-// Test L: max_quota only; least_used and round_robin remain unchanged
+// Test L: restricted accounts are excluded under every strategy
 func TestRestrictedAccountsExcludedFromAllStrategies(t *testing.T) {
 	now := float64(1000)
 	ready := &storage.Account{ID: "ready", LastQuota: &storage.QuotaState{RemainingFraction: floatPtr(0.9)}}

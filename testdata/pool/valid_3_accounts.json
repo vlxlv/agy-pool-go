@@ -2,7 +2,6 @@
   "version": 1,
   "strategy": "max_quota",
   "active_account_id": "acc_1",
-  "round_robin_last_account_id": "acc_2",
   "accounts": [
     {
       "id": "acc_1",

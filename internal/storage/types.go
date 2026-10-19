@@ -250,13 +250,12 @@ const TelemetryCap = 1000
 
 // Pool represents the top-level agy-pool-accounts.json data structure.
 type Pool struct {
-	Version                 int               `json:"version"`
-	Strategy                string            `json:"strategy"`
-	ActiveAccountID         *string           `json:"active_account_id"`
-	RoundRobinLastAccountID *string           `json:"round_robin_last_account_id,omitempty"`
-	ShowEmail               *bool             `json:"show_email,omitempty"`
-	Accounts                []*Account        `json:"accounts"`
-	GenerationEvents        []GenerationEvent `json:"generation_events,omitempty"`
+	Version          int               `json:"version"`
+	Strategy         string            `json:"strategy"`
+	ActiveAccountID  *string           `json:"active_account_id"`
+	ShowEmail        *bool             `json:"show_email,omitempty"`
+	Accounts         []*Account        `json:"accounts"`
+	GenerationEvents []GenerationEvent `json:"generation_events,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -314,7 +313,7 @@ func (p *Pool) UnmarshalJSON(data []byte) error {
 	delete(raw, "version")
 	delete(raw, "strategy")
 	delete(raw, "active_account_id")
-	delete(raw, "round_robin_last_account_id")
+	delete(raw, "round_robin_last_account_id") // written by older versions; ignored
 	delete(raw, "show_email")
 	delete(raw, "accounts")
 	delete(raw, "generation_events")
@@ -392,10 +391,9 @@ type TargetAccountRuntimeRecord struct {
 
 // TargetRuntimeFile represents the target runtime.json structure.
 type TargetRuntimeFile struct {
-	Version                 int                                    `json:"version"`
-	ActiveAccountID         *string                                `json:"active_account_id"`
-	RoundRobinLastAccountID *string                                `json:"round_robin_last_account_id,omitempty"`
-	AccountsRuntime         map[string]*TargetAccountRuntimeRecord `json:"accounts"`
+	Version         int                                    `json:"version"`
+	ActiveAccountID *string                                `json:"active_account_id"`
+	AccountsRuntime map[string]*TargetAccountRuntimeRecord `json:"accounts"`
 }
 
 // TargetQuotaFile represents the target quota.json structure.

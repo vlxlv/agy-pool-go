@@ -404,7 +404,6 @@ func ImportPool(filePath, password string, replace, skipExisting bool) (*ImportR
 			} else {
 				pool.ActiveAccountID = nil
 			}
-			pool.RoundRobinLastAccountID = nil
 			result.Total = len(pool.Accounts)
 			return nil
 		}

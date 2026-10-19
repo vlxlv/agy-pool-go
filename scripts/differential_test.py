@@ -126,23 +126,22 @@ def test_differential_scheduler_scenarios():
         {"id": "acc_restricted", "status": "auth_error", "last_quota": {"gemini_5h": {"fraction": 0.99}, "updated_at": int(fixed_now - 10)}},
     ]
 
-    for strat in ["max_quota", "least_used", "round_robin"]:
-        for last_id in [None, "acc_a", "acc_b", "acc_c", "acc_nonexistent"]:
-            pool = {"round_robin_last_account_id": last_id}
-            py_ordered = scheduler.order_candidates(candidates, strategy=strat, pool=pool, now=fixed_now)
-            py_ids = [a["id"] for a in py_ordered]
+    for strat in ["max_quota"]:
+        pool = {}
+        py_ordered = scheduler.order_candidates(candidates, strategy=strat, pool=pool, now=fixed_now)
+        py_ids = [a["id"] for a in py_ordered]
 
-            go_res = run_go_cmd("eval-scheduler", {
-                "strategy": strat,
-                "now": fixed_now,
-                "pool": pool,
-                "candidates": candidates
-            })
-            go_ids = go_res["ordered_ids"]
+        go_res = run_go_cmd("eval-scheduler", {
+            "strategy": strat,
+            "now": fixed_now,
+            "pool": pool,
+            "candidates": candidates
+        })
+        go_ids = go_res["ordered_ids"]
 
-            assert go_ids == py_ids, f"Mismatch on {strat} with cursor {last_id}:\nGo: {go_ids}\nPy: {py_ids}"
+        assert go_ids == py_ids, f"Mismatch on {strat}:\nGo: {go_ids}\nPy: {py_ids}"
 
-    print("  ✓ All scheduler strategies (max_quota, least_used, round_robin) passed with 100% parity.")
+    print("  ✓ All scheduler strategies (max_quota) passed with 100% parity.")
 
 def test_differential_auth():
     print("Testing differential auth...")
