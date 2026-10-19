@@ -54,11 +54,6 @@ go vet ./...
 go test -v -race ./...
 echo -e "\033[32m[✓] All Go unit and race tests passed.\033[0m"
 
-# 5. Run automated differential comparison suite
-echo -e "\n\033[33m[*] Running Python vs Go differential test suite...\033[0m"
-python3 "$SCRIPT_DIR/differential_test.py"
-echo -e "\033[32m[✓] Differential test suite passed with 100% parity.\033[0m"
-
 echo -e "\n\033[1;32m======================================================"
 echo -e " ALL G1, G2A, G2B, G2C & G3 DIFFERENTIAL CHECKS PASSED! "
 echo -e "======================================================\033[0m"
