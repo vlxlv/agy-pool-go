@@ -164,3 +164,33 @@ func TestApplyAffinity_BypassedOnHighInFlight(t *testing.T) {
 		t.Fatalf("expected affinity to resume after in-flight drops")
 	}
 }
+
+func TestApplyAffinity_BypassedOnDepleted(t *testing.T) {
+	mgr := NewAffinityManager(5 * time.Minute)
+	now := time.Now()
+
+	zeroFrac := 0.0
+	futureReset := float64(now.Add(1 * time.Hour).Unix())
+
+	accA := &storage.Account{ID: "acc-healthy"}
+	accB := &storage.Account{
+		ID: "acc-depleted",
+		LastQuota: &storage.QuotaState{
+			Gemini5H: &storage.QuotaWindow{
+				Fraction:  &zeroFrac,
+				ResetTime: futureReset,
+			},
+		},
+	}
+	candidates := []*storage.Account{accA, accB}
+
+	mgr.Set("session-depleted", "acc-depleted", now)
+
+	reordered, matched := mgr.ApplyAffinity(candidates, "session-depleted", now)
+	if matched {
+		t.Fatalf("expected matched == false for depleted account, got true")
+	}
+	if len(reordered) != 2 || reordered[0].ID != "acc-healthy" || reordered[1].ID != "acc-depleted" {
+		t.Fatalf("expected candidates unchanged, got %v", reordered)
+	}
+}

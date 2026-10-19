@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/observability"
+	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -119,9 +120,10 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 	nowSecs := float64(now.Unix())
 	for i, acc := range candidates {
 		if acc != nil && acc.ID == boundID {
-			// Only keep affinity if account is healthy, not in reserve, not in cooldown or restricted,
+			// Only keep affinity if account is healthy, not in reserve, not depleted, not in cooldown or restricted,
 			// and active in-flight concurrency does not exceed MaxAffinityInFlight threshold.
 			if !scheduler.IsRestricted(acc) && !scheduler.IsReserveCandidate(acc, nowSecs) &&
+				!quota.ComputeCapacityState(acc, nowSecs).IsDepleted &&
 				(acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs) &&
 				observability.GetInFlightGeneration(acc.ID) < MaxAffinityInFlight {
 				targetIdx = i
