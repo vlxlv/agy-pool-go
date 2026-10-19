@@ -1355,3 +1355,35 @@ func TestOrderCandidates_Smart_UnknownQuotaSortsAfterKnownQuota(t *testing.T) {
 		t.Fatalf("expected known-quota account to outrank nil-quota unknown account under smart, got %s", ordered2[0].ID)
 	}
 }
+
+func TestOrderCandidates_Smart_InFlightSpillsToNextTier(t *testing.T) {
+	observability.ResetInFlight()
+	defer observability.ResetInFlight()
+
+	now := 1700000000.0
+	acc := func(id string, frac float64) *storage.Account {
+		return &storage.Account{
+			ID:     id,
+			Status: "active",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(frac), ResetTime: "2026-09-16T16:00:00Z"},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(frac), ResetTime: "2026-09-23T12:00:00Z"},
+				UpdatedAt:    int64Ptr(int64(now - 10)),
+			},
+		}
+	}
+	top, next := acc("acc_top", 0.85), acc("acc_next", 0.70)
+
+	for i := 1; i <= smartInFlightPerTier; i++ {
+		done := observability.StartInFlightGeneration("acc_top")
+		defer done()
+		want := "acc_top"
+		if i == smartInFlightPerTier {
+			want = "acc_next" // one tier of in-flight penalty ties the tiers; the idle account wins
+		}
+		ordered := OrderCandidates([]*storage.Account{next, top}, config.StrategySmart, nil, now)
+		if ordered[0].ID != want {
+			t.Fatalf("in-flight=%d: first = %s, want %s", i, ordered[0].ID, want)
+		}
+	}
+}
