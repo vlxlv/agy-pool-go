@@ -136,7 +136,6 @@ agy-pool-go/
 │   └── cli/                        # Expected CLI stdout/stderr golden files
 │
 ├── scripts/
-│   ├── dual-test.sh                # Differential Python vs Go test runner
 │   └── candidate-smoke.sh          # Live candidate verification harness
 │
 ├── go.mod
@@ -839,6 +838,8 @@ testdata/
 ## 30. Differential Testing Strategy & Dual-Runner Harness
 
 ### Dual-Runner Architecture `[FROZEN]`
+
+> Removed: `scripts/dual-test.sh` and `scripts/differential_test.py` required an `agy_pool` Python package that is not available (the reference is a single-file script), so they could not run. The design below is kept for reference.
 
 A differential test script (`scripts/dual-test.sh`) executes identical operations against both implementations and verifies state equivalence:
 

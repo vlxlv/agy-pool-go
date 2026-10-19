@@ -164,11 +164,6 @@ Python is **not** required for:
 - Normal unit tests or race detector tests
 - GitHub Actions CI workflows
 
-To optionally regenerate golden fixtures from the reference Python implementation and run the Go tests:
-```bash
-PYTHON_REFERENCE=/path/to/agy-pool ./scripts/dual-test.sh
-```
-
 ---
 
 ## Release & CI Architecture
