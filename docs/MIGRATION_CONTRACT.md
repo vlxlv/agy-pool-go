@@ -415,7 +415,7 @@ Given snapshot age `age = now - last_quota.updated_at`:
 |---|---|---|---|
 | **fresh** | `age <= 60s` AND all window reset times are in the future | `2` | None |
 | **aging** | `61s <= age <= 300s` AND all reset times in future | `2` | Async refresh in background |
-| **stale** | `age > 300s` OR any window reset time has passed (`reset_time <= now`) | `1` | Async refresh required |
+| **stale** | `age > 300s` OR a window reset time has passed since the snapshot (`updated_at < reset_time <= now`); a reset already past at snapshot time means the refresh did not renew it and does not make the snapshot stale | `1` | Async refresh required |
 | **unknown** | Missing `last_quota` OR `updated_at <= 0` | `0` | Immediate refresh required |
 
 ### Single-Flight Background Refresh `[FROZEN]`

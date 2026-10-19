@@ -125,11 +125,13 @@ func Freshness(acc *storage.Account, now float64) FreshnessInfo {
 		age = 0
 	}
 
-	// Check if any window reset time has passed
+	// Check if any window reset time has passed since the snapshot was taken. A reset already past at
+	// snapshot time means the refresh did not renew that window; marking it stale would only starve the
+	// account, since refreshing again returns the same reset.
 	resetPassed := false
 	checkWindow := func(w *storage.QuotaWindow) {
 		if w != nil && w.ResetTime != nil {
-			if ts := ParseISOOrTimestamp(w.ResetTime); ts != nil && *ts <= now {
+			if ts := ParseISOOrTimestamp(w.ResetTime); ts != nil && *ts <= now && *ts > updated {
 				resetPassed = true
 			}
 		}

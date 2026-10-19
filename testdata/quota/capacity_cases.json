@@ -193,12 +193,12 @@
       "is_depleted": false
     },
     "expected_freshness": {
-      "class": "stale",
-      "rank": 1,
+      "class": "fresh",
+      "rank": 3,
       "age": 10.0
     },
-    "expected_rank": 1,
-    "expected_refresh_needed": true
+    "expected_rank": 2,
+    "expected_refresh_needed": false
   },
   {
     "test_id": "legacy_quota_state",
