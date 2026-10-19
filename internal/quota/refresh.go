@@ -398,6 +398,11 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, account
 	}
 
 	for _, name := range candidates {
+		// Only Gemini models carry the Gemini window; the default agent model may be Claude/GPT,
+		// whose quota and reset time are unrelated.
+		if !strings.HasPrefix(name, "gemini") {
+			continue
+		}
 		if model, exists := res.Models[name]; exists && model.QuotaInfo != nil {
 			frac := ParseQuotaFraction(model.QuotaInfo.RemainingFraction)
 			if frac != nil {
