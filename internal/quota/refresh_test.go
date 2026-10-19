@@ -638,3 +638,36 @@ func TestQueryQuota_FallbackIgnoresNonGeminiDefaultModel(t *testing.T) {
 		t.Errorf("expected one no-Gemini-buckets warning, got %q", warnings)
 	}
 }
+
+// With no known Gemini model listed, the fallback must pick by sorted name, not by map iteration.
+func TestQueryQuota_FallbackPicksGeminiModelDeterministically(t *testing.T) {
+	setupQuotaTestDir(t)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "retrieveUserQuotaSummary") {
+			fmt.Fprint(w, `{"groups":[]}`)
+			return
+		}
+		fmt.Fprint(w, `{"models":{
+			"gemini-z":{"quotaInfo":{"remainingFraction":0.3,"resetTime":"2030-01-01T00:00:00Z"}},
+			"gemini-a":{"quotaInfo":{"remainingFraction":0.7,"resetTime":"2030-01-01T00:00:00Z"}},
+			"gemini-m":{"quotaInfo":{"remainingFraction":0.5,"resetTime":"2030-01-01T00:00:00Z"}}}}`)
+	}))
+	defer ts.Close()
+
+	BackendURLBaseProvider = func() string { return ts.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
+
+	for i := 0; i < 20; i++ {
+		acc := &storage.Account{ID: fmt.Sprintf("acc-det-%d", i)}
+		_ = storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}})
+		res, err := QueryQuota(acc)
+		if err != nil {
+			t.Fatalf("QueryQuota failed: %v", err)
+		}
+		if res.Gemini5H == nil || *res.Gemini5H.Fraction != 0.7 {
+			t.Fatalf("run %d: expected gemini-a (0.7), got %+v", i, res.Gemini5H)
+		}
+	}
+}

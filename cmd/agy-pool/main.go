@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -15,12 +13,9 @@ import (
 )
 
 func main() {
-	// Upstream only reports Gemini quota buckets to a versioned agy client UA; a bare "antigravity/cli"
-	// gets the 3p buckets alone. Built lazily so commands that never call upstream skip `agy --version`.
-	ua := sync.OnceValue(func() string {
-		return fmt.Sprintf("antigravity/cli/%s (aidev_client; os_type=%s; arch=%s; auth_method=consumer)",
-			diagnostics.GetInstalledAgyVersion(), runtime.GOOS, runtime.GOARCH)
-	})
+	// Upstream only reports Gemini quota to a versioned agy client UA (see quota.AgyClientUA).
+	// Built lazily so commands that never call upstream skip `agy --version`.
+	ua := sync.OnceValue(func() string { return quota.AgyClientUA(diagnostics.GetInstalledAgyVersion()) })
 	quota.UserAgentProvider = ua
 	proxy.UserAgentProvider = ua
 

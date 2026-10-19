@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -219,5 +220,12 @@ func TestFreshness_ResetPassedOnlyAfterSnapshotIsStale(t *testing.T) {
 	healthy.LastQuota.GeminiWeekly = nil
 	if !GeminiQuotaNotRenewed(healthy) {
 		t.Errorf("expected GeminiQuotaNotRenewed when a Gemini window is missing")
+	}
+}
+
+func TestAgyClientUA(t *testing.T) {
+	want := "antigravity/cli/1.4.2 (aidev_client; os_type=" + runtime.GOOS + "; arch=" + runtime.GOARCH + "; auth_method=consumer)"
+	if got := AgyClientUA("1.4.2"); got != want {
+		t.Fatalf("AgyClientUA = %q, want %q", got, want)
 	}
 }

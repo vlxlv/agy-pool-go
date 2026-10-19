@@ -3,6 +3,7 @@ package quota
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -440,6 +441,13 @@ const (
 	// DefaultUA is the default user agent for proxy forwarding.
 	DefaultUA = "antigravity/cli"
 )
+
+// AgyClientUA returns the User-Agent the agy CLI sends for the given agy version. Upstream reports
+// Gemini quota buckets only to this versioned form; the bare DefaultUA gets the 3p buckets alone.
+func AgyClientUA(version string) string {
+	return fmt.Sprintf("antigravity/cli/%s (aidev_client; os_type=%s; arch=%s; auth_method=consumer)",
+		version, runtime.GOOS, runtime.GOARCH)
+}
 
 // IsQuotaError reports whether an HTTP response status and body indicate quota exhaustion or rate limits.
 func IsQuotaError(status int, body []byte) bool {
