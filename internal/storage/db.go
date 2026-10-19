@@ -219,6 +219,10 @@ func OpenStateDB(dbPath string) (*StateDB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to create in-flight lease table on %q: %w", dbPath, err)
 	}
+	if err := ensureLeaseColumns(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to migrate in-flight lease table on %q: %w", dbPath, err)
+	}
 
 	_ = EnsureFilePermissions(dbPath)
 

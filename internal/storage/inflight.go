@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -16,8 +17,40 @@ const inflightLeaseDDL = `CREATE TABLE IF NOT EXISTS inflight_leases (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	account_id TEXT NOT NULL,
 	pid INTEGER NOT NULL,
-	started_at INTEGER NOT NULL
+	started_at INTEGER NOT NULL,
+	pid_ns TEXT NOT NULL DEFAULT ''
 );`
+
+// ensureLeaseColumns adds pid_ns to lease tables created before it existed. Rows from those versions
+// keep ” (namespace unknown) and are never pruned by PID, only by leaseMaxAge.
+func ensureLeaseColumns(db *sql.DB) error {
+	rows, err := db.Query("SELECT name FROM pragma_table_info('inflight_leases')")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == "pid_ns" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE inflight_leases ADD COLUMN pid_ns TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// pidNamespace identifies this process's PID namespace. A PID, and kill(pid, 0), only identify a
+// process within one namespace, so processes sharing the DB from different containers are told apart.
+var pidNamespace = func() string {
+	ns, _ := os.Readlink("/proc/self/ns/pid")
+	return ns
+}()
 
 // leaseMaxAge bounds how long a lease can outlive its request, so a lease whose release failed
 // inside a long-lived process stops counting against the account.
@@ -27,8 +60,9 @@ const leaseMaxAge = time.Hour
 // falls back to in-process in-flight counts instead of stalling every generation request.
 const reserveBusyTimeout = 100 * time.Millisecond
 
-// clearOwnStaleLeases drops leases left by a dead process whose PID this process now reuses.
-var clearOwnStaleLeases sync.Once
+// ownStaleLeasesCleared records that leases left by a dead process whose PID and namespace this
+// process now reuses were deleted; it is set only after that delete commits, so a failed attempt retries.
+var ownStaleLeasesCleared atomic.Bool
 
 // ReserveInFlight runs pick inside a cross-process write transaction (BEGIN IMMEDIATE), passing the
 // in-flight counts held by other live processes, and records a lease for the account ID pick returns.
@@ -44,19 +78,17 @@ func ReserveInFlight(pick func(remote map[string]int64) string) (accountID strin
 
 	var leaseID int64
 	err = sdb.TryUpdate(context.Background(), reserveBusyTimeout, func(tx *sql.Tx) error {
-		var ferr error
-		clearOwnStaleLeases.Do(func() {
-			_, ferr = tx.Exec("DELETE FROM inflight_leases WHERE pid = ?", self)
-		})
-		if ferr != nil {
-			return ferr
+		if !ownStaleLeasesCleared.Load() {
+			if _, err := tx.Exec("DELETE FROM inflight_leases WHERE pid = ? AND pid_ns = ?", self, pidNamespace); err != nil {
+				return err
+			}
 		}
 		if err := pruneDeadLeases(tx, self); err != nil {
 			return err
 		}
 
 		remote := make(map[string]int64)
-		rows, err := tx.Query("SELECT account_id, COUNT(*) FROM inflight_leases WHERE pid != ? GROUP BY account_id", self)
+		rows, err := tx.Query("SELECT account_id, COUNT(*) FROM inflight_leases WHERE NOT (pid = ? AND pid_ns = ?) GROUP BY account_id", self, pidNamespace)
 		if err != nil {
 			return err
 		}
@@ -78,16 +110,20 @@ func ReserveInFlight(pick func(remote map[string]int64) string) (accountID strin
 		if accountID == "" {
 			return nil
 		}
-		res, err := tx.Exec("INSERT INTO inflight_leases (account_id, pid, started_at) VALUES (?, ?, ?)",
-			accountID, self, time.Now().Unix())
+		res, err := tx.Exec("INSERT INTO inflight_leases (account_id, pid, started_at, pid_ns) VALUES (?, ?, ?, ?)",
+			accountID, self, time.Now().Unix(), pidNamespace)
 		if err != nil {
 			return err
 		}
 		leaseID, err = res.LastInsertId()
 		return err
 	})
-	if err != nil || leaseID == 0 {
+	if err != nil {
 		return accountID, release, err
+	}
+	ownStaleLeasesCleared.Store(true)
+	if leaseID == 0 {
+		return accountID, release, nil
 	}
 
 	var once sync.Once
@@ -112,7 +148,8 @@ func pruneDeadLeases(tx *sql.Tx, self int) error {
 	if _, err := tx.Exec("DELETE FROM inflight_leases WHERE started_at < ?", time.Now().Add(-leaseMaxAge).Unix()); err != nil {
 		return err
 	}
-	rows, err := tx.Query("SELECT DISTINCT pid FROM inflight_leases WHERE pid != ?", self)
+	// Only leases from this PID namespace can be checked with kill(pid, 0); others age out.
+	rows, err := tx.Query("SELECT DISTINCT pid FROM inflight_leases WHERE pid != ? AND pid_ns = ?", self, pidNamespace)
 	if err != nil {
 		return err
 	}
@@ -132,7 +169,7 @@ func pruneDeadLeases(tx *sql.Tx, self int) error {
 		return err
 	}
 	for _, pid := range dead {
-		if _, err := tx.Exec("DELETE FROM inflight_leases WHERE pid = ?", pid); err != nil {
+		if _, err := tx.Exec("DELETE FROM inflight_leases WHERE pid = ? AND pid_ns = ?", pid, pidNamespace); err != nil {
 			return err
 		}
 	}
