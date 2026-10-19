@@ -17,11 +17,15 @@ func TestReserveInFlightSeesOtherProcessesAndPrunesDead(t *testing.T) {
 	}
 
 	now := time.Now().Unix()
-	// Leases from a live foreign process (our parent) and a dead one (PID far above pid_max).
+	ownStaleLeasesCleared.Store(false)
+	// a: live foreign process (our parent); b: dead PID (far above pid_max) in our namespace;
+	// c: expired; d: dead PID in another namespace, which kill(pid, 0) cannot judge;
+	// e: left by a dead process that had our PID and namespace.
 	err = sdb.Update(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.Exec(`INSERT INTO inflight_leases (account_id, pid, started_at) VALUES
-			('a', ?, ?), ('a', ?, ?), ('b', 99999999, 0), ('c', ?, ?)`,
-			os.Getppid(), now, os.Getppid(), now, os.Getppid(), time.Now().Add(-2*time.Hour).Unix())
+		_, err := tx.Exec(`INSERT INTO inflight_leases (account_id, pid, started_at, pid_ns) VALUES
+			('a', ?, ?, ?), ('a', ?, ?, ?), ('b', 99999999, ?, ?), ('c', ?, ?, ?), ('d', 99999999, ?, 'pid:[other]'), ('e', ?, ?, ?)`,
+			os.Getppid(), now, pidNamespace, os.Getppid(), now, pidNamespace, now, pidNamespace,
+			os.Getppid(), time.Now().Add(-2*time.Hour).Unix(), pidNamespace, now, os.Getpid(), now, pidNamespace)
 		return err
 	})
 	if err != nil {
@@ -36,8 +40,8 @@ func TestReserveInFlightSeesOtherProcessesAndPrunesDead(t *testing.T) {
 	if err != nil || id != "b" {
 		t.Fatalf("ReserveInFlight = %q, %v", id, err)
 	}
-	if seen["a"] != 2 || seen["b"] != 0 || seen["c"] != 0 {
-		t.Fatalf("remote counts = %v, want a=2, dead b lease pruned, and expired c lease pruned", seen)
+	if seen["a"] != 2 || seen["b"] != 0 || seen["c"] != 0 || seen["d"] != 1 || seen["e"] != 0 {
+		t.Fatalf("remote counts = %v, want a=2, dead b and expired c pruned, foreign-namespace d kept, own e excluded", seen)
 	}
 
 	count := func() (n int) {
@@ -119,4 +123,26 @@ func TestReserveInFlightWaitsOutBriefInProcessWriter(t *testing.T) {
 		t.Fatalf("ReserveInFlight behind a long writer = %v, pick called = %v; want ErrWriteBusy without pick", err, called)
 	}
 	time.Sleep(3 * reserveBusyTimeout) // let the holder release before cleanup
+}
+
+func TestEnsureLeaseColumnsMigratesOldTable(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/old.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE inflight_leases (id INTEGER PRIMARY KEY AUTOINCREMENT,
+		account_id TEXT NOT NULL, pid INTEGER NOT NULL, started_at INTEGER NOT NULL);
+		INSERT INTO inflight_leases (account_id, pid, started_at) VALUES ('a', 1, 0);`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // second call must be a no-op
+		if err := ensureLeaseColumns(db); err != nil {
+			t.Fatalf("ensureLeaseColumns #%d: %v", i+1, err)
+		}
+	}
+	var ns string
+	if err := db.QueryRow("SELECT pid_ns FROM inflight_leases WHERE account_id = 'a'").Scan(&ns); err != nil || ns != "" {
+		t.Fatalf("migrated row pid_ns = %q, %v; want empty", ns, err)
+	}
 }
