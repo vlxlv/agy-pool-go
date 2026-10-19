@@ -37,6 +37,9 @@ var (
 	// HTTPClient allows mocking or customizing the HTTP client for tests.
 	HTTPClient *http.Client
 
+	// WarnHook receives refresh anomalies worth surfacing in the gateway log; nil drops them.
+	WarnHook func(msg string)
+
 	refreshMu       sync.Mutex
 	refreshInFlight = make(map[string]bool)
 	refreshRetry    = make(map[string]retryEntry)
@@ -299,6 +302,9 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 				}
 			}
 			quotaErr = errors.New("quota response contained no Gemini quota buckets")
+			if WarnHook != nil {
+				WarnHook(fmt.Sprintf("account %s: quota summary returned no Gemini buckets; falling back to fetchAvailableModels, Gemini weekly quota is not refreshed", account.ID))
+			}
 		}
 	}
 
