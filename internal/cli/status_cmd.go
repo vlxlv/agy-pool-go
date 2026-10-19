@@ -351,6 +351,8 @@ func StatusCmd(stdout, stderr io.Writer, args ...string) int {
 						observability.FormatNumber(stats.PersistenceErrors))
 					fmt.Fprintf(stdout, "    %-18s %6s\n", "Replay prevented",
 						observability.FormatNumber(stats.NoReplayPrevented))
+					fmt.Fprintf(stdout, "    %-18s %6s\n", "Lease fallbacks",
+						observability.FormatNumber(stats.LeaseFallbacks))
 				}
 			} else {
 				fmt.Fprintf(stdout, "Runtime : (metrics unavailable)\n")

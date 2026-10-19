@@ -358,13 +358,22 @@ func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) (err er
 var ErrWriteBusy = errors.New("state database write lock busy")
 
 // TryUpdate runs fn in a BEGIN IMMEDIATE transaction like Update, but waits at most busy for the
-// SQLite write lock and does not queue behind other in-process writers, returning ErrWriteBusy instead.
+// SQLite write lock or other in-process writers, returning ErrWriteBusy instead of queueing.
 // Hot paths use it so a contended DB degrades them rather than stalling them for seconds.
 func (s *StateDB) TryUpdate(ctx context.Context, busy time.Duration, fn func(tx *sql.Tx) error) (err error) {
-	if !s.writeMu.TryLock() {
-		return ErrWriteBusy
+	// Wait for in-process writers within the same budget instead of failing at once, so routine
+	// writes such as lease releases do not push concurrent reservations onto the fallback.
+	deadline := time.Now().Add(busy)
+	for !s.writeMu.TryLock() {
+		if time.Now().After(deadline) {
+			return ErrWriteBusy
+		}
+		time.Sleep(time.Millisecond)
 	}
 	defer s.writeMu.Unlock()
+	if busy = time.Until(deadline); busy < time.Millisecond {
+		busy = time.Millisecond
+	}
 
 	s.mu.Lock()
 	db := s.db

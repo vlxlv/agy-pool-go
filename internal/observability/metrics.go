@@ -22,6 +22,7 @@ type Metrics struct {
 	AuthRefreshFailure   atomic.Uint64
 	PersistenceErrors    atomic.Uint64
 	NoReplayPrevented    atomic.Uint64
+	LeaseFallbacks       atomic.Uint64
 }
 
 // Snapshot represents a point-in-time snapshot of process-lifetime counters.
@@ -40,6 +41,7 @@ type Snapshot struct {
 	AuthRefreshFailure   uint64 `json:"auth_refresh_failure_total"`
 	PersistenceErrors    uint64 `json:"persistence_errors_total"`
 	NoReplayPrevented    uint64 `json:"no_replay_prevented_total"`
+	LeaseFallbacks       uint64 `json:"lease_fallbacks_total"`
 }
 
 var globalMetrics Metrics
@@ -60,6 +62,7 @@ func Reset() {
 	globalMetrics.AuthRefreshFailure.Store(0)
 	globalMetrics.PersistenceErrors.Store(0)
 	globalMetrics.NoReplayPrevented.Store(0)
+	globalMetrics.LeaseFallbacks.Store(0)
 	ResetInFlight()
 }
 
@@ -80,6 +83,7 @@ func GetSnapshot() Snapshot {
 		AuthRefreshFailure:   globalMetrics.AuthRefreshFailure.Load(),
 		PersistenceErrors:    globalMetrics.PersistenceErrors.Load(),
 		NoReplayPrevented:    globalMetrics.NoReplayPrevented.Load(),
+		LeaseFallbacks:       globalMetrics.LeaseFallbacks.Load(),
 	}
 }
 
@@ -146,6 +150,12 @@ func RecordAuthRefreshFailure() {
 // RecordPersistenceError increments persistence_errors_total.
 func RecordPersistenceError() {
 	globalMetrics.PersistenceErrors.Add(1)
+}
+
+// RecordLeaseFallback increments lease_fallbacks_total: a routing pick that could not record its
+// cross-process in-flight lease and was balanced on this process's counts alone.
+func RecordLeaseFallback() {
+	globalMetrics.LeaseFallbacks.Add(1)
 }
 
 // RecordNoReplayPrevented increments no_replay_prevented_total.
