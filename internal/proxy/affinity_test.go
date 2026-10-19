@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -220,5 +221,44 @@ func TestApplyAffinity_BypassedOverWeeklyPace(t *testing.T) {
 	// Same account on pace keeps its session.
 	if reordered, matched := mgr.ApplyAffinity([]*storage.Account{other, bound(0.90)}, "session-pace", now); !matched || reordered[0].ID != "acc-bound" {
 		t.Fatalf("on-pace account: matched=%v first=%s, want affinity kept", matched, reordered[0].ID)
+	}
+}
+
+func TestAffinityManagerPrunesExpiredAndCapsEntries(t *testing.T) {
+	m := NewAffinityManager(time.Minute)
+	t0 := time.Unix(1_000_000, 0)
+	m.Set("old", "acc-1", t0)
+	m.Set("live", "acc-2", t0.Add(50*time.Second))
+	m.Prune(t0.Add(70 * time.Second))
+	if _, ok := m.entries["old"]; ok {
+		t.Fatal("expired binding survived Prune")
+	}
+	if id, ok := m.Get("live", t0.Add(70*time.Second)); !ok || id != "acc-2" {
+		t.Fatalf("active binding lost: %q %v", id, ok)
+	}
+
+	// Set sweeps expired bindings once the map reaches affinityPruneAt.
+	m.Clear()
+	for i := 0; i < affinityPruneAt; i++ {
+		m.Set(fmt.Sprintf("s%d", i), "acc", t0)
+	}
+	m.Set("fresh", "acc", t0.Add(2*time.Minute))
+	if len(m.entries) != 1 {
+		t.Fatalf("entries after expired sweep = %d, want 1", len(m.entries))
+	}
+
+	// Active bindings never exceed affinityMaxEntries; the soonest-expiring one is evicted.
+	m.Clear()
+	for i := 0; i < affinityMaxEntries+10; i++ {
+		m.Set(fmt.Sprintf("s%d", i), "acc", t0.Add(time.Duration(i)*time.Millisecond))
+	}
+	if len(m.entries) != affinityMaxEntries {
+		t.Fatalf("entries = %d, want cap %d", len(m.entries), affinityMaxEntries)
+	}
+	if _, ok := m.entries["s0"]; ok {
+		t.Fatal("oldest binding was not evicted")
+	}
+	if _, ok := m.entries[fmt.Sprintf("s%d", affinityMaxEntries+9)]; !ok {
+		t.Fatal("newest binding missing")
 	}
 }
