@@ -807,6 +807,9 @@ func (h *Handler) dispatchAccount(
 		defer done()
 		if release, err := storage.LeaseInFlight(acc.ID); err == nil {
 			defer release()
+		} else {
+			observability.RecordLeaseFallback()
+			logMessage("PROXY WARN", fmt.Sprintf("in-flight lease not recorded on failover for %s, balancing on local counts: %v", acc.ID, err))
 		}
 	}
 
