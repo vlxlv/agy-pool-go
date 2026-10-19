@@ -87,7 +87,8 @@ func OpenStateDB(dbPath string) (*StateDB, error) {
 		}
 	}
 
-	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)",
+	// journal_size_limit truncates the WAL back to 1 MiB after a checkpoint instead of keeping its high-water mark.
+	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=journal_size_limit(1048576)",
 		dbPath, DefaultBusyTimeoutMs)
 
 	db, err := sql.Open("sqlite", dsn)
@@ -266,6 +267,19 @@ func GetStateDB() (*StateDB, error) {
 	activeStateDB = sdb
 	activeStateDBPath = currentPath
 	return sdb, nil
+}
+
+// CheckpointPassive copies committed WAL frames into the main database without waiting on readers or writers,
+// so long-lived connections in other processes cannot pin the WAL indefinitely.
+func (s *StateDB) CheckpointPassive() error {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+	if db == nil {
+		return errors.New("state database is closed")
+	}
+	_, err := db.Exec("PRAGMA wal_checkpoint(PASSIVE);")
+	return err
 }
 
 // Close closes the database connection.

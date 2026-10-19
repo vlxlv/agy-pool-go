@@ -181,3 +181,39 @@ func TestCascadeDeletion(t *testing.T) {
 		t.Fatalf("foreign key CASCADE failed: rt=%d, q=%d", rtCount, qCount)
 	}
 }
+
+func TestCheckpointPassiveBoundsWAL(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	sdb, err := OpenStateDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStateDB failed: %v", err)
+	}
+	defer sdb.Close()
+
+	put := func(v string) {
+		t.Helper()
+		if err := sdb.Update(context.Background(), func(tx *sql.Tx) error {
+			_, err := tx.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('wal_test', ?)", v)
+			return err
+		}); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+	}
+	big := make([]byte, 3<<20)
+	for i := range big {
+		big[i] = 'x'
+	}
+	put(string(big))
+	put("")
+	if err := sdb.CheckpointPassive(); err != nil {
+		t.Fatalf("CheckpointPassive failed: %v", err)
+	}
+	put("small") // the first write after a full checkpoint restarts the WAL and applies journal_size_limit
+	fi, err := os.Stat(dbPath + "-wal")
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if fi.Size() > 1<<20 {
+		t.Fatalf("WAL not truncated to journal_size_limit: %d bytes", fi.Size())
+	}
+}
