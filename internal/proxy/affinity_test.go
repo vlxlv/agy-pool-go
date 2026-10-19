@@ -194,3 +194,31 @@ func TestApplyAffinity_BypassedOnDepleted(t *testing.T) {
 		t.Fatalf("expected candidates unchanged, got %v", reordered)
 	}
 }
+
+func TestApplyAffinity_BypassedOverWeeklyPace(t *testing.T) {
+	mgr := NewAffinityManager(5 * time.Minute)
+	now := time.Now()
+	reset5 := float64(now.Add(4 * time.Hour).Unix())
+	reset7 := float64(now.Add(6 * 24 * time.Hour).Unix())
+	bound := func(q7 float64) *storage.Account {
+		q5 := 0.9
+		return &storage.Account{
+			ID: "acc-bound",
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: &q5, ResetTime: reset5},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: &q7, ResetTime: reset7},
+			},
+		}
+	}
+	other := &storage.Account{ID: "acc-other"}
+	mgr.Set("session-pace", "acc-bound", now)
+
+	// 40% weekly left with 6 of 7 days to go: far ahead of pace, so the session must not pin it.
+	if reordered, matched := mgr.ApplyAffinity([]*storage.Account{other, bound(0.40)}, "session-pace", now); matched || reordered[0].ID != "acc-other" {
+		t.Fatalf("over-pace account: matched=%v first=%s, want affinity bypassed", matched, reordered[0].ID)
+	}
+	// Same account on pace keeps its session.
+	if reordered, matched := mgr.ApplyAffinity([]*storage.Account{other, bound(0.90)}, "session-pace", now); !matched || reordered[0].ID != "acc-bound" {
+		t.Fatalf("on-pace account: matched=%v first=%s, want affinity kept", matched, reordered[0].ID)
+	}
+}
