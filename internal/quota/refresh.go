@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -390,18 +392,15 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, account
 		candidates = append(candidates, res.DefaultAgentModelID)
 	}
 	candidates = append(candidates, "gemini-3.8-flash-high", "gemini-3.6-flash-high", "gemini-3.5-flash-medium")
+	// Remaining models in sorted order, so the pick does not depend on map iteration.
+	rest := make([]string, 0, len(res.Models))
 	for name := range res.Models {
-		found := false
-		for _, c := range candidates {
-			if c == name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			candidates = append(candidates, name)
+		if !slices.Contains(candidates, name) {
+			rest = append(rest, name)
 		}
 	}
+	sort.Strings(rest)
+	candidates = append(candidates, rest...)
 
 	for _, name := range candidates {
 		// Only Gemini models carry the Gemini window; the default agent model may be Claude/GPT,
