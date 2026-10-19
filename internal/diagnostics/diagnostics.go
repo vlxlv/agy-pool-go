@@ -475,6 +475,11 @@ func defaultTLSProbe(host string, timeout time.Duration) error {
 
 // RunDoctor performs end-to-end system diagnostic checks across runtime, network, and pool state.
 // Returns true if no fatal issues found (warnings are non-fatal).
+// LeaseFallbackRateHigh reports whether more than 1% of routing decisions fell back to local-only in-flight counts.
+func LeaseFallbackRateHigh(fallbacks, decisions uint64) bool {
+	return fallbacks*100 > decisions
+}
+
 func RunDoctor(out io.Writer) bool {
 	if out == nil {
 		out = os.Stdout
@@ -625,6 +630,14 @@ func RunDoctor(out io.Writer) bool {
 			}
 			fmt.Fprintf(out, "  %s✓%s Gateway Daemon: RUNNING (PID %d%s) on port %d\n",
 				clrGreen, clrReset, info.PID, verTag, config.DefaultPort)
+		}
+		ctx := &daemon.InstanceContext{DataDir: config.GetDataDir()}
+		if stats, err := ctx.GetRuntimeStats(info.PID); err == nil && LeaseFallbackRateHigh(stats.LeaseFallbacks, stats.RoutingDecisions) {
+			fmt.Fprintf(out, "  %s⚠%s Lease Fallbacks: %d of %d routing decisions could not record an in-flight lease\n",
+				clrYellow, clrReset, stats.LeaseFallbacks, stats.RoutingDecisions)
+			fmt.Fprintf(out, "    %s↳ state.db writes are slow or locked (disk I/O, network mount); cross-process balancing is degraded.%s\n",
+				clrDim, clrReset)
+			warningsFound++
 		}
 	} else if listening {
 		fmt.Fprintf(out, "  %s⚠%s Gateway Daemon: Port %d is in use by another process\n",
