@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestReserveInFlightSeesOtherProcessesAndPrunesDead(t *testing.T) {
@@ -14,10 +15,12 @@ func TestReserveInFlightSeesOtherProcessesAndPrunesDead(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	now := time.Now().Unix()
 	// Leases from a live foreign process (our parent) and a dead one (PID far above pid_max).
 	err = sdb.Update(context.Background(), func(tx *sql.Tx) error {
 		_, err := tx.Exec(`INSERT INTO inflight_leases (account_id, pid, started_at) VALUES
-			('a', ?, 0), ('a', ?, 0), ('b', 99999999, 0)`, os.Getppid(), os.Getppid())
+			('a', ?, ?), ('a', ?, ?), ('b', 99999999, 0), ('c', ?, ?)`,
+			os.Getppid(), now, os.Getppid(), now, os.Getppid(), time.Now().Add(-2*time.Hour).Unix())
 		return err
 	})
 	if err != nil {
@@ -32,8 +35,8 @@ func TestReserveInFlightSeesOtherProcessesAndPrunesDead(t *testing.T) {
 	if err != nil || id != "b" {
 		t.Fatalf("ReserveInFlight = %q, %v", id, err)
 	}
-	if seen["a"] != 2 || seen["b"] != 0 {
-		t.Fatalf("remote counts = %v, want a=2 and dead b lease pruned", seen)
+	if seen["a"] != 2 || seen["b"] != 0 || seen["c"] != 0 {
+		t.Fatalf("remote counts = %v, want a=2, dead b lease pruned, and expired c lease pruned", seen)
 	}
 
 	count := func() (n int) {

@@ -19,6 +19,10 @@ const inflightLeaseDDL = `CREATE TABLE IF NOT EXISTS inflight_leases (
 	started_at INTEGER NOT NULL
 );`
 
+// leaseMaxAge bounds how long a lease can outlive its request, so a lease whose release failed
+// inside a long-lived process stops counting against the account.
+const leaseMaxAge = time.Hour
+
 // clearOwnStaleLeases drops leases left by a dead process whose PID this process now reuses.
 var clearOwnStaleLeases sync.Once
 
@@ -100,6 +104,9 @@ func LeaseInFlight(accountID string) (func(), error) {
 }
 
 func pruneDeadLeases(tx *sql.Tx, self int) error {
+	if _, err := tx.Exec("DELETE FROM inflight_leases WHERE started_at < ?", time.Now().Add(-leaseMaxAge).Unix()); err != nil {
+		return err
+	}
 	rows, err := tx.Query("SELECT DISTINCT pid FROM inflight_leases WHERE pid != ?", self)
 	if err != nil {
 		return err
