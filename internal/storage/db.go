@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -350,6 +351,62 @@ func (s *StateDB) Update(ctx context.Context, fn func(tx *sql.Tx) error) (err er
 	}
 
 	_ = EnsureFilePermissions(s.path)
+	return nil
+}
+
+// ErrWriteBusy reports that TryUpdate gave up because the state DB write lock was held.
+var ErrWriteBusy = errors.New("state database write lock busy")
+
+// TryUpdate runs fn in a BEGIN IMMEDIATE transaction like Update, but waits at most busy for the
+// SQLite write lock and does not queue behind other in-process writers, returning ErrWriteBusy instead.
+// Hot paths use it so a contended DB degrades them rather than stalling them for seconds.
+func (s *StateDB) TryUpdate(ctx context.Context, busy time.Duration, fn func(tx *sql.Tx) error) (err error) {
+	if !s.writeMu.TryLock() {
+		return ErrWriteBusy
+	}
+	defer s.writeMu.Unlock()
+
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+	if db == nil {
+		return errors.New("state database is closed")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	// busy_timeout is per connection and ctx does not interrupt SQLite's busy wait, so shorten it here.
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d;", busy.Milliseconds())); err != nil {
+		return err
+	}
+	defer func() {
+		if _, rerr := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout = %d;", DefaultBusyTimeoutMs)); rerr != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn }) // drop the connection rather than pool it with a short timeout
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+			return ErrWriteBusy
+		}
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		observability.RecordPersistenceError()
+		return fmt.Errorf("failed to commit write transaction: %w", err)
+	}
 	return nil
 }
 

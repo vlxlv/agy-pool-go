@@ -23,12 +23,17 @@ const inflightLeaseDDL = `CREATE TABLE IF NOT EXISTS inflight_leases (
 // inside a long-lived process stops counting against the account.
 const leaseMaxAge = time.Hour
 
+// reserveBusyTimeout bounds how long selection waits for the shared write lock; past it the caller
+// falls back to in-process in-flight counts instead of stalling every generation request.
+const reserveBusyTimeout = 100 * time.Millisecond
+
 // clearOwnStaleLeases drops leases left by a dead process whose PID this process now reuses.
 var clearOwnStaleLeases sync.Once
 
 // ReserveInFlight runs pick inside a cross-process write transaction (BEGIN IMMEDIATE), passing the
 // in-flight counts held by other live processes, and records a lease for the account ID pick returns.
 // An empty ID records nothing. release deletes the lease and is safe to call more than once.
+// If the write lock stays busy past reserveBusyTimeout it returns ErrWriteBusy without calling pick.
 func ReserveInFlight(pick func(remote map[string]int64) string) (accountID string, release func(), err error) {
 	release = func() {}
 	sdb, err := GetStateDB()
@@ -38,7 +43,7 @@ func ReserveInFlight(pick func(remote map[string]int64) string) (accountID strin
 	self := os.Getpid()
 
 	var leaseID int64
-	err = sdb.Update(context.Background(), func(tx *sql.Tx) error {
+	err = sdb.TryUpdate(context.Background(), reserveBusyTimeout, func(tx *sql.Tx) error {
 		var ferr error
 		clearOwnStaleLeases.Do(func() {
 			_, ferr = tx.Exec("DELETE FROM inflight_leases WHERE pid = ?", self)
