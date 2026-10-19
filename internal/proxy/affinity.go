@@ -23,6 +23,13 @@ const DefaultAffinityTTL = 5 * time.Minute
 // an account can serve before affinity pinning is bypassed to prevent concurrency hot-spots and 429s.
 const MaxAffinityInFlight = 2
 
+// affinityPruneAt and affinityMaxEntries bound the session map: Set sweeps expired bindings once it
+// reaches affinityPruneAt, and evicts the soonest-expiring binding if active ones still fill affinityMaxEntries.
+const (
+	affinityPruneAt    = 512
+	affinityMaxEntries = 1024
+)
+
 type affinityRecord struct {
 	accountID string
 	expiresAt time.Time
@@ -79,11 +86,47 @@ func (m *AffinityManager) Set(sessionKey, accountID string, now time.Time) {
 		return
 	}
 	m.mu.Lock()
+	if _, exists := m.entries[sessionKey]; !exists && len(m.entries) >= affinityPruneAt {
+		m.pruneLocked(now)
+		if len(m.entries) >= affinityMaxEntries {
+			m.evictOldestLocked()
+		}
+	}
 	m.entries[sessionKey] = affinityRecord{
 		accountID: accountID,
 		expiresAt: now.Add(m.ttl),
 	}
 	m.mu.Unlock()
+}
+
+// Prune deletes expired bindings.
+func (m *AffinityManager) Prune(now time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.pruneLocked(now)
+	m.mu.Unlock()
+}
+
+func (m *AffinityManager) pruneLocked(now time.Time) {
+	for k, rec := range m.entries {
+		if now.After(rec.expiresAt) {
+			delete(m.entries, k)
+		}
+	}
+}
+
+// evictOldestLocked drops the binding that expires first; with one shared TTL that is the least recently set.
+func (m *AffinityManager) evictOldestLocked() {
+	var oldestKey string
+	var oldest time.Time
+	for k, rec := range m.entries {
+		if oldestKey == "" || rec.expiresAt.Before(oldest) {
+			oldestKey, oldest = k, rec.expiresAt
+		}
+	}
+	delete(m.entries, oldestKey)
 }
 
 // Delete removes any binding for the given session.
