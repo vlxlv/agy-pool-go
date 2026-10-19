@@ -190,190 +190,164 @@ func NextUpcomingReset(capState quota.CapacityState) *time.Time {
 	return earliest
 }
 
+// smartInFlightPerTier is how many in-flight requests cost one health tier under smart, so a burst
+// spills from a lone top-tier account onto the next tier instead of piling onto it until it hits 429.
+// It also caps how many concurrent requests a harvest account takes before it competes as cruising.
+const smartInFlightPerTier = 4
+
+// sortKey is computed once per account before sorting, so comparators never see in-flight counts
+// change mid-sort and capacity state is not recomputed per comparison.
+type sortKey struct {
+	cap      quota.CapacityState
+	fresh    int
+	flight   int64
+	hits     int64
+	harvest  bool
+	harvestT time.Time
+	score    int // smart: health tier minus in-flight penalty
+	pace     float64
+	floor    float64
+}
+
+// bucket quantizes v so epsilon comparisons stay transitive; infinities pass through unchanged.
+func bucket(v, eps float64) float64 {
+	return math.Floor(v / eps)
+}
+
 // OrderCandidates orders generation candidates according to the specified strategy.
 func OrderCandidates(candidates []*storage.Account, strategy string, pool *storage.Pool, now float64) []*storage.Account {
 	if len(candidates) == 0 {
 		return nil
 	}
 
+	const paceEpsilon = 0.005
+	nowTime := time.Unix(int64(now), 0)
+
 	var eligible []*storage.Account
 	var depleted []*storage.Account
 	var cooldown []*storage.Account
+	keys := make(map[*storage.Account]*sortKey, len(candidates))
 
 	for _, acc := range candidates {
 		if acc == nil || IsRestricted(acc) {
 			continue
 		}
+		capState := quota.ComputeCapacityState(acc, now)
+		k := &sortKey{
+			cap:    capState,
+			fresh:  quota.FreshnessRank(acc, now),
+			flight: observability.GetInFlightGeneration(acc.ID),
+			hits:   acc.GetHits(),
+			pace:   bucket(EffectiveWorstPace(capState), paceEpsilon),
+			floor:  bucket(capState.RawFloor, paceEpsilon),
+		}
+		k.harvestT, k.harvest = SmartHarvestCandidate(capState, nowTime)
+		k.harvest = k.harvest && k.flight < smartInFlightPerTier
+		k.score = smartHeadroomTier(capState.RawFloor)*smartInFlightPerTier - int(k.flight)
+		keys[acc] = k
+
 		if acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > now {
 			cooldown = append(cooldown, acc)
+		} else if capState.IsDepleted {
+			depleted = append(depleted, acc)
 		} else {
-			capState := quota.ComputeCapacityState(acc, now)
-			if capState.IsDepleted {
-				depleted = append(depleted, acc)
-			} else {
-				eligible = append(eligible, acc)
-			}
+			eligible = append(eligible, acc)
 		}
 	}
 
+	var healthy []*storage.Account
+	var reserve []*storage.Account
+	for _, acc := range eligible {
+		if IsReserveCapacity(keys[acc].cap) || overWeeklyPace(acc, now) {
+			reserve = append(reserve, acc)
+		} else {
+			healthy = append(healthy, acc)
+		}
+	}
+
+	var less func(a, b *sortKey, idA, idB string) bool
 	switch strategy {
 	case config.StrategyMaxQuota:
-		var healthy []*storage.Account
-		var reserve []*storage.Account
-
-		for _, acc := range eligible {
-			if IsReserveCandidate(acc, now) || overWeeklyPace(acc, now) {
-				reserve = append(reserve, acc)
-			} else {
-				healthy = append(healthy, acc)
+		less = func(a, b *sortKey, idA, idB string) bool {
+			if a.cap.KnownWindowCount != b.cap.KnownWindowCount {
+				return a.cap.KnownWindowCount > b.cap.KnownWindowCount
 			}
+			if a.fresh != b.fresh {
+				return a.fresh > b.fresh
+			}
+			if a.pace != b.pace {
+				return a.pace > b.pace
+			}
+			if a.floor != b.floor {
+				return a.floor > b.floor
+			}
+			if a.flight != b.flight {
+				return a.flight < b.flight
+			}
+			if a.hits != b.hits {
+				return a.hits < b.hits // Lowest hits first (key had -hits descending)
+			}
+			return idA < idB
 		}
-
-		const paceEpsilon = 0.005
-
-		maxQuotaCompare := func(a, b *storage.Account) bool {
-			capA := quota.ComputeCapacityState(a, now)
-			capB := quota.ComputeCapacityState(b, now)
-
-			if capA.KnownWindowCount != capB.KnownWindowCount {
-				return capA.KnownWindowCount > capB.KnownWindowCount
-			}
-
-			rankA := quota.FreshnessRank(a, now)
-			rankB := quota.FreshnessRank(b, now)
-			if rankA != rankB {
-				return rankA > rankB
-			}
-
-			paceA := EffectiveWorstPace(capA)
-			paceB := EffectiveWorstPace(capB)
-			if math.IsInf(paceA, 0) || math.IsInf(paceB, 0) {
-				if paceA != paceB {
-					return paceA > paceB
-				}
-			} else if math.Abs(paceA-paceB) > paceEpsilon {
-				return paceA > paceB
-			}
-
-			if math.Abs(capA.RawFloor-capB.RawFloor) > paceEpsilon {
-				return capA.RawFloor > capB.RawFloor
-			}
-
-			flightA := observability.GetInFlightGeneration(a.ID)
-			flightB := observability.GetInFlightGeneration(b.ID)
-			if flightA != flightB {
-				return flightA < flightB
-			}
-
-			hitsA, hitsB := a.GetHits(), b.GetHits()
-			if hitsA != hitsB {
-				return hitsA < hitsB // Lowest hits first (key had -hits descending)
-			}
-
-			return a.ID < b.ID
-		}
-
-		sort.SliceStable(healthy, func(i, j int) bool {
-			return maxQuotaCompare(healthy[i], healthy[j])
-		})
-
-		sort.SliceStable(reserve, func(i, j int) bool {
-			return maxQuotaCompare(reserve[i], reserve[j])
-		})
-
-		eligible = make([]*storage.Account, 0, len(healthy)+len(reserve))
-		eligible = append(eligible, healthy...)
-		eligible = append(eligible, reserve...)
 
 	default: // StrategySmart (default strategy)
-		var healthy []*storage.Account
-		var reserve []*storage.Account
-
-		for _, acc := range eligible {
-			if IsReserveCandidate(acc, now) || overWeeklyPace(acc, now) {
-				reserve = append(reserve, acc)
-			} else {
-				healthy = append(healthy, acc)
-			}
-		}
-
-		nowTime := time.Unix(int64(now), 0)
-
-		smartCompare := func(a, b *storage.Account) bool {
-			capA := quota.ComputeCapacityState(a, now)
-			capB := quota.ComputeCapacityState(b, now)
-
-			knownA := capA.KnownWindowCount > 0
-			knownB := capB.KnownWindowCount > 0
+		less = func(a, b *sortKey, idA, idB string) bool {
+			knownA := a.cap.KnownWindowCount > 0
+			knownB := b.cap.KnownWindowCount > 0
 			if knownA != knownB {
 				return knownA
 			}
 
 			// 1. Freshness rank (prefer freshly probed accounts when unknown)
-			rankA := quota.FreshnessRank(a, now)
-			rankB := quota.FreshnessRank(b, now)
-			if rankA != rankB {
-				return rankA > rankB
+			if a.fresh != b.fresh {
+				return a.fresh > b.fresh
 			}
 
 			// 2. Harvest Mode: Prioritize accounts with surplus headroom (>= 25%)
 			// that are about to reset (5H <= 90m, WK <= 36h) to capture expiring quota.
-			tA, harvestA := SmartHarvestCandidate(capA, nowTime)
-			tB, harvestB := SmartHarvestCandidate(capB, nowTime)
-
-			if harvestA != harvestB {
-				return harvestA // Qualifying harvest account wins over cruising account
+			if a.harvest != b.harvest {
+				return a.harvest // Qualifying harvest account wins over cruising account
 			}
-			if harvestA && harvestB {
+			if a.harvest && b.harvest {
 				// Both have expiring quota: consume sooner reset first (hour resolution)
-				truncA := tA.Truncate(time.Hour)
-				truncB := tB.Truncate(time.Hour)
+				truncA := a.harvestT.Truncate(time.Hour)
+				truncB := b.harvestT.Truncate(time.Hour)
 				if !truncA.Equal(truncB) {
 					return truncA.Before(truncB)
 				}
-				// Equal reset hour: higher headroom tier first
-				tierA := smartHeadroomTier(capA.RawFloor)
-				tierB := smartHeadroomTier(capB.RawFloor)
-				if tierA != tierB {
-					return tierA > tierB
+				// Equal reset hour: higher in-flight-adjusted headroom tier first
+				if a.score != b.score {
+					return a.score > b.score
 				}
-				flightA := observability.GetInFlightGeneration(a.ID)
-				flightB := observability.GetInFlightGeneration(b.ID)
-				if flightA != flightB {
-					return flightA < flightB
+				if a.flight != b.flight {
+					return a.flight < b.flight
 				}
-				hitsA, hitsB := a.GetHits(), b.GetHits()
-				if hitsA != hitsB {
-					return hitsA < hitsB
+				if a.hits != b.hits {
+					return a.hits < b.hits
 				}
-				return a.ID < b.ID
+				return idA < idB
 			}
 
-			// 3. Cruising Mode: Headroom Health Tier (Discrete 20% bands)
-			// Accounts in higher tiers strictly take precedence over lower tiers.
-			tierA := smartHeadroomTier(capA.RawFloor)
-			tierB := smartHeadroomTier(capB.RawFloor)
-			if tierA != tierB {
-				return tierA > tierB
+			// 3. Cruising Mode: Headroom Health Tier (Discrete 20% bands), lowered by in-flight load
+			// so concurrent requests spread to the next tier before saturating one account.
+			if a.score != b.score {
+				return a.score > b.score
 			}
 
-			flightA := observability.GetInFlightGeneration(a.ID)
-			flightB := observability.GetInFlightGeneration(b.ID)
-			if flightA != flightB {
-				return flightA < flightB
+			if a.flight != b.flight {
+				return a.flight < b.flight
 			}
 
 			// 4. Multi-Account Concurrent Load Balancing:
 			// Within the same health tier, distribute traffic across all accounts by request hits.
 			// This maximizes active multi-account utilization and parallel 5H rolling recoveries.
-			hitsA, hitsB := a.GetHits(), b.GetHits()
-			if hitsA != hitsB {
-				return hitsA < hitsB
+			if a.hits != b.hits {
+				return a.hits < b.hits
 			}
 
 			// 5. Renewal Timing: when hits and tier are tied, prefer the account that resets sooner
-			nextA := NextUpcomingReset(capA)
-			nextB := NextUpcomingReset(capB)
+			nextA := NextUpcomingReset(a.cap)
+			nextB := NextUpcomingReset(b.cap)
 			if nextA != nil && nextB != nil {
 				truncA := nextA.Truncate(time.Hour)
 				truncB := nextB.Truncate(time.Hour)
@@ -384,43 +358,32 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				return nextA != nil
 			}
 
-			return a.ID < b.ID
+			return idA < idB
 		}
-
-		sort.SliceStable(healthy, func(i, j int) bool {
-			return smartCompare(healthy[i], healthy[j])
-		})
-
-		sort.SliceStable(reserve, func(i, j int) bool {
-			return smartCompare(reserve[i], reserve[j])
-		})
-
-		eligible = make([]*storage.Account, 0, len(healthy)+len(reserve))
-		eligible = append(eligible, healthy...)
-		eligible = append(eligible, reserve...)
 	}
 
+	sortBy := func(list []*storage.Account, less func(a, b *sortKey, idA, idB string) bool) {
+		sort.SliceStable(list, func(i, j int) bool {
+			return less(keys[list[i]], keys[list[j]], list[i].ID, list[j].ID)
+		})
+	}
+	sortBy(healthy, less)
+	sortBy(reserve, less)
+
 	// Secondary tiers ordering: Depleted accounts ordered by in_flight ASC, raw_floor DESC, hits ASC
-	sort.SliceStable(depleted, func(i, j int) bool {
-		a, b := depleted[i], depleted[j]
-		flightA := observability.GetInFlightGeneration(a.ID)
-		flightB := observability.GetInFlightGeneration(b.ID)
-		if flightA != flightB {
-			return flightA < flightB
+	sortBy(depleted, func(a, b *sortKey, _, _ string) bool {
+		if a.flight != b.flight {
+			return a.flight < b.flight
 		}
-		capA := quota.ComputeCapacityState(a, now)
-		capB := quota.ComputeCapacityState(b, now)
-
-		if capA.RawFloor != capB.RawFloor {
-			return capA.RawFloor > capB.RawFloor
+		if a.cap.RawFloor != b.cap.RawFloor {
+			return a.cap.RawFloor > b.cap.RawFloor
 		}
-
-		hitsA, hitsB := a.GetHits(), b.GetHits()
-		return hitsA < hitsB
+		return a.hits < b.hits
 	})
 
-	result := make([]*storage.Account, 0, len(eligible)+len(depleted)+len(cooldown))
-	result = append(result, eligible...)
+	result := make([]*storage.Account, 0, len(healthy)+len(reserve)+len(depleted)+len(cooldown))
+	result = append(result, healthy...)
+	result = append(result, reserve...)
 	result = append(result, depleted...)
 	result = append(result, cooldown...)
 	return result
