@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -52,5 +53,40 @@ func TestReserveInFlightSeesOtherProcessesAndPrunesDead(t *testing.T) {
 	release()
 	if n := count(); n != 0 {
 		t.Fatalf("own leases after release = %d, want 0", n)
+	}
+}
+
+func TestReserveInFlightGivesUpWhenWriteLockBusy(t *testing.T) {
+	setupTestStorage(t)
+	sdb, err := GetStateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Another process holding the SQLite write lock.
+	other, err := sql.Open("sqlite", "file:"+sdb.path+"?_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	tx, err := other.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	called := false
+	_, release, err := ReserveInFlight(func(map[string]int64) string { called = true; return "a" })
+	release()
+	if !errors.Is(err, ErrWriteBusy) || called {
+		t.Fatalf("ReserveInFlight = %v, pick called = %v; want ErrWriteBusy without pick", err, called)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("ReserveInFlight waited %v, want about %v", d, reserveBusyTimeout)
+	}
+	_ = tx.Rollback()
+
+	if _, _, err := ReserveInFlight(func(map[string]int64) string { return "a" }); err != nil {
+		t.Fatalf("ReserveInFlight after lock released = %v", err)
 	}
 }
