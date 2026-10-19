@@ -18,6 +18,7 @@ func TestReserveInFlightSeesOtherProcessesAndPrunesDead(t *testing.T) {
 
 	now := time.Now().Unix()
 	ownStaleLeasesCleared.Store(false)
+	lastDeadLeasePrune.Store(0)
 	// a: live foreign process (our parent); b: dead PID (far above pid_max) in our namespace;
 	// c: expired; d: dead PID in another namespace, which kill(pid, 0) cannot judge;
 	// e: left by a dead process that had our PID and namespace.
@@ -144,5 +145,47 @@ func TestEnsureLeaseColumnsMigratesOldTable(t *testing.T) {
 	var ns string
 	if err := db.QueryRow("SELECT pid_ns FROM inflight_leases WHERE account_id = 'a'").Scan(&ns); err != nil || ns != "" {
 		t.Fatalf("migrated row pid_ns = %q, %v; want empty", ns, err)
+	}
+}
+
+func TestReserveInFlightThrottlesDeadLeasePrune(t *testing.T) {
+	setupTestStorage(t)
+	sdb, err := GetStateDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertDead := func() {
+		t.Helper()
+		if err := sdb.Update(context.Background(), func(tx *sql.Tx) error {
+			_, err := tx.Exec("INSERT INTO inflight_leases (account_id, pid, started_at, pid_ns) VALUES ('b', 99999999, ?, ?)",
+				time.Now().Unix(), pidNamespace)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reserve := func() map[string]int64 {
+		t.Helper()
+		var seen map[string]int64
+		if _, release, err := ReserveInFlight(func(remote map[string]int64) string { seen = remote; return "" }); err != nil {
+			t.Fatal(err)
+		} else {
+			release()
+		}
+		return seen
+	}
+
+	lastDeadLeasePrune.Store(0)
+	insertDead()
+	if seen := reserve(); seen["b"] != 0 {
+		t.Fatalf("first reservation should prune the dead lease, got %v", seen)
+	}
+	insertDead()
+	if seen := reserve(); seen["b"] != 1 {
+		t.Fatalf("reservation within %ds of a prune should skip it, got %v", deadLeasePruneInterval, seen)
+	}
+	lastDeadLeasePrune.Store(time.Now().Unix() - deadLeasePruneInterval)
+	if seen := reserve(); seen["b"] != 0 {
+		t.Fatalf("reservation after the interval should prune again, got %v", seen)
 	}
 }

@@ -64,6 +64,12 @@ const reserveBusyTimeout = 100 * time.Millisecond
 // process now reuses were deleted; it is set only after that delete commits, so a failed attempt retries.
 var ownStaleLeasesCleared atomic.Bool
 
+// deadLeasePruneInterval throttles pruneDeadLeases off the per-request path; a crashed process's leases
+// keep counting for at most this long. lastDeadLeasePrune is the Unix second of the last committed prune.
+const deadLeasePruneInterval = 5
+
+var lastDeadLeasePrune atomic.Int64
+
 // ReserveInFlight runs pick inside a cross-process write transaction (BEGIN IMMEDIATE), passing the
 // in-flight counts held by other live processes, and records a lease for the account ID pick returns.
 // An empty ID records nothing. release deletes the lease and is safe to call more than once.
@@ -77,14 +83,18 @@ func ReserveInFlight(pick func(remote map[string]int64) string) (accountID strin
 	self := os.Getpid()
 
 	var leaseID int64
+	now := time.Now().Unix()
+	pruned := false
 	err = sdb.TryUpdate(context.Background(), reserveBusyTimeout, func(tx *sql.Tx) error {
 		if !ownStaleLeasesCleared.Load() {
 			if _, err := tx.Exec("DELETE FROM inflight_leases WHERE pid = ? AND pid_ns = ?", self, pidNamespace); err != nil {
 				return err
 			}
 		}
-		if err := pruneDeadLeases(tx, self); err != nil {
-			return err
+		if pruned = now-lastDeadLeasePrune.Load() >= deadLeasePruneInterval; pruned {
+			if err := pruneDeadLeases(tx, self); err != nil {
+				return err
+			}
 		}
 
 		remote := make(map[string]int64)
@@ -111,7 +121,7 @@ func ReserveInFlight(pick func(remote map[string]int64) string) (accountID strin
 			return nil
 		}
 		res, err := tx.Exec("INSERT INTO inflight_leases (account_id, pid, started_at, pid_ns) VALUES (?, ?, ?, ?)",
-			accountID, self, time.Now().Unix(), pidNamespace)
+			accountID, self, now, pidNamespace)
 		if err != nil {
 			return err
 		}
@@ -122,6 +132,9 @@ func ReserveInFlight(pick func(remote map[string]int64) string) (accountID strin
 		return accountID, release, err
 	}
 	ownStaleLeasesCleared.Store(true)
+	if pruned {
+		lastDeadLeasePrune.Store(now)
+	}
 	if leaseID == 0 {
 		return accountID, release, nil
 	}
