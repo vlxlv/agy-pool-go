@@ -770,3 +770,35 @@ func TestWeeklyUnknownLabel(t *testing.T) {
 		t.Errorf("expected unknown label without a snapshot, got %q", got)
 	}
 }
+
+// Upstream lists variant Gemini buckets (e.g. gemini-argon-wtu-weekly) next to the agy limits; the exact
+// gemini-weekly bucket must win regardless of order, or an exhausted account shows the variant's headroom.
+func TestQueryQuota_ExactGeminiBucketWinsOverVariant(t *testing.T) {
+	exact := `{"buckets":[{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2030-01-02T00:00:00Z","remainingFraction":0.008},{"bucketId":"gemini-5h","window":"5h","resetTime":"2030-01-01T05:00:00Z","remainingFraction":0.98}]}`
+	variant := `{"buckets":[{"bucketId":"gemini-argon-wtu-weekly","window":"weekly","resetTime":"2030-01-07T00:00:00Z","remainingFraction":0.56}]}`
+	for name, groups := range map[string]string{"variant last": exact + "," + variant, "variant first": variant + "," + exact} {
+		t.Run(name, func(t *testing.T) {
+			setupQuotaTestDir(t)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"groups":[%s]}`, groups)
+			}))
+			defer ts.Close()
+			BackendURLBaseProvider = func() string { return ts.URL }
+			TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
+
+			acc := &storage.Account{ID: "acc-variant"}
+			_ = storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}})
+			res, err := QueryQuota(acc)
+			if err != nil {
+				t.Fatalf("QueryQuota failed: %v", err)
+			}
+			if res.GeminiWeekly == nil || *res.GeminiWeekly.Fraction != 0.008 || res.GeminiWeekly.ResetTime != "2030-01-02T00:00:00Z" {
+				t.Errorf("expected exact gemini-weekly (0.008), got %+v", res.GeminiWeekly)
+			}
+			if res.Gemini5H == nil || *res.Gemini5H.Fraction != 0.98 {
+				t.Errorf("expected gemini-5h 0.98, got %+v", res.Gemini5H)
+			}
+		})
+	}
+}
