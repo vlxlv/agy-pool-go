@@ -49,6 +49,35 @@ func TestExtractSessionKey(t *testing.T) {
 	if key4Turn2 != key4 {
 		t.Fatalf("turn 2 did not produce identical session key: turn1=%q turn2=%q", key4, key4Turn2)
 	}
+
+	// 6. Cloud Code PA /v1internal nested request.contents and multi-part first user turn
+	req5, _ := http.NewRequest("POST", "/v1internal:streamGenerateContent", nil)
+	body5Turn1 := []byte(`{"model": "models/gemini-2.5-pro", "request": {"contents": [
+		{"role": "user", "parts": [{"text": "system preamble"}, {"text": "Refactor scheduler.go"}]}
+	]}}`)
+	body5Turn2 := []byte(`{"model": "models/gemini-2.5-pro", "request": {"contents": [
+		{"role": "user", "parts": [{"text": "system preamble"}, {"text": "Refactor scheduler.go"}]},
+		{"role": "model", "parts": [{"text": "Done."}]},
+		{"role": "user", "parts": [{"text": "Run tests"}]}
+	]}}`)
+	body5OtherSession := []byte(`{"model": "models/gemini-2.5-pro", "request": {"contents": [
+		{"role": "user", "parts": [{"text": "system preamble"}, {"text": "Different task entirely"}]}
+	]}}`)
+	key5Turn1 := ExtractSessionKey(req5, body5Turn1)
+	key5Turn2 := ExtractSessionKey(req5, body5Turn2)
+	key5Other := ExtractSessionKey(req5, body5OtherSession)
+	if key5Turn1 == "" || key5Turn1 != key5Turn2 {
+		t.Fatalf("expected matching /v1internal session keys across turns, got %q vs %q", key5Turn1, key5Turn2)
+	}
+	if key5Turn1 == key5Other {
+		t.Fatalf("expected distinct session keys when second part differs despite shared preamble, got %q", key5Turn1)
+	}
+
+	// 7. Nested request.session_id and metadata.conversation_id
+	body6 := []byte(`{"request": {"session_id": "nested-sess-999"}}`)
+	if got := ExtractSessionKey(req5, body6); got != "nested-sess-999" {
+		t.Fatalf("expected nested-sess-999, got %q", got)
+	}
 }
 
 func TestAffinityManagerLifecycle(t *testing.T) {

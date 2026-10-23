@@ -208,43 +208,53 @@ func ExtractSessionKey(r *http.Request, body []byte) string {
 		}
 	}
 
-	// 3. Check JSON body explicit conversation fields
+	// 3. Check JSON body explicit conversation fields and contents (top-level and /v1internal nested request/metadata)
 	if len(body) > 0 {
-		var fields struct {
-			ConversationID string `json:"conversationId"`
-			ConvID         string `json:"conversation_id"`
-			SessionID      string `json:"sessionId"`
-			SessID         string `json:"session_id"`
+		type turnPart struct {
+			Text string `json:"text"`
 		}
-		if json.Unmarshal(body, &fields) == nil {
-			if fields.ConversationID != "" {
-				return fields.ConversationID
-			}
-			if fields.ConvID != "" {
-				return fields.ConvID
-			}
-			if fields.SessionID != "" {
-				return fields.SessionID
-			}
-			if fields.SessID != "" {
-				return fields.SessID
-			}
+		type turnContent struct {
+			Role  string     `json:"role"`
+			Parts []turnPart `json:"parts"`
 		}
+		type sessionFields struct {
+			ConversationID string        `json:"conversationId"`
+			ConvID         string        `json:"conversation_id"`
+			SessionID      string        `json:"sessionId"`
+			SessID         string        `json:"session_id"`
+			Contents       []turnContent `json:"contents"`
+		}
+		var payload struct {
+			sessionFields
+			Request  sessionFields `json:"request"`
+			Metadata sessionFields `json:"metadata"`
+		}
+		if json.Unmarshal(body, &payload) == nil {
+			for _, s := range []sessionFields{payload.sessionFields, payload.Request, payload.Metadata} {
+				for _, id := range []string{s.ConversationID, s.ConvID, s.SessionID, s.SessID} {
+					if v := strings.TrimSpace(id); v != "" {
+						return v
+					}
+				}
+			}
 
-		// 4. Fallback: digest of the first user turn in contents (Magpie convOf pattern)
-		var contentsReq struct {
-			Contents []struct {
-				Role  string `json:"role"`
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"contents"`
-		}
-		if json.Unmarshal(body, &contentsReq) == nil && len(contentsReq.Contents) > 0 {
-			for _, c := range contentsReq.Contents {
-				if c.Role == "user" && len(c.Parts) > 0 && strings.TrimSpace(c.Parts[0].Text) != "" {
-					sum := sha256.Sum256([]byte(strings.TrimSpace(c.Parts[0].Text)))
-					return "turn1:" + hex.EncodeToString(sum[:8])
+			// 4. Fallback: digest of the first user turn in contents (top-level or /v1internal request.contents)
+			contents := payload.Contents
+			if len(contents) == 0 {
+				contents = payload.Request.Contents
+			}
+			for _, c := range contents {
+				if c.Role == "user" || (c.Role == "" && len(contents) == 1) {
+					var texts []string
+					for _, p := range c.Parts {
+						if t := strings.TrimSpace(p.Text); t != "" {
+							texts = append(texts, t)
+						}
+					}
+					if len(texts) > 0 {
+						sum := sha256.Sum256([]byte(strings.Join(texts, "\n")))
+						return "turn1:" + hex.EncodeToString(sum[:8])
+					}
 				}
 			}
 		}
