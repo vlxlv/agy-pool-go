@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -264,8 +266,28 @@ func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
 		}
 	}
 
+	refreshAllQuotas(10 * time.Second)
 	ListAccounts(target, stdout, stderr, showEmail)
 	return 0
+}
+
+// refreshAllQuotas fetches live quota for every enabled account in parallel, so `quota` is not up to
+// one daemon sweep (3m) behind. Failures keep the cached snapshot, whose age the listing still shows.
+func refreshAllQuotas(timeout time.Duration) {
+	pool, err := storage.LoadPool()
+	if err != nil || pool == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, acc := range pool.Accounts {
+		if acc == nil || acc.Status == storage.StatusDisabled {
+			continue
+		}
+		wg.Go(func() { _, _ = quota.QueryQuotaContext(ctx, acc) })
+	}
+	wg.Wait()
 }
 
 // StatusCmd checks daemon status and displays gateway and runtime summary only.
