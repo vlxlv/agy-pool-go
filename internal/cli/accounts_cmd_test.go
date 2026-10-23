@@ -20,6 +20,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
+	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -1325,5 +1326,20 @@ func TestListAccounts_NextCandidateTag(t *testing.T) {
 	}
 	if strings.Contains(clean, "Work · Ready [Next ⚡]") {
 		t.Errorf("expected Work NOT to be tagged as [Next ⚡], got:\n%s", clean)
+	}
+}
+
+func TestWeeklyBlockedDimsOtherBars(t *testing.T) {
+	zero, low, ok := 0.0, 0.0035, 0.5
+	if !weeklyBlocked(&zero) || !weeklyBlocked(&low) || weeklyBlocked(&ok) || weeklyBlocked(nil) {
+		t.Fatalf("weeklyBlocked thresholds wrong")
+	}
+	full := 0.98
+	bar := quota.RenderBlockProgressBar(&full, 10)
+	if got := gatedBar(false, bar); got != bar {
+		t.Fatalf("unblocked bar must be unchanged")
+	}
+	if got := gatedBar(true, bar); got != clrDim+StripANSI(bar)+clrReset {
+		t.Fatalf("blocked bar must be dimmed, got %q", got)
 	}
 }
