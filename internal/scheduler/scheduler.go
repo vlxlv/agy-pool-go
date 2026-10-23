@@ -190,6 +190,73 @@ func NextUpcomingReset(capState quota.CapacityState) *time.Time {
 	return earliest
 }
 
+// smartEffectiveHeadroom returns the quota fraction used to assign an account's cruising health tier.
+// When weekly quota is abundant (>= 80%) or on/ahead of linear weekly pace (Pace7 >= 0), the weekly
+// window is not a bottleneck, so the regenerable 5H window determines the health tier rather than
+// letting mid-week Q7 < 80% strand a full 5H window.
+func smartEffectiveHeadroom(capState quota.CapacityState) float64 {
+	if capState.Q5Known && capState.Q5 != nil && capState.Q7Known && capState.Q7 != nil {
+		if *capState.Q7 >= 0.80 || (capState.Pace7 != nil && *capState.Pace7 >= -1e-9) {
+			return *capState.Q5
+		}
+	}
+	return capState.RawFloor
+}
+
+// resetBucket quantizes a reset timestamp relative to nowTime: 15-minute buckets within the 90m
+// 5H harvest range so imminent resets are never merged with hour-away resets across a UTC clock seam,
+// and 1-hour buckets beyond 90m.
+func resetBucket(resetTime time.Time, nowTime time.Time) int64 {
+	rem := resetTime.Sub(nowTime)
+	if rem <= SmartHarvest5HWindow {
+		return int64(rem / (15 * time.Minute))
+	}
+	return int64(rem / time.Hour)
+}
+
+// compareResetTiming compares two accounts' upcoming reset schedules (earliest reset first, then
+// secondary window reset if earliest buckets tie). Returns <0 if a resets sooner, >0 if b resets sooner.
+func compareResetTiming(a, b quota.CapacityState, nowTime time.Time) int {
+	nextA, nextB := NextUpcomingReset(a), NextUpcomingReset(b)
+	if nextA == nil && nextB == nil {
+		return 0
+	}
+	if nextA == nil {
+		return 1
+	}
+	if nextB == nil {
+		return -1
+	}
+	ba, bb := resetBucket(*nextA, nowTime), resetBucket(*nextB, nowTime)
+	if ba != bb {
+		if ba < bb {
+			return -1
+		}
+		return 1
+	}
+
+	laterWindow := func(c quota.CapacityState) *time.Time {
+		if c.Reset5Time != nil && !c.Reset5Time.IsZero() && c.Reset7Time != nil && !c.Reset7Time.IsZero() {
+			if c.Reset5Time.After(*c.Reset7Time) {
+				return c.Reset5Time
+			}
+			return c.Reset7Time
+		}
+		return nil
+	}
+	la, lb := laterWindow(a), laterWindow(b)
+	if la != nil && lb != nil {
+		lba, lbb := resetBucket(*la, nowTime), resetBucket(*lb, nowTime)
+		if lba != lbb {
+			if lba < lbb {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
 // smartInFlightPerTier is how many in-flight requests cost one health tier under smart, so a burst
 // spills from a lone top-tier account onto the next tier instead of piling onto it until it hits 429.
 // It also caps how many concurrent requests a harvest account takes before it competes as cruising.
@@ -203,7 +270,7 @@ type sortKey struct {
 	flight   int64
 	hits     int64
 	harvest  bool
-	harvestT time.Time
+	harvestB int64
 	score    int // smart: health tier minus in-flight penalty
 	pace     float64
 	floor    float64
@@ -241,9 +308,12 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 			pace:   bucket(EffectiveWorstPace(capState), paceEpsilon),
 			floor:  bucket(capState.RawFloor, paceEpsilon),
 		}
-		k.harvestT, k.harvest = SmartHarvestCandidate(capState, nowTime)
-		k.harvest = k.harvest && k.flight < smartInFlightPerTier
-		k.score = smartHeadroomTier(capState.RawFloor)*smartInFlightPerTier - int(k.flight)
+		harvestT, harvest := SmartHarvestCandidate(capState, nowTime)
+		k.harvest = harvest && k.flight < smartInFlightPerTier
+		if k.harvest {
+			k.harvestB = resetBucket(harvestT, nowTime)
+		}
+		k.score = smartHeadroomTier(smartEffectiveHeadroom(capState))*smartInFlightPerTier - int(k.flight)
 		keys[acc] = k
 
 		if acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > now {
@@ -303,19 +373,17 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				return a.fresh > b.fresh
 			}
 
-			// 2. Harvest Mode: Prioritize accounts with surplus headroom (>= 25%)
+			// 2. Harvest Mode: Prioritize accounts with surplus headroom
 			// that are about to reset (5H <= 90m, WK <= 36h) to capture expiring quota.
 			if a.harvest != b.harvest {
 				return a.harvest // Qualifying harvest account wins over cruising account
 			}
 			if a.harvest && b.harvest {
-				// Both have expiring quota: consume sooner reset first (hour resolution)
-				truncA := a.harvestT.Truncate(time.Hour)
-				truncB := b.harvestT.Truncate(time.Hour)
-				if !truncA.Equal(truncB) {
-					return truncA.Before(truncB)
+				// Both have expiring quota: consume sooner reset bucket first (15m for 5H, 1h for weekly)
+				if a.harvestB != b.harvestB {
+					return a.harvestB < b.harvestB
 				}
-				// Equal reset hour: higher in-flight-adjusted headroom tier first
+				// Equal reset bucket: higher in-flight-adjusted headroom tier first
 				if a.score != b.score {
 					return a.score > b.score
 				}
@@ -338,24 +406,15 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				return a.flight < b.flight
 			}
 
-			// 4. Multi-Account Concurrent Load Balancing:
-			// Within the same health tier, distribute traffic across all accounts by request hits.
-			// This maximizes active multi-account utilization and parallel 5H rolling recoveries.
-			if a.hits != b.hits {
-				return a.hits < b.hits
+			// 4. Renewal Timing: within the same health tier and in-flight load, concentrate on the
+			// account resetting soonest to harvest perishable 5H quota and preserve prompt cache.
+			if cmp := compareResetTiming(a.cap, b.cap, nowTime); cmp != 0 {
+				return cmp < 0
 			}
 
-			// 5. Renewal Timing: when hits and tier are tied, prefer the account that resets sooner
-			nextA := NextUpcomingReset(a.cap)
-			nextB := NextUpcomingReset(b.cap)
-			if nextA != nil && nextB != nil {
-				truncA := nextA.Truncate(time.Hour)
-				truncB := nextB.Truncate(time.Hour)
-				if !truncA.Equal(truncB) {
-					return truncA.Before(truncB)
-				}
-			} else if nextA != nil || nextB != nil {
-				return nextA != nil
+			// 5. Tie-breaker: when reset bucket, tier, and in-flight are equal, balance by request hits.
+			if a.hits != b.hits {
+				return a.hits < b.hits
 			}
 
 			return idA < idB

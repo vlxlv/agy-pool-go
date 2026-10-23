@@ -1383,3 +1383,64 @@ func TestOrderCandidates_Smart_InFlightSpillsToNextTier(t *testing.T) {
 		}
 	}
 }
+
+func TestSmartStrategy_MidWeek5HNotStrandedByWeeklyTier(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+	// accMidWeek: 3.5 days left in week (r7 = 0.50), Q7 = 0.65 (pace7 = +0.15 >= 0, ahead of schedule),
+	// Q5 = 0.95 (resets in 2h). Its regenerable 5H quota is Tier 4 and resets sooner.
+	accMidWeek := &storage.Account{
+		ID:           "acc_mid_week_full_5h",
+		Status:       "active",
+		RequestCount: 50,
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.95), ResetTime: "2026-09-16T14:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.65), ResetTime: "2026-09-20T00:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+	// accFreshWeek: 6.5 days left in week, Q7 = 0.85, Q5 = 0.85 (resets in 4.5h).
+	accFreshWeek := &storage.Account{
+		ID:           "acc_fresh_week_later_5h",
+		Status:       "active",
+		RequestCount: 10,
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-16T16:30:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-23T00:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accFreshWeek, accMidWeek}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_mid_week_full_5h" {
+		t.Fatalf("expected mid-week account with 95%% 5H quota (resets in 2h) to be used before 4.5h account, got %s", ordered[0].ID)
+	}
+}
+
+func TestSmartStrategy_Harvest15MinBucketAvoidsClockSeam(t *testing.T) {
+	// 2026-09-16T12:02:00Z: both accounts fall inside the 12:xx UTC hour,
+	// but accImminent resets in 3 minutes (12:05) while accLaterHarvest resets in 56 minutes (12:58).
+	now := 1789560120.0
+	accImminent := &storage.Account{
+		ID:     "acc_imminent_3m",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.45), ResetTime: "2026-09-16T12:05:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: "2026-09-22T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+	accLaterHarvest := &storage.Account{
+		ID:     "acc_later_56m",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.85), ResetTime: "2026-09-16T12:58:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: "2026-09-22T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accLaterHarvest, accImminent}, config.StrategySmart, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_imminent_3m" {
+		t.Fatalf("expected 3m-to-reset harvest account before 56m-to-reset account, got %s", ordered[0].ID)
+	}
+}
