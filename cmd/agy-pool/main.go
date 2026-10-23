@@ -13,11 +13,13 @@ import (
 )
 
 func main() {
-	// Upstream only reports Gemini quota to a versioned agy client UA (see quota.AgyClientUA).
-	// Built lazily so commands that never call upstream skip `agy --version`.
-	ua := sync.OnceValue(func() string { return quota.AgyClientUA(diagnostics.GetInstalledAgyVersion()) })
-	quota.UserAgentProvider = ua
-	proxy.UserAgentProvider = ua
+	// Upstream only reports Gemini quota to a versioned agy client UA (see quota.AgyClientUA) above a
+	// minimum version, so quota refreshes read the installed agy version each time and pick up upgrades
+	// without a gateway restart. The proxy's UA is a hot-path fallback for non-agy clients, so it is cached.
+	// Both are lazy so commands that never call upstream skip `agy --version`.
+	agyUA := func() string { return quota.AgyClientUA(diagnostics.GetInstalledAgyVersion()) }
+	quota.UserAgentProvider = agyUA
+	proxy.UserAgentProvider = sync.OnceValue(agyUA)
 
 	if os.Getenv(daemon.EnvDaemonChild) == "1" {
 		code := cli.Main(nil, os.Stdin, os.Stdout, os.Stderr)

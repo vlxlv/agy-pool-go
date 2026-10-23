@@ -202,7 +202,8 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+at)
 	headers.Set("Content-Type", "application/json")
-	headers.Set("User-Agent", getUserAgent())
+	ua := getUserAgent()
+	headers.Set("User-Agent", ua)
 
 	quotaURL := getBackendURLBase() + "/v1internal:retrieveUserQuotaSummary"
 	req, err := http.NewRequestWithContext(ctx, "POST", quotaURL, bytes.NewReader([]byte("{}")))
@@ -316,7 +317,8 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 			}
 			quotaErr = errors.New("quota response contained no Gemini quota buckets")
 			if WarnHook != nil {
-				WarnHook(fmt.Sprintf("account %s: quota summary returned no Gemini buckets; falling back to fetchAvailableModels, Gemini weekly quota is not refreshed", account.ID))
+				// Upstream gates Gemini buckets on a minimum agy client version in the User-Agent.
+				WarnHook(fmt.Sprintf("account %s: quota summary returned no Gemini buckets for User-Agent %q (agy too old or missing?); falling back to fetchAvailableModels, Gemini weekly quota is not refreshed", account.ID, ua))
 			}
 		}
 	}
