@@ -341,6 +341,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			wkBlocked := weeklyBlocked(gwFrac)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
 			if q5Frac == nil {
@@ -348,7 +349,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			} else {
 				pctVal := int(math.Round(*q5Frac * 100.0))
 				g5Pct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
-				g5Bar := quota.RenderBlockProgressBar(q5Frac, 20)
+				g5Bar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q5Frac, 20))
 				g5Reset := quota.FormatCompactRemainingTime(reset5)
 				r5Str := "resets in " + g5Reset
 				if g5Reset == "ready" || g5Reset == "N/A" {
@@ -364,6 +365,9 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				gwBar := quota.RenderBlockProgressBar(gwFrac, 20)
 				gwReset := quota.FormatCompactRemainingTime(reset7)
+				if wkBlocked {
+					gwReset += " · all models blocked"
+				}
 				r7Str := "resets in " + gwReset
 				if gwReset == "ready" || gwReset == "N/A" {
 					r7Str = gwReset
@@ -371,16 +375,27 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 				fmt.Fprintf(stdout, "  WK  %s %s   %s\n", gwBar, gwPct, r7Str)
 			}
 
-			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil {
 				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
 				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
-				tpBar := quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, 20)
+				tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, 20))
 				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
 				rTpStr := "resets in " + tpReset
 				if tpReset == "ready" || tpReset == "N/A" {
 					rTpStr = tpReset
 				}
 				fmt.Fprintf(stdout, "  3P  %s %s   %s\n", tpBar, tpPct, rTpStr)
+			}
+			if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil {
+				pctVal := int(math.Round(*q.ThirdPartyWeekly.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdPartyWeekly.Fraction, 20))
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdPartyWeekly.ResetTime)
+				rTpStr := "resets in " + tpReset
+				if tpReset == "ready" || tpReset == "N/A" {
+					rTpStr = tpReset
+				}
+				fmt.Fprintf(stdout, "  3W  %s %s   %s\n", tpBar, tpPct, rTpStr)
 			}
 		}
 
@@ -474,6 +489,7 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			wkBlocked := weeklyBlocked(gwFrac)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
 			if q5Frac == nil {
@@ -489,7 +505,7 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 				nonBar5 := 12 + len(r5Str)
 				barW5 := chooseBarWidth(width, nonBar5, 10, 4)
 				if barW5 > 0 {
-					g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
+					g5Bar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q5Frac, barW5))
 					fmt.Fprintf(stdout, "  5H %s %s  %s\n", g5Pct, g5Bar, r5Str)
 				} else {
 					fmt.Fprintf(stdout, "  5H %s  %s\n", g5Pct, r5Str)
@@ -502,6 +518,9 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				gwReset := quota.FormatCompactRemainingTime(reset7)
+				if wkBlocked {
+					gwReset += " · all models blocked"
+				}
 				r7Str := "reset " + gwReset
 				if gwReset == "ready" || gwReset == "N/A" {
 					r7Str = gwReset
@@ -516,7 +535,7 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 				}
 			}
 
-			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil {
 				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
 				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
@@ -527,10 +546,27 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 				nonBarTp := 12 + len(rTpStr)
 				barWTp := chooseBarWidth(width, nonBarTp, 10, 4)
 				if barWTp > 0 {
-					tpBar := quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, barWTp)
+					tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, barWTp))
 					fmt.Fprintf(stdout, "  3P %s %s  %s\n", tpPct, tpBar, rTpStr)
 				} else {
 					fmt.Fprintf(stdout, "  3P %s  %s\n", tpPct, rTpStr)
+				}
+			}
+			if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil {
+				pctVal := int(math.Round(*q.ThirdPartyWeekly.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdPartyWeekly.ResetTime)
+				rTpStr := "reset " + tpReset
+				if tpReset == "ready" || tpReset == "N/A" {
+					rTpStr = tpReset
+				}
+				nonBarTp := 12 + len(rTpStr)
+				barWTp := chooseBarWidth(width, nonBarTp, 10, 4)
+				if barWTp > 0 {
+					tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdPartyWeekly.Fraction, barWTp))
+					fmt.Fprintf(stdout, "  3W %s %s  %s\n", tpPct, tpBar, rTpStr)
+				} else {
+					fmt.Fprintf(stdout, "  3W %s  %s\n", tpPct, rTpStr)
 				}
 			}
 
@@ -595,6 +631,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 			}
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			wkBlocked := weeklyBlocked(gwFrac)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
 			if q5Frac == nil {
@@ -606,7 +643,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 				nonBar5 := 10 + len(g5Reset)
 				barW5 := chooseBarWidth(width, nonBar5, 10, 4)
 				if barW5 > 0 {
-					g5Bar := quota.RenderBlockProgressBar(q5Frac, barW5)
+					g5Bar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q5Frac, barW5))
 					fmt.Fprintf(stdout, "5H %s %s  %s\n", g5Pct, g5Bar, g5Reset)
 				} else {
 					fmt.Fprintf(stdout, "5H %s  %s\n", g5Pct, g5Reset)
@@ -619,6 +656,9 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				gwReset := quota.FormatCompactRemainingTime(reset7)
+				if wkBlocked {
+					gwReset += " · all models blocked"
+				}
 				nonBar7 := 10 + len(gwReset)
 				barW7 := chooseBarWidth(width, nonBar7, 10, 4)
 				if barW7 > 0 {
@@ -629,17 +669,30 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 				}
 			}
 
-			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil {
 				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
 				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
 				nonBarTp := 10 + len(tpReset)
 				barWTp := chooseBarWidth(width, nonBarTp, 10, 4)
 				if barWTp > 0 {
-					tpBar := quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, barWTp)
+					tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, barWTp))
 					fmt.Fprintf(stdout, "3P %s %s  %s\n", tpPct, tpBar, tpReset)
 				} else {
 					fmt.Fprintf(stdout, "3P %s  %s\n", tpPct, tpReset)
+				}
+			}
+			if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil {
+				pctVal := int(math.Round(*q.ThirdPartyWeekly.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdPartyWeekly.ResetTime)
+				nonBarTp := 10 + len(tpReset)
+				barWTp := chooseBarWidth(width, nonBarTp, 10, 4)
+				if barWTp > 0 {
+					tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdPartyWeekly.Fraction, barWTp))
+					fmt.Fprintf(stdout, "3W %s %s  %s\n", tpPct, tpBar, tpReset)
+				} else {
+					fmt.Fprintf(stdout, "3W %s  %s\n", tpPct, tpReset)
 				}
 			}
 
@@ -715,6 +768,7 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 		} else {
 			q := acc.LastQuota
 			q5Frac, gwFrac := quota.DisplayQuotaFractions(q)
+			wkBlocked := weeklyBlocked(gwFrac)
 			reset5, reset7 := extractResetTimes(acc, q, nowTS)
 
 			if q5Frac == nil {
@@ -732,14 +786,23 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				gwReset := quota.FormatCompactRemainingTime(reset7)
+				if wkBlocked {
+					gwReset += " · all models blocked"
+				}
 				fmt.Fprintf(stdout, "WK %s  %s\n", gwPct, gwReset)
 			}
 
-			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil {
 				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
 				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
 				fmt.Fprintf(stdout, "3P %s  %s\n", tpPct, tpReset)
+			}
+			if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil {
+				pctVal := int(math.Round(*q.ThirdPartyWeekly.Fraction * 100.0))
+				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
+				tpReset := quota.FormatCompactRemainingTime(q.ThirdPartyWeekly.ResetTime)
+				fmt.Fprintf(stdout, "3W %s  %s\n", tpPct, tpReset)
 			}
 
 			ageStr := quota.FormatShortQuotaAge(acc, float64(nowTS))
@@ -1028,4 +1091,18 @@ func LoginCmdWithOptions(stdin io.Reader, stdout, stderr io.Writer, extraOpts ac
 
 	fmt.Fprintf(stdout, "\n%s✓ Successfully authenticated as %s%s\n", clrGreen, accounts.DisplayAccountName(acc), clrReset)
 	return 0
+}
+
+// weeklyBlocked reports an exhausted weekly (baseline) quota, which makes every model on the account
+// unusable, Claude/GPT included; its 5H and 3P windows then must not render as healthy.
+func weeklyBlocked(gwFrac *float64) bool {
+	return gwFrac != nil && *gwFrac <= config.DepletedThreshold
+}
+
+// gatedBar dims a bar whose window is unusable because the weekly quota is exhausted.
+func gatedBar(blocked bool, bar string) string {
+	if !blocked {
+		return bar
+	}
+	return clrDim + StripANSI(bar) + clrReset
 }
