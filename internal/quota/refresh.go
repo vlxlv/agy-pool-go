@@ -275,7 +275,7 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 				foundQuota := false
 				for _, group := range summary.Groups {
 					for _, bucket := range group.Buckets {
-						fraction := ParseQuotaFraction(bucket.RemainingFraction)
+						fraction := remainingFraction(bucket.RemainingFraction, bucket.ResetTime)
 						if fraction == nil {
 							continue
 						}
@@ -409,11 +409,17 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, account
 			continue
 		}
 		if model, exists := res.Models[name]; exists && model.QuotaInfo != nil {
-			frac := ParseQuotaFraction(model.QuotaInfo.RemainingFraction)
+			frac := remainingFraction(model.QuotaInfo.RemainingFraction, model.QuotaInfo.ResetTime)
 			if frac != nil {
 				quotaData.Gemini5H = &storage.QuotaWindow{
 					Fraction:  frac,
 					ResetTime: model.QuotaInfo.ResetTime,
+				}
+				// This endpoint has no weekly window, so the copied one would be stale. An exhausted model
+				// whose reset lies beyond the 5h window is locked out by the weekly limit.
+				quotaData.GeminiWeekly = nil
+				if ts := ParseISOOrTimestamp(model.QuotaInfo.ResetTime); *frac == 0 && ts != nil && *ts-float64(time.Now().Unix()) > config.Window5HSecs {
+					quotaData.GeminiWeekly = &storage.QuotaWindow{Fraction: frac, ResetTime: model.QuotaInfo.ResetTime}
 				}
 				return nil
 			}
@@ -421,6 +427,16 @@ func fetchAvailableModelsQuota(ctx context.Context, headers http.Header, account
 	}
 
 	return errors.New("model response contained no quota information")
+}
+
+// remainingFraction parses an upstream quota fraction. Upstream omits remainingFraction when it is 0
+// (proto3 JSON drops default values), so a reset time without a fraction means the quota is exhausted.
+func remainingFraction(fraction, reset any) *float64 {
+	if fraction == nil && ParseISOOrTimestamp(reset) != nil {
+		zero := 0.0
+		return &zero
+	}
+	return ParseQuotaFraction(fraction)
 }
 
 func probeAndApplyValidationChallenge(ctx context.Context, headers http.Header, account *storage.Account) {

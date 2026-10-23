@@ -671,3 +671,102 @@ func TestQueryQuota_FallbackPicksGeminiModelDeterministically(t *testing.T) {
 		}
 	}
 }
+
+// Upstream omits remainingFraction when it is 0. An exhausted Gemini model whose reset is beyond the 5h
+// window means the weekly limit is spent, and must not keep the stale weekly value from the last summary.
+func TestQueryQuota_FallbackMissingFractionMeansWeeklyExhausted(t *testing.T) {
+	setupQuotaTestDir(t)
+
+	reset := time.Now().Add(26 * time.Hour).UTC().Format(time.RFC3339)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "retrieveUserQuotaSummary") {
+			fmt.Fprint(w, `{"groups":[{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1}]}]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"models":{"gemini-3-flash":{"quotaInfo":{"resetTime":%q}}}}`, reset)
+	}))
+	defer ts.Close()
+
+	BackendURLBaseProvider = func() string { return ts.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
+
+	acc := &storage.Account{ID: "acc-exhausted", LastQuota: &storage.QuotaState{
+		GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.62), ResetTime: "2030-01-01T00:00:00Z"},
+	}}
+	_ = storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}})
+
+	res, err := QueryQuota(acc)
+	if err != nil {
+		t.Fatalf("QueryQuota failed: %v", err)
+	}
+	if res.Gemini5H == nil || *res.Gemini5H.Fraction != 0 {
+		t.Errorf("expected Gemini 5h exhausted, got %+v", res.Gemini5H)
+	}
+	if res.GeminiWeekly == nil || *res.GeminiWeekly.Fraction != 0 || res.GeminiWeekly.ResetTime != reset {
+		t.Errorf("expected Gemini weekly exhausted until %s, got %+v", reset, res.GeminiWeekly)
+	}
+}
+
+// The fallback endpoint has no weekly window, so a healthy fallback must drop the stale weekly value.
+func TestQueryQuota_FallbackDropsStaleWeekly(t *testing.T) {
+	setupQuotaTestDir(t)
+
+	reset := time.Now().Add(3 * time.Hour).UTC().Format(time.RFC3339)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "retrieveUserQuotaSummary") {
+			fmt.Fprint(w, `{"groups":[]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"models":{"gemini-3-flash":{"quotaInfo":{"remainingFraction":0.9,"resetTime":%q}}}}`, reset)
+	}))
+	defer ts.Close()
+
+	BackendURLBaseProvider = func() string { return ts.URL }
+	TokenRefresher = func(account *storage.Account) (string, error) { return "mock-token", nil }
+
+	acc := &storage.Account{ID: "acc-healthy", LastQuota: &storage.QuotaState{
+		GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.62), ResetTime: "2030-01-01T00:00:00Z"},
+	}}
+	_ = storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc}})
+
+	res, err := QueryQuota(acc)
+	if err != nil {
+		t.Fatalf("QueryQuota failed: %v", err)
+	}
+	if res.Gemini5H == nil || *res.Gemini5H.Fraction != 0.9 {
+		t.Errorf("expected Gemini 5h 0.9, got %+v", res.Gemini5H)
+	}
+	if res.GeminiWeekly != nil {
+		t.Errorf("expected stale weekly dropped, got %+v", res.GeminiWeekly)
+	}
+}
+
+// A summary bucket with a reset time but no remainingFraction is exhausted, not unknown.
+func TestRemainingFraction_MissingMeansZero(t *testing.T) {
+	if f := remainingFraction(nil, "2030-01-01T00:00:00Z"); f == nil || *f != 0 {
+		t.Errorf("expected 0 for missing fraction with reset, got %v", f)
+	}
+	if f := remainingFraction(nil, nil); f != nil {
+		t.Errorf("expected nil without fraction or reset, got %v", *f)
+	}
+	if f := remainingFraction(0.4, nil); f == nil || *f != 0.4 {
+		t.Errorf("expected 0.4, got %v", f)
+	}
+}
+
+// A weekly window upstream stopped reporting must be labelled as such, not as a plain unknown.
+func TestWeeklyUnknownLabel(t *testing.T) {
+	updated := time.Now().Unix()
+	notRenewed := &storage.Account{LastQuota: &storage.QuotaState{
+		Gemini5H:  &storage.QuotaWindow{Fraction: floatPtr(0.9), ResetTime: "2030-01-01T00:00:00Z"},
+		UpdatedAt: &updated,
+	}}
+	if got := WeeklyUnknownLabel(notRenewed); got != "WK -- not reported upstream" {
+		t.Errorf("expected not-reported label, got %q", got)
+	}
+	if got := WeeklyUnknownLabel(&storage.Account{}); got != "WK -- unknown" {
+		t.Errorf("expected unknown label without a snapshot, got %q", got)
+	}
+}
