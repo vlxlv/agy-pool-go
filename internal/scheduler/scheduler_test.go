@@ -1444,3 +1444,98 @@ func TestSmartStrategy_Harvest15MinBucketAvoidsClockSeam(t *testing.T) {
 		t.Fatalf("expected 3m-to-reset harvest account before 56m-to-reset account, got %s", ordered[0].ID)
 	}
 }
+
+func TestMaxQuota_SmoothWeeklyTransitionNoCliffAt80Pct(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+	// acc79Weekly has Q7 = 0.79 (just below 0.80) with 6 days left in week, but 100% 5H quota.
+	acc79Weekly := &storage.Account{
+		ID:     "acc_q7_79_q5_100",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(1.00), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.79), ResetTime: "2026-09-22T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+	// acc80WeeklyLow5H has Q7 = 0.80, but only 60% 5H quota.
+	acc80WeeklyLow5H := &storage.Account{
+		ID:     "acc_q7_80_q5_60",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.60), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.80), ResetTime: "2026-09-22T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{acc80WeeklyLow5H, acc79Weekly}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_q7_79_q5_100" {
+		t.Fatalf("expected smooth transition at 79%% weekly (100%% 5H) to beat 80%% weekly (60%% 5H), got %s", ordered[0].ID)
+	}
+}
+
+func TestMaxQuota_InFlightSpillsAcrossClosePaceBuckets(t *testing.T) {
+	observability.ResetInFlight()
+	defer observability.ResetInFlight()
+
+	now := 1789560000.0
+	acc95 := &storage.Account{
+		ID:     "acc_95",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.95), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.95), ResetTime: "2026-09-23T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+	acc93 := &storage.Account{
+		ID:     "acc_93",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.93), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.93), ResetTime: "2026-09-23T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+
+	// When both idle, acc_95 wins.
+	if ordered := OrderCandidates([]*storage.Account{acc93, acc95}, config.StrategyMaxQuota, nil, now); ordered[0].ID != "acc_95" {
+		t.Fatalf("expected acc_95 when idle, got %s", ordered[0].ID)
+	}
+
+	// With 1 in-flight request on acc_95, virtual 3% deduction spills the next request to idle acc_93.
+	done := observability.StartInFlightGeneration("acc_95")
+	defer done()
+	if ordered := OrderCandidates([]*storage.Account{acc95, acc93}, config.StrategyMaxQuota, nil, now); ordered[0].ID != "acc_93" {
+		t.Fatalf("expected in-flight penalty to spill to idle acc_93, got %s", ordered[0].ID)
+	}
+}
+
+func TestMaxQuota_TotalPaceTieBreaker(t *testing.T) {
+	now := 1789560000.0
+	// Both have identical 5H bottleneck (80%, same reset), so WorstPace and RawFloor tie;
+	// accHigherWeekly has 98% weekly vs 82% weekly.
+	accLowerWeekly := &storage.Account{
+		ID:     "acc_wk_82",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.80), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.82), ResetTime: "2026-09-22T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+	accHigherWeekly := &storage.Account{
+		ID:     "acc_wk_98",
+		Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.80), ResetTime: "2026-09-16T16:00:00Z"},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.98), ResetTime: "2026-09-22T12:00:00Z"},
+			UpdatedAt:    int64Ptr(int64(now - 10)),
+		},
+	}
+
+	ordered := OrderCandidates([]*storage.Account{accLowerWeekly, accHigherWeekly}, config.StrategyMaxQuota, nil, now)
+	if len(ordered) != 2 || ordered[0].ID != "acc_wk_98" {
+		t.Fatalf("expected acc_wk_98 to win via TotalPace tie-breaker, got %s", ordered[0].ID)
+	}
+}

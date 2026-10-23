@@ -88,11 +88,19 @@ func IsRestricted(acc *storage.Account) bool {
 // EffectiveWorstPace returns the scheduling pace for candidate ranking.
 // When an account's weekly quota is abundant (>= 0.80), the weekly window is not
 // a constraint bottleneck; we use 5H pace to avoid cold-start linear decay starvation
-// at the beginning of a 7-day cycle.
+// at the beginning of a 7-day cycle. Between 0.50 and 0.80 weekly quota, it blends
+// smoothly from Pace5 into WorstPace to avoid a cliff discontinuity at 0.80.
 func EffectiveWorstPace(capState quota.CapacityState) float64 {
 	if capState.Q5Known && capState.Q5 != nil && capState.Pace5 != nil {
-		if capState.Q7Known && capState.Q7 != nil && *capState.Q7 >= 0.80 {
-			return *capState.Pace5
+		if capState.Q7Known && capState.Q7 != nil {
+			q7 := *capState.Q7
+			if q7 >= 0.80 {
+				return *capState.Pace5
+			}
+			if q7 > 0.50 && capState.WorstPace < *capState.Pace5 {
+				w := (0.80 - q7) / 0.30
+				return (1.0-w)*(*capState.Pace5) + w*capState.WorstPace
+			}
 		}
 	}
 	return capState.WorstPace
@@ -205,13 +213,13 @@ func smartEffectiveHeadroom(capState quota.CapacityState) float64 {
 
 // resetBucket quantizes a reset timestamp relative to nowTime: 15-minute buckets within the 90m
 // 5H harvest range so imminent resets are never merged with hour-away resets across a UTC clock seam,
-// and 1-hour buckets beyond 90m.
+// and 1-hour buckets (offset by 100 to preserve monotonicity across the 90m boundary) beyond 90m.
 func resetBucket(resetTime time.Time, nowTime time.Time) int64 {
 	rem := resetTime.Sub(nowTime)
 	if rem <= SmartHarvest5HWindow {
 		return int64(rem / (15 * time.Minute))
 	}
-	return int64(rem / time.Hour)
+	return 100 + int64(rem/time.Hour)
 }
 
 // compareResetTiming compares two accounts' upcoming reset schedules (earliest reset first, then
@@ -262,18 +270,24 @@ func compareResetTiming(a, b quota.CapacityState, nowTime time.Time) int {
 // It also caps how many concurrent requests a harvest account takes before it competes as cruising.
 const smartInFlightPerTier = 4
 
+// maxQuotaInFlightPenalty is the virtual quota/pace deduction per active in-flight request under
+// max_quota (3% per concurrent request), allowing bursts to spill across closely matched accounts
+// without overriding a whole-tier (20%) headroom advantage on a single request.
+const maxQuotaInFlightPenalty = 0.03
+
 // sortKey is computed once per account before sorting, so comparators never see in-flight counts
 // change mid-sort and capacity state is not recomputed per comparison.
 type sortKey struct {
-	cap      quota.CapacityState
-	fresh    int
-	flight   int64
-	hits     int64
-	harvest  bool
-	harvestB int64
-	score    int // smart: health tier minus in-flight penalty
-	pace     float64
-	floor    float64
+	cap       quota.CapacityState
+	fresh     int
+	flight    int64
+	hits      int64
+	harvest   bool
+	harvestB  int64
+	score     int // smart: health tier minus in-flight penalty
+	pace      float64
+	floor     float64
+	totalPace float64
 }
 
 // bucket quantizes v so epsilon comparisons stay transitive; infinities pass through unchanged.
@@ -300,13 +314,16 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 			continue
 		}
 		capState := quota.ComputeCapacityState(acc, now)
+		flight := observability.GetInFlightGeneration(acc.ID)
+		flightPenalty := float64(flight) * maxQuotaInFlightPenalty
 		k := &sortKey{
-			cap:    capState,
-			fresh:  quota.FreshnessRank(acc, now),
-			flight: observability.GetInFlightGeneration(acc.ID),
-			hits:   acc.GetHits(),
-			pace:   bucket(EffectiveWorstPace(capState), paceEpsilon),
-			floor:  bucket(capState.RawFloor, paceEpsilon),
+			cap:       capState,
+			fresh:     quota.FreshnessRank(acc, now),
+			flight:    flight,
+			hits:      acc.GetHits(),
+			pace:      bucket(EffectiveWorstPace(capState)-flightPenalty, paceEpsilon),
+			floor:     bucket(capState.RawFloor-flightPenalty, paceEpsilon),
+			totalPace: bucket(capState.TotalPace-flightPenalty, paceEpsilon),
 		}
 		harvestT, harvest := SmartHarvestCandidate(capState, nowTime)
 		k.harvest = harvest && k.flight < smartInFlightPerTier
@@ -350,6 +367,9 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 			}
 			if a.floor != b.floor {
 				return a.floor > b.floor
+			}
+			if a.totalPace != b.totalPace {
+				return a.totalPace > b.totalPace
 			}
 			if a.flight != b.flight {
 				return a.flight < b.flight
