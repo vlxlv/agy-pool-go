@@ -273,6 +273,9 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 			var summary quotaSummaryResponse
 			if err := json.Unmarshal(bodyBytes, &summary); err == nil {
 				foundQuota := false
+				// Upstream also lists variant Gemini buckets (e.g. "gemini-argon-wtu-weekly") with their own
+				// limits; the exact "gemini-5h"/"gemini-weekly" buckets are the agy limits and must win.
+				exact5H, exactWeekly := false, false
 				for _, group := range summary.Groups {
 					for _, bucket := range group.Buckets {
 						fraction := remainingFraction(bucket.RemainingFraction, bucket.ResetTime)
@@ -283,9 +286,17 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 						w := strings.ToLower(bucket.Window)
 						if strings.Contains(bid, "gemini") {
 							if strings.Contains(bid, "5h") || w == "5h" {
+								if exact5H {
+									continue
+								}
+								exact5H = bid == "gemini-5h"
 								quotaData.Gemini5H = &storage.QuotaWindow{Fraction: fraction, ResetTime: bucket.ResetTime}
 								foundQuota = true
 							} else if strings.Contains(bid, "weekly") || w == "weekly" {
+								if exactWeekly {
+									continue
+								}
+								exactWeekly = bid == "gemini-weekly"
 								quotaData.GeminiWeekly = &storage.QuotaWindow{Fraction: fraction, ResetTime: bucket.ResetTime}
 								foundQuota = true
 							}
