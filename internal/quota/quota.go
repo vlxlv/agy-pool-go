@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"runtime"
@@ -478,6 +479,35 @@ func IsQuotaError(status int, body []byte) bool {
 		}
 	}
 	return false
+}
+
+// ParseQuotaResetFromBody returns the unix time upstream says an exhausted quota resets, taken from a
+// RESOURCE_EXHAUSTED body's ErrorInfo quotaResetTimeStamp or, failing that, its RetryInfo retryDelay.
+func ParseQuotaResetFromBody(body []byte, now time.Time) *float64 {
+	var e struct {
+		Error struct {
+			Details []struct {
+				Metadata   map[string]string `json:"metadata"`
+				RetryDelay string            `json:"retryDelay"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return nil
+	}
+	for _, d := range e.Error.Details {
+		if ts, err := time.Parse(time.RFC3339, d.Metadata["quotaResetTimeStamp"]); err == nil {
+			v := float64(ts.Unix())
+			return &v
+		}
+	}
+	for _, d := range e.Error.Details {
+		if dur, err := time.ParseDuration(d.RetryDelay); err == nil {
+			v := float64(now.Add(dur).Unix())
+			return &v
+		}
+	}
+	return nil
 }
 
 // ParseRetryAfter parses a Retry-After header string into delay seconds clamped between 5s and 86400s (24h).

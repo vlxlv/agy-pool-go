@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -72,7 +73,7 @@ func TestLifecyclePersistenceErrorsAreObservable(t *testing.T) {
 	if err := RecordAuthError(acc); !errors.Is(err, injected) {
 		t.Fatalf("auth persistence error = %v, want injected error", err)
 	}
-	if _, err := RecordQuotaError(acc, nil); !errors.Is(err, injected) {
+	if _, err := RecordQuotaError(acc, nil, nil); !errors.Is(err, injected) {
 		t.Fatalf("quota persistence error = %v, want injected error", err)
 	}
 	if err := RecordSuccess(acc, true); !errors.Is(err, injected) {
@@ -566,7 +567,7 @@ func TestRecordQuotaError_429Atomicity(t *testing.T) {
 	headers.Set("Retry-After", "120")
 
 	// Call RecordQuotaError
-	delay, err := RecordQuotaError(acc, headers)
+	delay, err := RecordQuotaError(acc, headers, nil)
 	if err != nil {
 		t.Fatalf("RecordQuotaError failed: %v", err)
 	}
@@ -721,5 +722,36 @@ func TestProxy_LocationError_FailsOverAndSoftCooldown(t *testing.T) {
 	stored1After := storage.FindAccount(loaded2, acc1)
 	if stored1After.RateLimitedUntil != nil {
 		t.Fatalf("expected RateLimitedUntil to be cleared after success, got %v", stored1After.RateLimitedUntil)
+	}
+}
+
+func TestRecordQuotaError_UsesBodyResetWhenNoRetryAfter(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	pool := storage.NewEmptyPool()
+	acc := &storage.Account{ID: "acc_weekly", Email: "weekly@example.com"}
+	pool.Accounts = append(pool.Accounts, acc)
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save test pool: %v", err)
+	}
+
+	// Captured upstream reply for an exhausted weekly quota (no Retry-After header).
+	reset := time.Now().Add(30 * time.Hour).UTC().Format(time.RFC3339)
+	body := []byte(`{"error":{"code":429,"message":"Individual quota reached.","status":"RESOURCE_EXHAUSTED","details":[` +
+		`{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"quotaResetTimeStamp":"` + reset + `"}},` +
+		`{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"100514.6s"}]}}`)
+	delay, err := RecordQuotaError(acc, nil, body)
+	if err != nil {
+		t.Fatalf("RecordQuotaError failed: %v", err)
+	}
+	if delay < 29*3600 || delay > 30*3600 {
+		t.Fatalf("expected cooldown until quotaResetTimeStamp (~30h), got %ds", delay)
+	}
+
+	if ts := quota.ParseQuotaResetFromBody([]byte(`{"error":{"details":[{"retryDelay":"100s"}]}}`), time.Unix(1000, 0)); ts == nil || *ts != 1100 {
+		t.Fatalf("expected retryDelay fallback 1100, got %v", ts)
+	}
+	if quota.ParseQuotaResetFromBody([]byte("not json"), time.Now()) != nil {
+		t.Fatalf("non-JSON body must yield nil")
 	}
 }
