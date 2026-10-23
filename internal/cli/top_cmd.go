@@ -860,7 +860,7 @@ func renderAccountDetailsWide(sb *strings.Builder, acc *storage.Account, nowTS i
 	}
 
 	if gwFrac == nil {
-		sb.WriteString("  WK -- unknown\n")
+		sb.WriteString("  " + quota.WeeklyUnknownLabel(acc) + "\n")
 	} else {
 		pctVal := int(math.Round(*gwFrac * 100.0))
 		gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -979,7 +979,7 @@ func renderAccountDetailsCompact(sb *strings.Builder, acc *storage.Account, nowT
 	}
 
 	if gwFrac == nil {
-		sb.WriteString("  WK -- unknown\n")
+		sb.WriteString("  " + quota.WeeklyUnknownLabel(acc) + "\n")
 	} else {
 		pctVal := int(math.Round(*gwFrac * 100.0))
 		gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -1090,7 +1090,7 @@ func renderAccountsMobile(
 			}
 
 			if gwFrac == nil {
-				sb.WriteString("WK -- unknown\n")
+				sb.WriteString(quota.WeeklyUnknownLabel(acc) + "\n")
 			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -1187,7 +1187,7 @@ func renderAccountsVeryNarrow(
 			}
 
 			if gwFrac == nil {
-				sb.WriteString("WK -- unknown\n")
+				sb.WriteString(quota.WeeklyUnknownLabel(acc) + "\n")
 			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))

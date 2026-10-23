@@ -358,7 +358,7 @@ func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, ga
 			}
 
 			if gwFrac == nil {
-				fmt.Fprintln(stdout, "  WK -- unknown")
+				fmt.Fprintln(stdout, "  "+quota.WeeklyUnknownLabel(acc))
 			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -497,7 +497,7 @@ func renderCompactQuotaDashboard(accList []*storage.Account, pool *storage.Pool,
 			}
 
 			if gwFrac == nil {
-				fmt.Fprintln(stdout, "  WK -- unknown")
+				fmt.Fprintln(stdout, "  "+quota.WeeklyUnknownLabel(acc))
 			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -614,7 +614,7 @@ func renderMobileQuotaDashboard(accList []*storage.Account, pool *storage.Pool, 
 			}
 
 			if gwFrac == nil {
-				fmt.Fprintln(stdout, "WK -- unknown")
+				fmt.Fprintln(stdout, quota.WeeklyUnknownLabel(acc))
 			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
@@ -727,7 +727,7 @@ func renderVeryNarrowQuotaDashboard(accList []*storage.Account, pool *storage.Po
 			}
 
 			if gwFrac == nil {
-				fmt.Fprintln(stdout, "WK -- unknown")
+				fmt.Fprintln(stdout, quota.WeeklyUnknownLabel(acc))
 			} else {
 				pctVal := int(math.Round(*gwFrac * 100.0))
 				gwPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))

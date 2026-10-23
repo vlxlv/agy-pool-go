@@ -176,6 +176,15 @@ func GeminiQuotaNotRenewed(acc *storage.Account) bool {
 	return false
 }
 
+// WeeklyUnknownLabel explains a missing weekly quota, so a refresh that upstream stopped
+// answering is visible in the panel instead of only in a log line nobody sees.
+func WeeklyUnknownLabel(acc *storage.Account) string {
+	if GeminiQuotaNotRenewed(acc) {
+		return "WK -- not reported upstream"
+	}
+	return "WK -- unknown"
+}
+
 // FreshnessRank returns the scheduling confidence rank:
 // fresh (2), aging (2), stale (1), unknown (0)
 func FreshnessRank(acc *storage.Account, now float64) int {
