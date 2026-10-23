@@ -311,6 +311,7 @@ func QueryQuotaContext(ctx context.Context, account *storage.Account) (res *stor
 					}
 				}
 				if foundQuota {
+					appendQuotaHistory(account.ID, account.LastQuota, quotaData)
 					probeAndApplyValidationChallenge(ctx, headers, account)
 					return finalizeAndPersistQuota(account, quotaData)
 				}
