@@ -1006,7 +1006,7 @@ func (h *Handler) dispatchAccount(
 
 		// Failover on 429 or 403 quota exhaustion
 		if quota.IsQuotaError(statusCode, errBody) {
-			delay, persistErr := RecordQuotaError(acc, resp.Header)
+			delay, persistErr := RecordQuotaError(acc, resp.Header, errBody)
 			if persistErr != nil {
 				logMessage("PROXY WARN", "failed to persist quota cooldown; continuing failover")
 			}

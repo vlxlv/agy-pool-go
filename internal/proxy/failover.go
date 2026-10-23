@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
@@ -75,13 +76,19 @@ func RecordSuccess(account *storage.Account, isGeneration bool) error {
 }
 
 // RecordQuotaError parses Retry-After and applies rate limit cooldown under transaction.
-func RecordQuotaError(account *storage.Account, headers http.Header) (int64, error) {
+// Without Retry-After, the reset time in the RESOURCE_EXHAUSTED body is used; a weekly limit can be days away.
+func RecordQuotaError(account *storage.Account, headers http.Header, body []byte) (int64, error) {
 	retryAfterStr := ""
 	if headers != nil {
 		retryAfterStr = headers.Get("Retry-After")
 	}
 	delay := quota.ParseRetryAfter(retryAfterStr, 300)
 	now := float64(NowFunc().Unix())
+	if retryAfterStr == "" {
+		if ts := quota.ParseQuotaResetFromBody(body, time.Unix(int64(now), 0)); ts != nil && *ts > now {
+			delay = int64(*ts - now)
+		}
+	}
 
 	err := runPoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
