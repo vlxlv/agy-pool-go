@@ -606,3 +606,39 @@ func TestQuotaCmd_ShowEmail(t *testing.T) {
 		t.Errorf("quota without flag must not contain email, got: %s", stdout.String())
 	}
 }
+
+func TestQuotaCmd_AutoHidesUnusedThirdPartyWindows(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now().Unix()
+	half, full, used := 0.70, 1.0, 0.97
+	mk := func(id string, tp5, tpw *float64) *storage.Account {
+		return &storage.Account{
+			ID: id, Name: id, Status: "ready", CreatedAt: &now,
+			LastQuota: &storage.QuotaState{
+				Gemini5H:         &storage.QuotaWindow{Fraction: &half},
+				GeminiWeekly:     &storage.QuotaWindow{Fraction: &half},
+				ThirdParty5H:     &storage.QuotaWindow{Fraction: tp5},
+				ThirdPartyWeekly: &storage.QuotaWindow{Fraction: tpw},
+			},
+		}
+	}
+	activeID := "unused"
+	_ = storage.SavePool(&storage.Pool{
+		Version: 1, ActiveAccountID: &activeID, Strategy: config.StrategyMaxQuota,
+		Accounts: []*storage.Account{mk("unused", &full, &full), mk("used", &used, &full)},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"quota"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("quota failed: %d %s", code, stderr.String())
+	}
+	out := StripANSI(stdout.String())
+	if n := strings.Count(out, "3P "); n != 1 {
+		t.Errorf("expected one 3P line (only the used account), got %d:\n%s", n, out)
+	}
+	if strings.Contains(out, "3W ") {
+		t.Errorf("3W at 100%% must be hidden:\n%s", out)
+	}
+}

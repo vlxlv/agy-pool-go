@@ -877,7 +877,7 @@ func renderAccountDetailsWide(sb *strings.Builder, acc *storage.Account, nowTS i
 		sb.WriteString(fmt.Sprintf("  WK  %s %s   %s\n", gwBar, gwPct, r7Str))
 	}
 
-	if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil {
+	if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
 		pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
 		tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 		tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdParty5H.Fraction, 20))
@@ -888,7 +888,7 @@ func renderAccountDetailsWide(sb *strings.Builder, acc *storage.Account, nowTS i
 		}
 		sb.WriteString(fmt.Sprintf("  3P  %s %s   %s\n", tpBar, tpPct, rTpStr))
 	}
-	if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil {
+	if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil && *q.ThirdPartyWeekly.Fraction < 1.0 {
 		pctVal := int(math.Round(*q.ThirdPartyWeekly.Fraction * 100.0))
 		tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 		tpBar := gatedBar(wkBlocked, quota.RenderBlockProgressBar(q.ThirdPartyWeekly.Fraction, 20))
@@ -1017,7 +1017,7 @@ func renderAccountDetailsCompact(sb *strings.Builder, acc *storage.Account, nowT
 		}
 	}
 
-	if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil {
+	if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
 		pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
 		tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 		tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
@@ -1034,7 +1034,7 @@ func renderAccountDetailsCompact(sb *strings.Builder, acc *storage.Account, nowT
 			sb.WriteString(fmt.Sprintf("  3P %s  %s\n", tpPct, rTpStr))
 		}
 	}
-	if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil {
+	if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil && *q.ThirdPartyWeekly.Fraction < 1.0 {
 		pctVal := int(math.Round(*q.ThirdPartyWeekly.Fraction * 100.0))
 		tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 		tpReset := quota.FormatCompactRemainingTime(q.ThirdPartyWeekly.ResetTime)
@@ -1243,7 +1243,7 @@ func renderAccountsVeryNarrow(
 				sb.WriteString(lineWk + "\n")
 			}
 
-			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil {
+			if q != nil && q.ThirdParty5H != nil && q.ThirdParty5H.Fraction != nil && *q.ThirdParty5H.Fraction < 1.0 {
 				pctVal := int(math.Round(*q.ThirdParty5H.Fraction * 100.0))
 				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				tpReset := quota.FormatCompactRemainingTime(q.ThirdParty5H.ResetTime)
@@ -1253,7 +1253,7 @@ func renderAccountsVeryNarrow(
 				}
 				sb.WriteString(lineTp + "\n")
 			}
-			if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil {
+			if q != nil && q.ThirdPartyWeekly != nil && q.ThirdPartyWeekly.Fraction != nil && *q.ThirdPartyWeekly.Fraction < 1.0 {
 				pctVal := int(math.Round(*q.ThirdPartyWeekly.Fraction * 100.0))
 				tpPct := fmt.Sprintf("%4s", fmt.Sprintf("%d%%", pctVal))
 				tpReset := quota.FormatCompactRemainingTime(q.ThirdPartyWeekly.ResetTime)
