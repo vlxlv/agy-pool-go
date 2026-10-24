@@ -609,6 +609,12 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					affinityStatus = "hit"
 				} else {
 					affinityStatus = "new"
+					// For new sessions under smart strategy, rotate candidates within top health tier
+					// using the round-robin cursor to achieve balanced multi-account session distribution.
+					if strategy == config.StrategySmart {
+						candidates = scheduler.RotateTopTier(candidates, scheduler.GetSmartRRCursor(), now)
+						scheduler.AdvanceSmartRRCursor()
+					}
 				}
 			}
 			// After affinity, so a conversation bound to an account with no capacity for its model moves on.
