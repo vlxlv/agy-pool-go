@@ -271,8 +271,9 @@ func QuotaCmd(stdout, stderr io.Writer, args ...string) int {
 	return 0
 }
 
-// refreshAllQuotas fetches live quota for every enabled account in parallel, so `quota` is not up to
-// one daemon sweep (3m) behind. Failures keep the cached snapshot, whose age the listing still shows.
+// refreshAllQuotas fetches live quota in parallel for every enabled account whose snapshot is no longer
+// fresh (<60s, no reset since), so `quota` is neither one daemon sweep (3m) behind nor slow on reruns.
+// Failures keep the cached snapshot, whose age the listing still shows.
 func refreshAllQuotas(timeout time.Duration) {
 	pool, err := storage.LoadPool()
 	if err != nil || pool == nil {
@@ -280,9 +281,10 @@ func refreshAllQuotas(timeout time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	now := float64(time.Now().Unix())
 	var wg sync.WaitGroup
 	for _, acc := range pool.Accounts {
-		if acc == nil || acc.Status == storage.StatusDisabled {
+		if acc == nil || acc.Status == storage.StatusDisabled || !quota.RefreshNeeded(acc, now) {
 			continue
 		}
 		wg.Go(func() { _, _ = quota.QueryQuotaContext(ctx, acc) })
