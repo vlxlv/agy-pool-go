@@ -633,7 +633,21 @@ func TestIsLocationError(t *testing.T) {
 	}
 }
 
-func TestProxy_LocationError_FailsOverAndSoftCooldown(t *testing.T) {
+func TestProxy_SoftFailover_FailsOverAndSoftCooldown(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"location", http.StatusBadRequest, `{"error":{"code":400,"message":"User location is not supported for the API use."}}`},
+		{"unavailable", http.StatusServiceUnavailable, `{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { testSoftFailover(t, tc.status, tc.body) })
+	}
+}
+
+func testSoftFailover(t *testing.T, status int, body string) {
 	setupIsolatedTestDir(t)
 	resetProviders()
 	defer resetProviders()
@@ -643,8 +657,8 @@ func TestProxy_LocationError_FailsOverAndSoftCooldown(t *testing.T) {
 		authHeader := r.Header.Get("Authorization")
 		if strings.Contains(authHeader, "token-acc_1") {
 			atomic.AddInt32(&acc1Hits, 1)
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":{"code":400,"message":"User location is not supported for the API use."}}`))
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
 			return
 		}
 		if strings.Contains(authHeader, "token-acc_2") {
