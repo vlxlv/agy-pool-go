@@ -81,7 +81,12 @@ func (ctx *InstanceContext) LockFile(name string) string {
 
 // RuntimeFile returns the canonical path to the instance runtime stats snapshot file.
 func (ctx *InstanceContext) RuntimeFile() string {
-	return filepath.Join(ctx.DataDir, "agy-pool-runtime.json")
+	return RuntimeFileIn(ctx.DataDir)
+}
+
+// RuntimeFileIn returns the runtime stats path the daemon writes in dataDir.
+func RuntimeFileIn(dataDir string) string {
+	return filepath.Join(dataDir, "agy-pool-runtime.json")
 }
 
 // GetRuntimeStats attempts to read runtime stats for an instance, validating expected PID and freshness.

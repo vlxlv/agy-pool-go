@@ -88,6 +88,9 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	}
 	defer unlock()
 
+	// Restore per-model pauses so a restart does not resend a paused model to its account.
+	proxy.LoadModelCooldowns()
+
 	// 2. Open TCP listener
 	addr := fmt.Sprintf("%s:%d", ctxInst.ListenHost, port)
 	listener, err := net.Listen("tcp", addr)

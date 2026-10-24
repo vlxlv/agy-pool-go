@@ -12,6 +12,7 @@ import (
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
+	"github.com/vlxlv/agy-pool-go/internal/proxy"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -36,6 +37,10 @@ type RuntimeStats struct {
 	NumGC      uint32           `json:"num_gc"`
 	GoVersion  string           `json:"go_version"`
 	InFlight   map[string]int64 `json:"in_flight,omitempty"`
+	// Per-model account pauses (accountID -> model -> until) and the model last routed, so CLI
+	// commands can show the account routing will actually pick.
+	ModelPauses map[string]map[string]time.Time `json:"model_pauses,omitempty"`
+	LastModel   string                          `json:"last_model,omitempty"`
 
 	observability.Snapshot
 }
@@ -51,17 +56,19 @@ func CollectRuntimeStats(pid int, startedAt time.Time) RuntimeStats {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return RuntimeStats{
-		PID:        pid,
-		StartedAt:  startedAt,
-		UpdatedAt:  time.Now(),
-		Goroutines: runtime.NumGoroutine(),
-		AllocBytes: m.Alloc,
-		HeapBytes:  m.HeapInuse,
-		SysBytes:   m.Sys,
-		NumGC:      m.NumGC,
-		GoVersion:  runtime.Version(),
-		InFlight:   observability.GetAllInFlightGenerations(),
-		Snapshot:   observability.GetSnapshot(),
+		PID:         pid,
+		StartedAt:   startedAt,
+		UpdatedAt:   time.Now(),
+		Goroutines:  runtime.NumGoroutine(),
+		AllocBytes:  m.Alloc,
+		HeapBytes:   m.HeapInuse,
+		SysBytes:    m.Sys,
+		NumGC:       m.NumGC,
+		GoVersion:   runtime.Version(),
+		InFlight:    observability.GetAllInFlightGenerations(),
+		ModelPauses: proxy.ActiveModelPauses(time.Now()),
+		LastModel:   proxy.LastGenerationModel(),
+		Snapshot:    observability.GetSnapshot(),
 	}
 }
 
