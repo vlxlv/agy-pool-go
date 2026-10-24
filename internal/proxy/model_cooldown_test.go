@@ -242,3 +242,66 @@ func TestProxy_SlowStart_CoolsDownOnlyThatModel(t *testing.T) {
 		t.Fatalf("expected cooldown cleared by fast answer, got %s", got)
 	}
 }
+
+func TestModelCooldown_PublishedState(t *testing.T) {
+	resetProviders()
+	defer resetProviders()
+	now := time.Unix(1_800_000_000, 0)
+	NowFunc = func() time.Time { return now }
+
+	if LastGenerationModel() != "" || ActiveModelPauses(now) != nil {
+		t.Fatal("expected empty state after reset")
+	}
+	RecordModelCapacityError("a", "m")
+	ExcludeModelCooldowns(nil, "m2", now)
+
+	if got := LastGenerationModel(); got != "m2" {
+		t.Fatalf("LastGenerationModel = %q, want m2", got)
+	}
+	pauses := ActiveModelPauses(now)
+	if until := pauses["a"]["m"]; !until.Equal(now.Add(time.Hour)) {
+		t.Fatalf("pause for a/m = %v, want %v (all: %v)", until, now.Add(time.Hour), pauses)
+	}
+	if ActiveModelPauses(now.Add(time.Hour)) != nil {
+		t.Fatal("expired pause still published")
+	}
+}
+
+func TestModelCooldown_SurvivesRestart(t *testing.T) {
+	setupIsolatedTestDir(t)
+	resetProviders()
+	defer resetProviders()
+	now := time.Unix(1_800_000_000, 0)
+	NowFunc = func() time.Time { return now }
+	if err := storage.SavePool(storage.NewEmptyPool()); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+	restart := func() {
+		modelCooldownMu.Lock()
+		clear(modelCooldowns)
+		modelCooldownMu.Unlock()
+		LoadModelCooldowns()
+	}
+
+	LoadModelCooldowns() // daemon start: nothing saved yet
+	RecordModelCapacityError("a", "m")
+	RecordModelCapacityError("a", "m") // backoff now 2h
+
+	// An ordinary pool save must not wipe the saved pauses.
+	if err := storage.SavePool(storage.NewEmptyPool()); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+	restart()
+	if until := ActiveModelPauses(now)["a"]["m"]; !until.Equal(now.Add(2 * time.Hour)) {
+		t.Fatalf("restored pause = %v, want %v", until, now.Add(2*time.Hour))
+	}
+	if got := RecordModelCapacityError("a", "m"); got != 4*time.Hour {
+		t.Fatalf("backoff after restart = %s, want 4h", got)
+	}
+
+	ClearModelCooldown("a", "m")
+	restart()
+	if p := ActiveModelPauses(now); p != nil {
+		t.Fatalf("cleared pause came back after restart: %v", p)
+	}
+}

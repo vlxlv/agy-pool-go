@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,11 +25,64 @@ var modelSlowTTFB = 30 * time.Second
 
 // modelCooldowns tracks per-(account, model) capacity cooldowns. Upstream can run out of capacity for one
 // model on one account while the account keeps serving other models, so this is narrower than RateLimitedUntil.
-// In-memory only: capacity outages are transient, and a restart costs at most one more failed attempt.
+// The daemon saves them in the state DB (see LoadModelCooldowns) so a restart does not retry paused accounts.
 var (
-	modelCooldownMu sync.Mutex
-	modelCooldowns  = map[string]modelCooldown{}
+	modelCooldownMu      sync.Mutex
+	modelCooldowns       = map[string]modelCooldown{}
+	lastModel            string // model of the latest generation request, published so the CLI can mirror routing
+	persistModelCooldown bool   // set by LoadModelCooldowns; off in tests and CLI processes
 )
+
+const modelPausesKey = "model_pauses"
+
+type persistedModelCooldown struct {
+	Until   time.Time     `json:"until"`
+	Backoff time.Duration `json:"backoff"`
+}
+
+// LoadModelCooldowns restores pauses saved by a previous daemon run and turns on saving for later
+// changes. Only the daemon calls it, under its PID lock. A failed load is logged and starts empty.
+func LoadModelCooldowns() {
+	modelCooldownMu.Lock()
+	defer modelCooldownMu.Unlock()
+	persistModelCooldown = true
+	raw, err := storage.LoadRuntimeValue(modelPausesKey)
+	var saved map[string]persistedModelCooldown
+	if err == nil && raw != "" {
+		err = json.Unmarshal([]byte(raw), &saved)
+	}
+	if err != nil {
+		logMessage("PROXY WARN", fmt.Sprintf("could not restore model pauses, starting with none: %v", err))
+		return
+	}
+	for key, p := range saved {
+		modelCooldowns[key] = modelCooldown{until: p.Until, backoff: p.Backoff}
+	}
+}
+
+// saveModelCooldownsLocked writes all pauses to the state DB. Caller holds modelCooldownMu.
+// A failed write is logged; routing keeps using the in-memory state.
+func saveModelCooldownsLocked() {
+	if !persistModelCooldown {
+		return
+	}
+	value := ""
+	if len(modelCooldowns) > 0 {
+		out := make(map[string]persistedModelCooldown, len(modelCooldowns))
+		for key, c := range modelCooldowns {
+			out[key] = persistedModelCooldown{Until: c.until, Backoff: c.backoff}
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			logMessage("PROXY WARN", fmt.Sprintf("failed to encode model pauses: %v", err))
+			return
+		}
+		value = string(b)
+	}
+	if err := storage.SaveRuntimeValue(modelPausesKey, value); err != nil {
+		logMessage("PROXY WARN", fmt.Sprintf("failed to save model pauses; they will not survive a restart: %v", err))
+	}
+}
 
 type modelCooldown struct {
 	until   time.Time
@@ -47,6 +101,7 @@ func RecordModelCapacityError(accountID, model string) time.Duration {
 	key := modelCooldownKey(accountID, model)
 	backoff := min(max(modelCooldowns[key].backoff*2, modelCooldownMin), modelCooldownMax)
 	modelCooldowns[key] = modelCooldown{until: NowFunc().Add(backoff), backoff: backoff}
+	saveModelCooldownsLocked()
 	return backoff
 }
 
@@ -68,13 +123,48 @@ func recordModelLatency(acc *storage.Account, model string, ttfb time.Duration) 
 func ClearModelCooldown(accountID, model string) {
 	modelCooldownMu.Lock()
 	defer modelCooldownMu.Unlock()
-	delete(modelCooldowns, modelCooldownKey(accountID, model))
+	key := modelCooldownKey(accountID, model)
+	if _, ok := modelCooldowns[key]; !ok {
+		return // the common case on every fast answer: nothing to clear, so no DB write
+	}
+	delete(modelCooldowns, key)
+	saveModelCooldownsLocked()
 }
 
 func resetModelCooldowns() {
 	modelCooldownMu.Lock()
 	defer modelCooldownMu.Unlock()
 	clear(modelCooldowns)
+	lastModel = ""
+	persistModelCooldown = false
+}
+
+// ActiveModelPauses returns accountID -> model -> pause end for pauses still running at now.
+func ActiveModelPauses(now time.Time) map[string]map[string]time.Time {
+	modelCooldownMu.Lock()
+	defer modelCooldownMu.Unlock()
+	var out map[string]map[string]time.Time
+	for key, c := range modelCooldowns {
+		if !now.Before(c.until) {
+			continue
+		}
+		id, model, _ := strings.Cut(key, "\x00")
+		if out == nil {
+			out = map[string]map[string]time.Time{}
+		}
+		if out[id] == nil {
+			out[id] = map[string]time.Time{}
+		}
+		out[id][model] = c.until
+	}
+	return out
+}
+
+// LastGenerationModel returns the model of the latest generation request, or "" if none yet.
+func LastGenerationModel() string {
+	modelCooldownMu.Lock()
+	defer modelCooldownMu.Unlock()
+	return lastModel
 }
 
 // ExcludeModelCooldowns drops accounts cooling down for model, keeping relative order, and returns how many
@@ -85,6 +175,7 @@ func ExcludeModelCooldowns(candidates []*storage.Account, model string, now time
 	}
 	modelCooldownMu.Lock()
 	defer modelCooldownMu.Unlock()
+	lastModel = model // every model-bearing generation passes through here
 	if len(modelCooldowns) == 0 {
 		return candidates, 0
 	}

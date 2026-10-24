@@ -692,3 +692,48 @@ func TestQuotaCmd_SkipsLiveFetchForFreshSnapshots(t *testing.T) {
 		t.Errorf("stale snapshot should be refetched; hits=%v", hits)
 	}
 }
+
+func TestResolveNextCandidateID_SkipsDaemonPausedAccounts(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now()
+	hi, lo := 0.95, 0.90
+	pool := &storage.Pool{
+		Version:  1,
+		Strategy: config.StrategyMaxQuota,
+		Accounts: []*storage.Account{
+			{ID: "acc_1", Name: "First", LastQuota: &storage.QuotaState{RemainingFraction: &hi}},
+			{ID: "acc_2", Name: "Second", LastQuota: &storage.QuotaState{RemainingFraction: &lo}},
+		},
+	}
+	if got := resolveNextCandidateID(pool, now.Unix()); got != "acc_1" {
+		t.Fatalf("without daemon state, next = %q, want acc_1", got)
+	}
+
+	write := func(updated time.Time, lastModel string) {
+		stats := daemon.RuntimeStats{
+			PID:         1,
+			StartedAt:   updated,
+			UpdatedAt:   updated,
+			LastModel:   lastModel,
+			ModelPauses: map[string]map[string]time.Time{"acc_1": {"m": now.Add(time.Hour)}},
+		}
+		if err := daemon.WriteRuntimeStats(daemon.RuntimeFileIn(config.GetDataDir()), stats); err != nil {
+			t.Fatalf("WriteRuntimeStats: %v", err)
+		}
+	}
+
+	write(now, "m")
+	if got := resolveNextCandidateID(pool, now.Unix()); got != "acc_2" {
+		t.Fatalf("acc_1 paused for last model, next = %q, want acc_2", got)
+	}
+	write(now, "other")
+	if got := resolveNextCandidateID(pool, now.Unix()); got != "acc_1" {
+		t.Fatalf("pause is for another model, next = %q, want acc_1", got)
+	}
+	write(now.Add(-2*daemon.StaleRuntimeThreshold), "m")
+	if got := resolveNextCandidateID(pool, now.Unix()); got != "acc_1" {
+		t.Fatalf("stale daemon state must be ignored, next = %q, want acc_1", got)
+	}
+}
