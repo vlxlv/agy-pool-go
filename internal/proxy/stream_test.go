@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -51,6 +53,9 @@ func TestSSE_ForwardingAndTruncation(t *testing.T) {
 	pool.ActiveAccountID = &acc1.ID
 	_ = storage.SavePool(pool)
 
+	var logBuf bytes.Buffer
+	LogWriter = &logBuf
+
 	handler := NewHandler()
 	req := httptest.NewRequest("GET", "/v1/streamGenerateContent", nil)
 	req.Header.Set("Accept", "text/event-stream")
@@ -58,6 +63,11 @@ func TestSSE_ForwardingAndTruncation(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 	resp := w.Result()
+
+	// Stream log line is written after the stream ends and carries both timings
+	if !regexp.MustCompile(`\(Status: 200, ttfb \S+, total \S+\)`).MatchString(logBuf.String()) {
+		t.Errorf("stream log line missing ttfb/total: %q", logBuf.String())
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
