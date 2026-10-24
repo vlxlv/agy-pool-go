@@ -123,15 +123,8 @@ func ComputeEffectivenessReport(ctx *daemon.InstanceContext, windowDuration time
 		}
 	}
 
-	// 3. Determine current candidate order (who is Next ⚡)
-	ordered := scheduler.OrderCandidates(pool.Accounts, strat, pool, float64(nowTS))
-	if strat == config.StrategySmart {
-		ordered = scheduler.RotateTopTier(ordered, scheduler.GetSmartRRCursor(), float64(nowTS))
-	}
-	var nextID string
-	if len(ordered) > 0 && ordered[0] != nil {
-		nextID = ordered[0].ID
-	}
+	// 3. Determine who is Next ⚡, exactly as the other CLI views do
+	nextID := daemon.NextCandidateID(pool, nowTime)
 
 	// 4. Build per-account metrics
 	accMetrics := make([]AccountEffectiveness, 0, len(pool.Accounts))
@@ -154,24 +147,20 @@ func ComputeEffectivenessReport(ctx *daemon.InstanceContext, windowDuration time
 		if runtimeStats != nil && runtimeStats.InFlight != nil {
 			eff.InFlight = runtimeStats.InFlight[a.ID]
 		}
-		if runtimeStats != nil && runtimeStats.ModelPauses != nil {
-			if pauses, ok := runtimeStats.ModelPauses[a.ID]; ok && len(pauses) > 0 {
-				eff.IsPaused = true
-			}
-		}
+		eff.IsPaused = runtimeStats.PausedForLastModel(a.ID, nowTime)
 
 		// Quotas and capacity state
 		capState := quota.ComputeCapacityState(a, float64(nowTS))
 		q5Frac, gwFrac := quota.DisplayQuotaFractions(a.LastQuota)
 		if q5Frac != nil {
-			pct := math.Round(*q5Frac * 1000) / 10
+			pct := math.Round(*q5Frac*1000) / 10
 			eff.Quota5HPercent = &pct
 			if capState.Reset5Time != nil && !capState.Reset5Time.IsZero() {
 				eff.Quota5HReset = quota.FormatCompactRemainingTime(capState.Reset5Time.Format(time.RFC3339))
 			}
 		}
 		if gwFrac != nil {
-			pct := math.Round(*gwFrac * 1000) / 10
+			pct := math.Round(*gwFrac*1000) / 10
 			eff.QuotaWkPercent = &pct
 			if capState.Reset7Time != nil && !capState.Reset7Time.IsZero() {
 				eff.QuotaWkReset = quota.FormatCompactRemainingTime(capState.Reset7Time.Format(time.RFC3339))
@@ -305,7 +294,7 @@ func ComputeEffectivenessReport(ctx *daemon.InstanceContext, windowDuration time
 			if verdictStatus == "HEALTHY" {
 				verdictStatus = "WARNING"
 			}
-			recommendations = append(recommendations, "Strategy is currently '"+strat+"'. Ensure cruising accounts rotate by Least-Hits.")
+			recommendations = append(recommendations, "Strategy is currently '"+strat+"'. Some skew is expected: a conversation stays on its account (session affinity) and smart harvests expiring 5H quota first; persistent skew across many conversations means new sessions are not being spread.")
 		}
 	}
 

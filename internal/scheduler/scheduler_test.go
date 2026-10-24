@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1600,5 +1601,58 @@ func TestMaxQuota_TotalPaceTieBreaker(t *testing.T) {
 	ordered := OrderCandidates([]*storage.Account{accLowerWeekly, accHigherWeekly}, config.StrategyMaxQuota, nil, now)
 	if len(ordered) != 2 || ordered[0].ID != "acc_wk_98" {
 		t.Fatalf("expected acc_wk_98 to win via TotalPace tie-breaker, got %s", ordered[0].ID)
+	}
+}
+
+func TestRotateTopTier_SkipsCooldownHarvestAndBusyAccounts(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+	fresh := int64Ptr(int64(now - 10))
+	healthy := func(id, reset5 string) *storage.Account {
+		return &storage.Account{ID: id, Status: "active", LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: reset5},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.90), ResetTime: "2026-09-22T00:00:00Z"},
+			UpdatedAt:    fresh,
+		}}
+	}
+	ids := func(accs []*storage.Account) string {
+		var s []string
+		for _, a := range accs {
+			s = append(s, a.ID)
+		}
+		return strings.Join(s, ",")
+	}
+	later := "2026-09-16T16:00:00Z" // 5H resets in 4h: cruising, not harvesting
+
+	// 1. An account on 429 cooldown is never rotated to the front.
+	cooling := healthy("cooling", later)
+	until := now + 3600
+	cooling.RateLimitedUntil = &until
+	cands := []*storage.Account{healthy("a", later), healthy("b", later), cooling}
+	for cursor := uint64(0); cursor < 6; cursor++ {
+		if got := RotateTopTier(cands, cursor, now)[0].ID; got == "cooling" {
+			t.Fatalf("cursor %d rotated a cooling-down account to the front", cursor)
+		}
+	}
+
+	// 2. A first account harvesting an expiring 5H window keeps the front.
+	harvest := healthy("harvest", "2026-09-16T12:30:00Z") // 5H resets in 30m with 90% left
+	cands = OrderCandidates([]*storage.Account{healthy("x", later), harvest}, config.StrategySmart, nil, now)
+	if cands[0].ID != "harvest" {
+		t.Fatalf("precondition: smart should put the harvesting account first, got %s", ids(cands))
+	}
+	for cursor := uint64(0); cursor < 4; cursor++ {
+		if got := ids(RotateTopTier(cands, cursor, now)); got != "harvest,x" {
+			t.Fatalf("cursor %d rotated away from harvest: %s", cursor, got)
+		}
+	}
+
+	// 3. An account busy with in-flight requests is not a peer of idle ones.
+	observability.ResetInFlight()
+	defer observability.ResetInFlight()
+	done := observability.StartInFlightGeneration("busy")
+	defer done()
+	cands = []*storage.Account{healthy("idle", later), healthy("busy", later)}
+	if got := ids(RotateTopTier(cands, 1, now)); got != "idle,busy" {
+		t.Fatalf("busy account rotated in as a peer: %s", got)
 	}
 }

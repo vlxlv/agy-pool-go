@@ -474,32 +474,35 @@ func GetSchedulerSnapshot() (*storage.Pool, error) {
 }
 
 // RotateTopTier takes ordered candidates and rotates accounts within the top health tier by cursor.
-// It is applied to new sessions or unpinned requests to achieve true Round-Robin rotation
-// among equally healthy accounts without sacrificing health tier protection or session cache.
+// It is applied to new sessions to spread them round-robin across equally healthy accounts. The group
+// uses smart's cruising key (health tier lowered by in-flight load) and stops at the first account smart
+// would not treat as a healthy peer: cooling down, depleted, reserve, or over weekly pace. Nothing is
+// rotated while the first account is harvesting an expiring 5H window, so that quota still gets used.
 func RotateTopTier(candidates []*storage.Account, cursor uint64, now float64) []*storage.Account {
 	if len(candidates) <= 1 {
 		return candidates
 	}
-	if candidates[0] == nil || IsRestricted(candidates[0]) {
+	score := func(acc *storage.Account) (int, bool) {
+		if acc == nil || IsRestricted(acc) || (acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > now) || OverWeeklyPace(acc, now) {
+			return 0, false
+		}
+		c := quota.ComputeCapacityState(acc, now)
+		if c.IsDepleted || IsReserveCapacity(c) {
+			return 0, false
+		}
+		return smartHeadroomTier(smartEffectiveHeadroom(c))*smartInFlightPerTier - int(observability.GetInFlightGeneration(acc.ID)), true
+	}
+	top, ok := score(candidates[0])
+	if !ok {
 		return candidates
 	}
-	cap0 := quota.ComputeCapacityState(candidates[0], now)
-	if cap0.IsDepleted {
+	if _, harvest := SmartHarvestCandidate(quota.ComputeCapacityState(candidates[0], now), time.Unix(int64(now), 0)); harvest {
 		return candidates
 	}
-	topTierScore := smartHeadroomTier(smartEffectiveHeadroom(cap0))
 
-	topCount := 0
-	for _, acc := range candidates {
-		if acc == nil || IsRestricted(acc) {
-			break
-		}
-		capState := quota.ComputeCapacityState(acc, now)
-		if capState.IsDepleted || IsReserveCapacity(capState) || OverWeeklyPace(acc, now) {
-			break
-		}
-		score := smartHeadroomTier(smartEffectiveHeadroom(capState))
-		if score != topTierScore {
+	topCount := 1
+	for _, acc := range candidates[1:] {
+		if s, ok := score(acc); !ok || s != top {
 			break
 		}
 		topCount++

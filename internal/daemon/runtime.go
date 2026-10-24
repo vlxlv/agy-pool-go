@@ -13,6 +13,7 @@ import (
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/proxy"
+	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -41,6 +42,8 @@ type RuntimeStats struct {
 	// commands can show the account routing will actually pick.
 	ModelPauses map[string]map[string]time.Time `json:"model_pauses,omitempty"`
 	LastModel   string                          `json:"last_model,omitempty"`
+	// Smart's round-robin cursor for new sessions, so CLI commands can mirror the rotation.
+	SmartRRCursor uint64 `json:"smart_rr_cursor,omitempty"`
 
 	observability.Snapshot
 }
@@ -56,19 +59,20 @@ func CollectRuntimeStats(pid int, startedAt time.Time) RuntimeStats {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return RuntimeStats{
-		PID:         pid,
-		StartedAt:   startedAt,
-		UpdatedAt:   time.Now(),
-		Goroutines:  runtime.NumGoroutine(),
-		AllocBytes:  m.Alloc,
-		HeapBytes:   m.HeapInuse,
-		SysBytes:    m.Sys,
-		NumGC:       m.NumGC,
-		GoVersion:   runtime.Version(),
-		InFlight:    observability.GetAllInFlightGenerations(),
-		ModelPauses: proxy.ActiveModelPauses(time.Now()),
-		LastModel:   proxy.LastGenerationModel(),
-		Snapshot:    observability.GetSnapshot(),
+		PID:           pid,
+		StartedAt:     startedAt,
+		UpdatedAt:     time.Now(),
+		Goroutines:    runtime.NumGoroutine(),
+		AllocBytes:    m.Alloc,
+		HeapBytes:     m.HeapInuse,
+		SysBytes:      m.Sys,
+		NumGC:         m.NumGC,
+		GoVersion:     runtime.Version(),
+		InFlight:      observability.GetAllInFlightGenerations(),
+		ModelPauses:   proxy.ActiveModelPauses(time.Now()),
+		LastModel:     proxy.LastGenerationModel(),
+		SmartRRCursor: scheduler.GetSmartRRCursor(),
+		Snapshot:      observability.GetSnapshot(),
 	}
 }
 
@@ -321,4 +325,41 @@ func (w *RuntimeStatsWriter) run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// PausedForLastModel reports whether the daemon has the account paused for the model it last routed.
+func (s *RuntimeStats) PausedForLastModel(accountID string, now time.Time) bool {
+	if s == nil || s.LastModel == "" {
+		return false
+	}
+	until, ok := s.ModelPauses[accountID][s.LastModel]
+	return ok && now.Before(until)
+}
+
+// NextCandidateID returns the account the running daemon would pick for the next new conversation:
+// the strategy order, smart's new-session rotation at the daemon's published cursor, then skipping
+// accounts paused for the model it last routed. Without fresh daemon stats it uses the plain order.
+// Shared by every CLI view so [Next ⚡] cannot disagree between commands.
+func NextCandidateID(pool *storage.Pool, now time.Time) string {
+	if pool == nil || len(pool.Accounts) <= 1 {
+		return ""
+	}
+	strat := pool.Strategy
+	if strat == "" {
+		strat = config.DefaultStrategy
+	}
+	ordered := scheduler.OrderCandidates(pool.Accounts, strat, pool, float64(now.Unix()))
+	stats, err := ReadRuntimeStats(RuntimeFileIn(config.GetDataDir()))
+	if err != nil || now.Sub(stats.UpdatedAt) > StaleRuntimeThreshold {
+		stats = nil
+	}
+	if stats != nil && strat == config.StrategySmart {
+		ordered = scheduler.RotateTopTier(ordered, stats.SmartRRCursor, float64(now.Unix()))
+	}
+	for _, acc := range ordered {
+		if acc != nil && !scheduler.IsRestricted(acc) && !stats.PausedForLastModel(acc.ID, now) {
+			return acc.ID
+		}
+	}
+	return ""
 }

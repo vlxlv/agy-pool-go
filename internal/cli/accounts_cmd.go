@@ -229,40 +229,7 @@ func ListAccountsWithWidth(target string, width int, stdout, stderr io.Writer, s
 }
 
 func resolveNextCandidateID(pool *storage.Pool, nowTS int64) string {
-	if pool == nil || len(pool.Accounts) <= 1 {
-		return ""
-	}
-	strat := pool.Strategy
-	if strat == "" {
-		strat = config.DefaultStrategy
-	}
-	ordered := scheduler.OrderCandidates(pool.Accounts, strat, pool, float64(nowTS))
-	paused := daemonPausedAccounts(time.Unix(nowTS, 0))
-	for _, acc := range ordered {
-		if acc != nil && !scheduler.IsRestricted(acc) && !paused[acc.ID] {
-			return acc.ID
-		}
-	}
-	return ""
-}
-
-// daemonPausedAccounts returns the accounts the running daemon has paused for the model it last routed,
-// so [Next ⚡] skips them like routing does. Nil when the daemon is not running or has routed nothing.
-func daemonPausedAccounts(now time.Time) map[string]bool {
-	stats, err := daemon.ReadRuntimeStats(daemon.RuntimeFileIn(config.GetDataDir()))
-	if err != nil || stats == nil || stats.LastModel == "" || now.Sub(stats.UpdatedAt) > daemon.StaleRuntimeThreshold {
-		return nil
-	}
-	var paused map[string]bool
-	for id, models := range stats.ModelPauses {
-		if until, ok := models[stats.LastModel]; ok && now.Before(until) {
-			if paused == nil {
-				paused = map[string]bool{}
-			}
-			paused[id] = true
-		}
-	}
-	return paused
+	return daemon.NextCandidateID(pool, time.Unix(nowTS, 0))
 }
 
 func renderWideQuotaDashboard(accList []*storage.Account, pool *storage.Pool, gatewayStatus string, nowTS int64, width int, showEmail bool, stdout io.Writer) {

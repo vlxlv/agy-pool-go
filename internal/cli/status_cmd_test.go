@@ -737,3 +737,29 @@ func TestResolveNextCandidateID_SkipsDaemonPausedAccounts(t *testing.T) {
 		t.Fatalf("stale daemon state must be ignored, next = %q, want acc_1", got)
 	}
 }
+
+func TestResolveNextCandidateID_FollowsDaemonSmartRotation(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	now := time.Now()
+	frac := 0.95
+	pool := &storage.Pool{
+		Version:  1,
+		Strategy: config.StrategySmart,
+		Accounts: []*storage.Account{
+			{ID: "acc_1", Name: "First", LastQuota: &storage.QuotaState{RemainingFraction: &frac}},
+			{ID: "acc_2", Name: "Second", LastQuota: &storage.QuotaState{RemainingFraction: &frac}},
+		},
+	}
+	first := resolveNextCandidateID(pool, now.Unix())
+	for cursor, want := range map[uint64]string{0: first, 1: map[string]string{"acc_1": "acc_2", "acc_2": "acc_1"}[first], 2: first} {
+		stats := daemon.RuntimeStats{PID: 1, StartedAt: now, UpdatedAt: now, SmartRRCursor: cursor}
+		if err := daemon.WriteRuntimeStats(daemon.RuntimeFileIn(config.GetDataDir()), stats); err != nil {
+			t.Fatalf("WriteRuntimeStats: %v", err)
+		}
+		if got := resolveNextCandidateID(pool, now.Unix()); got != want {
+			t.Fatalf("cursor %d: next = %q, want %q", cursor, got, want)
+		}
+	}
+}
