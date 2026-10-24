@@ -720,6 +720,7 @@ To prevent infinite loops where the wrapper executes itself:
 | `start` | None | None | 0 (ok), 1 (err) | No | Start background gateway daemon |
 | `stop` | None | None | 0 | No | Stop background gateway daemon |
 | `restart` | None | None | 0 (ok), 1 (err) | No | Restart background gateway daemon |
+| `update` | `upgrade` | `[--check]` | 0 (ok/up to date), 1 (err), 2 (bad arg) | Yes (GitHub API) | Self-update from the newest GitHub release: verify `SHA256SUMS`, atomically replace the binary, restart a running gateway |
 | `logs` | `log` | `[-n] [-f] [--clear] [--rotate]`| 0 | No | View, tail, clear, or rotate logs |
 | `run` | None | `[args...]` | Propagated | Indirect | Wrap and execute native `agy` |
 

@@ -109,6 +109,15 @@ The installer establishes a deterministic, robust layout:
 
 The installer safely validates and preserves the native `agy` binary into `~/.local/libexec/agy-pool/agy-native` before publishing or updating the entrypoint shim. It never overwrites the only copy of native `agy`.
 
+#### Updating `agy-pool`
+
+```bash
+agy-pool update --check   # Report whether a newer release exists
+agy-pool update           # Download, verify, replace, and restart a running gateway
+```
+
+`update` (alias `upgrade`) fetches the newest GitHub release (prereleases included), verifies the platform binary against the release `SHA256SUMS`, atomically replaces the installed `agy-pool` binary, and restarts the gateway if it was running. A failed download or checksum mismatch leaves the current binary untouched. The repository is private, so a token is required: `GH_TOKEN`, `GITHUB_TOKEN`, or an existing `gh auth login` session. System-mode installs (`/usr/local/bin`) need `sudo` with `GH_TOKEN` set.
+
 #### Official `agy` Upgrades & Repair Workflow
 
 If an official Google Antigravity update overwrites `~/.local/bin/agy` with a new native ELF binary:
