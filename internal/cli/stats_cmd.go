@@ -126,10 +126,22 @@ func renderTerminalReport(w io.Writer, r *diagnostics.EffectivenessReport) {
 	fmt.Fprintf(w, "  • Workload Balance:   %s%s (Index: %.2f / 1.0)%s\n",
 		balanceColor, r.BalanceStatus, r.BalanceIndex, clrReset)
 	if r.DominantAccount != "" && r.ActiveAccounts > 1 && r.BalanceStatus != "BALANCED" && r.BalanceStatus != "OPTIMAL" {
-		fmt.Fprintf(w, "  • Dominant Account:   %s%s%s\n", clrYellow, r.DominantAccount, clrReset)
+		domName := r.DominantAccount
+		for _, a := range r.Accounts {
+			if a.ID == r.DominantAccount && a.Name != "" && a.Name != a.ID {
+				domName = fmt.Sprintf("%s (%s)", a.Name, a.ID)
+				break
+			}
+		}
+		fmt.Fprintf(w, "  • Dominant Account:   %s%s%s\n", clrYellow, domName, clrReset)
 	}
-	fmt.Fprintf(w, "  • Gateway Resilience: %d routed | %d failovers\n",
-		r.Gateway.RoutingDecisions, r.Gateway.FailoversTotal)
+	if r.Gateway.Uptime != "" {
+		fmt.Fprintf(w, "  • Gateway Resilience: %d routed | %d failovers (since start, %s)\n",
+			r.Gateway.RoutingDecisions, r.Gateway.FailoversTotal, r.Gateway.Uptime)
+	} else {
+		fmt.Fprintf(w, "  • Gateway Resilience: %d routed | %d failovers\n",
+			r.Gateway.RoutingDecisions, r.Gateway.FailoversTotal)
+	}
 
 	verdictColor := clrGreen
 	switch r.AIVerdict.Status {
