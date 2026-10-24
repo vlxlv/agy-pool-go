@@ -1042,7 +1042,7 @@ func (h *Handler) dispatchAccount(
 
 		// Failover on Location / GeoIP Not Supported (temporary datacenter IP / Anycast routing glitch)
 		if IsLocationError(statusCode, errBody) {
-			persistErr := RecordLocationError(acc)
+			persistErr := RecordSoftCooldown(acc)
 			if persistErr != nil {
 				logMessage("PROXY WARN", "failed to persist location cooldown; continuing failover")
 			}
@@ -1051,6 +1051,24 @@ func (h *Handler) dispatchAccount(
 			outcome := DispatchOutcome{
 				Action: ActionFailoverNext,
 				Reason: "ExplicitRetryableUpstreamResponse:LocationError",
+			}
+			if persistErr != nil {
+				outcome.Err = persistErr
+			}
+			return outcome
+		}
+
+		// Failover on 503: upstream did not process the request, so replaying on another account is safe
+		if statusCode == http.StatusServiceUnavailable {
+			persistErr := RecordSoftCooldown(acc)
+			if persistErr != nil {
+				logMessage("PROXY WARN", "failed to persist unavailable cooldown; continuing failover")
+			}
+			logMessage("FAILOVER", fmt.Sprintf("Account %s upstream unavailable (HTTP 503)! Auto-switching to next account (soft cooldown 30s)...", dispName))
+			notifyAudit(statusCode, "UpstreamUnavailable")
+			outcome := DispatchOutcome{
+				Action: ActionFailoverNext,
+				Reason: "ExplicitRetryableUpstreamResponse:UpstreamUnavailable",
 			}
 			if persistErr != nil {
 				outcome.Err = persistErr

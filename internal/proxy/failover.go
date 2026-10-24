@@ -177,8 +177,8 @@ func IsLocationError(status int, body []byte) bool {
 	return false
 }
 
-// RecordLocationError marks account with a soft 30s cooldown under transaction.
-func RecordLocationError(account *storage.Account) error {
+// RecordSoftCooldown marks account with a soft 30s cooldown under transaction.
+func RecordSoftCooldown(account *storage.Account) error {
 	now := float64(NowFunc().Unix())
 	return runPoolTransaction(func(pool *storage.Pool) error {
 		stored := storage.FindAccount(pool, account)
