@@ -3,6 +3,7 @@ package scheduler
 import (
 	"math"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
@@ -16,6 +17,23 @@ func init() {
 	accounts.SetSmartOrderHook(func(candidates []*storage.Account, pool *storage.Pool, now float64) []*storage.Account {
 		return OrderCandidates(candidates, config.StrategySmart, pool, now)
 	})
+}
+
+var smartRRCursor atomic.Uint64
+
+// AdvanceSmartRRCursor advances the smart round-robin cursor by 1.
+func AdvanceSmartRRCursor() uint64 {
+	return smartRRCursor.Add(1)
+}
+
+// GetSmartRRCursor returns the current smart round-robin cursor.
+func GetSmartRRCursor() uint64 {
+	return smartRRCursor.Load()
+}
+
+// ResetSmartRRCursor resets the smart round-robin cursor to 0 (used for test isolation).
+func ResetSmartRRCursor() {
+	smartRRCursor.Store(0)
 }
 
 // FiveHourReserveFloor is the threshold below or equal to which an account's 5-hour quota is in reserve.
@@ -108,9 +126,8 @@ func EffectiveWorstPace(capState quota.CapacityState) float64 {
 
 // Smart scheduling constants
 const (
-	SmartHarvest5HWindow     = 90 * time.Minute
-	SmartHarvestWeeklyWindow = 36 * time.Hour
-	SmartHarvestMinHeadroom  = 0.25
+	SmartHarvest5HWindow    = 90 * time.Minute
+	SmartHarvestMinHeadroom = 0.25
 )
 
 // smartHeadroomTier maps an account's bottleneck headroom to discrete tiers (20% bands).
@@ -142,10 +159,10 @@ func smartHarvestFloor(rem, window time.Duration) float64 {
 	return floor
 }
 
-// SmartHarvestCandidate checks if an account qualifies for harvest mode: an upcoming reset
-// (either 5H within 90m or Weekly within 36h) whose expiring window still has at least
-// smartHarvestFloor headroom, while the other (non-expiring) window keeps the full 25%.
-// Legacy combined fractions keep the flat RawFloor >= 25% rule. Returns (earliestResetTime, true).
+// SmartHarvestCandidate checks if an account qualifies for harvest mode: an upcoming 5H reset
+// within 90m whose expiring window still has at least smartHarvestFloor headroom, while
+// weekly quota maintains at least 25% reserve. Weekly quota is never harvested as it is a
+// hard stock ceiling for the entire week. Returns (earliestResetTime, true).
 func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (time.Time, bool) {
 	legacy := !capState.Q5Known && !capState.Q7Known
 	if legacy && capState.RawFloor < SmartHarvestMinHeadroom {
@@ -156,32 +173,16 @@ func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (tim
 		return legacy || !known || q == nil || *q >= min
 	}
 
-	var best time.Time
-	hasBest := false
-
 	if capState.Reset5Time != nil && !capState.Reset5Time.IsZero() {
 		rem5 := capState.Reset5Time.Sub(nowTime)
 		if rem5 > 0 && rem5 <= SmartHarvest5HWindow &&
 			atLeast(capState.Q5Known, capState.Q5, smartHarvestFloor(rem5, SmartHarvest5HWindow)) &&
 			atLeast(capState.Q7Known, capState.Q7, SmartHarvestMinHeadroom) {
-			best = *capState.Reset5Time
-			hasBest = true
+			return *capState.Reset5Time, true
 		}
 	}
 
-	if capState.Reset7Time != nil && !capState.Reset7Time.IsZero() {
-		rem7 := capState.Reset7Time.Sub(nowTime)
-		if rem7 > 0 && rem7 <= SmartHarvestWeeklyWindow &&
-			atLeast(capState.Q7Known, capState.Q7, smartHarvestFloor(rem7, SmartHarvestWeeklyWindow)) &&
-			atLeast(capState.Q5Known, capState.Q5, SmartHarvestMinHeadroom) {
-			if !hasBest || capState.Reset7Time.Before(best) {
-				best = *capState.Reset7Time
-				hasBest = true
-			}
-		}
-	}
-
-	return best, hasBest
+	return time.Time{}, false
 }
 
 // NextUpcomingReset returns the earliest upcoming reset time for the account.
@@ -426,13 +427,12 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 				return a.flight < b.flight
 			}
 
-			// 4. Renewal Timing: within the same health tier and in-flight load, concentrate on the
-			// account resetting soonest to harvest perishable 5H quota and preserve prompt cache.
+			// 4. Renewal Timing: within the same health tier and in-flight load, prefer sooner reset.
 			if cmp := compareResetTiming(a.cap, b.cap, nowTime); cmp != 0 {
 				return cmp < 0
 			}
 
-			// 5. Tie-breaker: when reset bucket, tier, and in-flight are equal, balance by request hits.
+			// 5. Hits tie-breaker:
 			if a.hits != b.hits {
 				return a.hits < b.hits
 			}
@@ -471,4 +471,51 @@ func OrderCandidates(candidates []*storage.Account, strategy string, pool *stora
 // GetSchedulerSnapshot reads an authoritative point-in-time snapshot from state.db.
 func GetSchedulerSnapshot() (*storage.Pool, error) {
 	return storage.LoadPool()
+}
+
+// RotateTopTier takes ordered candidates and rotates accounts within the top health tier by cursor.
+// It is applied to new sessions or unpinned requests to achieve true Round-Robin rotation
+// among equally healthy accounts without sacrificing health tier protection or session cache.
+func RotateTopTier(candidates []*storage.Account, cursor uint64, now float64) []*storage.Account {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	if candidates[0] == nil || IsRestricted(candidates[0]) {
+		return candidates
+	}
+	cap0 := quota.ComputeCapacityState(candidates[0], now)
+	if cap0.IsDepleted {
+		return candidates
+	}
+	topTierScore := smartHeadroomTier(smartEffectiveHeadroom(cap0))
+
+	topCount := 0
+	for _, acc := range candidates {
+		if acc == nil || IsRestricted(acc) {
+			break
+		}
+		capState := quota.ComputeCapacityState(acc, now)
+		if capState.IsDepleted || IsReserveCapacity(capState) || OverWeeklyPace(acc, now) {
+			break
+		}
+		score := smartHeadroomTier(smartEffectiveHeadroom(capState))
+		if score != topTierScore {
+			break
+		}
+		topCount++
+	}
+	if topCount <= 1 {
+		return candidates
+	}
+
+	shift := int(cursor % uint64(topCount))
+	if shift == 0 {
+		return candidates
+	}
+
+	rotated := make([]*storage.Account, len(candidates))
+	copy(rotated, candidates[shift:topCount])
+	copy(rotated[topCount-shift:], candidates[:shift])
+	copy(rotated[topCount:], candidates[topCount:])
+	return rotated
 }

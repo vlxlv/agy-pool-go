@@ -529,12 +529,14 @@ func TestMaxQuota_AbundantWeeklyQuota_NoColdStartStarvation(t *testing.T) {
 
 func TestSmartStrategy_RenewalOrder(t *testing.T) {
 	now := 1789560000.0 // 2026-09-16T12:00:00Z
+	// Both accounts in the same cruising tier (Tier 4) and equal hits.
+	// Renewal timing prefers the account resetting sooner to maximize prompt cache & cycle reuse.
 	accA := &storage.Account{
 		ID:     "acc_soon",
 		Status: "active",
 		LastQuota: &storage.QuotaState{
 			GeminiWeekly: &storage.QuotaWindow{
-				Fraction:  floatPtr(0.50),
+				Fraction:  floatPtr(0.90),
 				ResetTime: "2026-09-17T18:00:00Z", // renews in ~30 hours
 			},
 			UpdatedAt: int64Ptr(int64(now - 10)),
@@ -1391,7 +1393,7 @@ func TestSmartStrategy_MidWeek5HNotStrandedByWeeklyTier(t *testing.T) {
 	accMidWeek := &storage.Account{
 		ID:           "acc_mid_week_full_5h",
 		Status:       "active",
-		RequestCount: 50,
+		RequestCount: 10,
 		LastQuota: &storage.QuotaState{
 			Gemini5H:     &storage.QuotaWindow{Fraction: floatPtr(0.95), ResetTime: "2026-09-16T14:00:00Z"},
 			GeminiWeekly: &storage.QuotaWindow{Fraction: floatPtr(0.65), ResetTime: "2026-09-20T00:00:00Z"},
@@ -1413,6 +1415,67 @@ func TestSmartStrategy_MidWeek5HNotStrandedByWeeklyTier(t *testing.T) {
 	ordered := OrderCandidates([]*storage.Account{accFreshWeek, accMidWeek}, config.StrategySmart, nil, now)
 	if len(ordered) != 2 || ordered[0].ID != "acc_mid_week_full_5h" {
 		t.Fatalf("expected mid-week account with 95%% 5H quota (resets in 2h) to be used before 4.5h account, got %s", ordered[0].ID)
+	}
+}
+
+func TestRotateTopTier_RoundRobinCycle(t *testing.T) {
+	now := 1789560000.0 // 2026-09-16T12:00:00Z
+	// 3 accounts in Tier 4 (all 90%), 1 account in Tier 2 (50%)
+	frac90 := 0.90
+	frac50 := 0.50
+	acc1 := &storage.Account{
+		ID: "acc_1", Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac90},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac90},
+		},
+	}
+	acc2 := &storage.Account{
+		ID: "acc_2", Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac90},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac90},
+		},
+	}
+	acc3 := &storage.Account{
+		ID: "acc_3", Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac90},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac90},
+		},
+	}
+	acc4 := &storage.Account{
+		ID: "acc_4", Status: "active",
+		LastQuota: &storage.QuotaState{
+			Gemini5H:     &storage.QuotaWindow{Fraction: &frac50},
+			GeminiWeekly: &storage.QuotaWindow{Fraction: &frac50},
+		},
+	}
+
+	candidates := []*storage.Account{acc1, acc2, acc3, acc4}
+
+	// Cursor 0 -> acc1 first
+	rot0 := RotateTopTier(candidates, 0, now)
+	if rot0[0].ID != "acc_1" || rot0[1].ID != "acc_2" || rot0[2].ID != "acc_3" || rot0[3].ID != "acc_4" {
+		t.Fatalf("unexpected order for cursor 0: %s %s %s %s", rot0[0].ID, rot0[1].ID, rot0[2].ID, rot0[3].ID)
+	}
+
+	// Cursor 1 -> acc2 first
+	rot1 := RotateTopTier(candidates, 1, now)
+	if rot1[0].ID != "acc_2" || rot1[1].ID != "acc_3" || rot1[2].ID != "acc_1" || rot1[3].ID != "acc_4" {
+		t.Fatalf("unexpected order for cursor 1: %s %s %s %s", rot1[0].ID, rot1[1].ID, rot1[2].ID, rot1[3].ID)
+	}
+
+	// Cursor 2 -> acc3 first
+	rot2 := RotateTopTier(candidates, 2, now)
+	if rot2[0].ID != "acc_3" || rot2[1].ID != "acc_1" || rot2[2].ID != "acc_2" || rot2[3].ID != "acc_4" {
+		t.Fatalf("unexpected order for cursor 2: %s %s %s %s", rot2[0].ID, rot2[1].ID, rot2[2].ID, rot2[3].ID)
+	}
+
+	// Cursor 3 -> wraps back to acc1
+	rot3 := RotateTopTier(candidates, 3, now)
+	if rot3[0].ID != "acc_1" || rot3[1].ID != "acc_2" || rot3[2].ID != "acc_3" || rot3[3].ID != "acc_4" {
+		t.Fatalf("unexpected order for cursor 3: %s %s %s %s", rot3[0].ID, rot3[1].ID, rot3[2].ID, rot3[3].ID)
 	}
 }
 
