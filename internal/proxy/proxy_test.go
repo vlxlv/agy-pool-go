@@ -38,6 +38,7 @@ func resetProviders() {
 	HTTPClient = defaultHTTPClient
 	GenerationClient = defaultGenerationClient
 	RoundTripHook = nil
+	resetModelCooldowns()
 }
 
 func TestHopByHopHeaders(t *testing.T) {

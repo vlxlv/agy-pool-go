@@ -587,7 +587,10 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	affinityStatus := "none"
 	var reservedID string
 	var reservedDone func()
+	var model string
+	var modelExcluded int
 	if isGeneration {
+		model = requestModel(body)
 		// Ordering reads in-flight counts, so ordering and reserving the first pick must be atomic,
 		// otherwise a burst of requests all see In-Flight=0 and pick the same account.
 		// selectionMu covers this process; the DB write transaction covers other processes sharing the pool.
@@ -608,6 +611,8 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					affinityStatus = "new"
 				}
 			}
+			// After affinity, so a conversation bound to an account with no capacity for its model moves on.
+			candidates, modelExcluded = ExcludeModelCooldowns(candidates, model, NowFunc())
 
 			if confCand := SelectAndClaimConfirmationCandidate(pool.Accounts); confCand != nil {
 				pendingClaimedID = confCand.ID
@@ -742,7 +747,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		if acc.ID == reservedID {
 			reservation, reservedID = reservedDone, ""
 		}
-		outcome := h.dispatchAccount(committer, r, path, body, isGeneration, isSSE, acc, clientUA, attempt, strategy, currentAffinity, selectionAuditCtx, reservation)
+		outcome := h.dispatchAccount(committer, r, path, body, model, isGeneration, isSSE, acc, clientUA, attempt, strategy, currentAffinity, selectionAuditCtx, reservation)
 		if acc.ID == pendingClaimedID {
 			ReleaseVerificationConfirmation(pendingClaimedID)
 			pendingClaimedID = ""
@@ -779,6 +784,9 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// All accounts exhausted
 	if !committer.IsCommitted() {
+		if lastError == nil && modelExcluded > 0 {
+			lastError = fmt.Errorf("%d account(s) paused for %s after 503/capacity errors", modelExcluded, model)
+		}
 		committer.Header().Set("X-Agy-Pool-Strategy", strategy)
 		logMessage("ALL EXHAUSTED", fmt.Sprintf("%s %s failed across all accounts: %v", r.Method, filepathBase(path), lastError))
 		http.Error(committer, fmt.Sprintf("All accounts in pool exhausted or unavailable: %v", lastError), http.StatusServiceUnavailable)
@@ -790,6 +798,7 @@ func (h *Handler) dispatchAccount(
 	r *http.Request,
 	path string,
 	body []byte,
+	model string,
 	isGeneration bool,
 	isSSE bool,
 	acc *storage.Account,
@@ -940,7 +949,9 @@ func (h *Handler) dispatchAccount(
 	}
 
 	client := GetClient(isGeneration)
+	start := NowFunc()
 	resp, err := client.Do(upstreamReq)
+	ttfb := NowFunc().Sub(start) // time until upstream response headers
 	if err != nil {
 		// Check client disconnect
 		if errors.Is(r.Context().Err(), context.Canceled) {
@@ -984,7 +995,24 @@ func (h *Handler) dispatchAccount(
 			auditSuffix = fmt.Sprintf(" [audit: strategy=%s tier=%s healthy=%d reserve=%d]",
 				frozenEvent.Strategy, frozenEvent.Classification, frozenEvent.HealthyCandidateCount, frozenEvent.ReserveCandidateCount)
 		}
-		logMessage("PROXY ERROR", fmt.Sprintf("%s %s -> %s HTTP %d%s", r.Method, pathBase, dispName, statusCode, auditSuffix))
+		reason := upstreamErrorReason(errBody)
+		reasonSuffix := ""
+		if reason != "" {
+			reasonSuffix = " " + reason
+		}
+		logMessage("PROXY ERROR", fmt.Sprintf("%s %s -> %s HTTP %d%s (ttfb %s)%s", r.Method, pathBase, dispName, statusCode, reasonSuffix, fmtDur(ttfb), auditSuffix))
+
+		// Failover on 503 or model capacity exhaustion (seen as 503, possibly 429): the account still serves
+		// other models, so pause only this model instead of the whole account. Checked before the 429 quota rule.
+		if (reason == "MODEL_CAPACITY_EXHAUSTED" || statusCode == http.StatusServiceUnavailable) && model != "" && acc != nil {
+			cooldown := RecordModelCapacityError(acc.ID, model)
+			logMessage("FAILOVER", fmt.Sprintf("Account %s has no capacity for %s (HTTP %d)! Paused for this model for %s. Auto-switching to next account...", dispName, model, statusCode, cooldown))
+			notifyAudit(statusCode, "ModelCapacityExhausted")
+			return DispatchOutcome{
+				Action: ActionFailoverNext,
+				Reason: "ExplicitRetryableUpstreamResponse:ModelCapacityExhausted",
+			}
+		}
 
 		// Failover on Google Security Validation Required
 		if auth.IsValidationError(statusCode, errBody) {
@@ -1058,7 +1086,8 @@ func (h *Handler) dispatchAccount(
 			return outcome
 		}
 
-		// Failover on 503: upstream did not process the request, so replaying on another account is safe
+		// Failover on 503 for requests without a model (model-bearing ones are paused per model above):
+		// upstream did not process the request, so replaying on another account is safe
 		if statusCode == http.StatusServiceUnavailable {
 			persistErr := RecordSoftCooldown(acc)
 			if persistErr != nil {
@@ -1088,14 +1117,15 @@ func (h *Handler) dispatchAccount(
 
 	// 2xx response
 	notifyAudit(statusCode, "")
+	if isGeneration {
+		recordModelLatency(acc, model, ttfb)
+	}
 
 	auditSuffix := ""
 	if frozenEvent != nil {
 		auditSuffix = fmt.Sprintf(" [audit: strategy=%s tier=%s healthy=%d reserve=%d]",
 			frozenEvent.Strategy, frozenEvent.Classification, frozenEvent.HealthyCandidateCount, frozenEvent.ReserveCandidateCount)
 	}
-	logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d)%s", r.Method, pathBase, dispName, statusCode, auditSuffix))
-
 	respContentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	isStream := isSSE || strings.Contains(respContentType, "text/event-stream")
 
@@ -1105,6 +1135,8 @@ func (h *Handler) dispatchAccount(
 		}
 		attachDebugHeaders(resp.Header, acc, strategy, affinityStatus)
 		streamErr := SendStream(committer, statusCode, resp.Header, resp.Body)
+		// Logged after the stream ends so the line carries the full duration.
+		logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d, ttfb %s, total %s)%s", r.Method, pathBase, dispName, statusCode, fmtDur(ttfb), fmtDur(NowFunc().Sub(start)), auditSuffix))
 		if streamErr != nil {
 			observability.RecordNoReplayPrevented()
 			return DispatchOutcome{
@@ -1118,6 +1150,8 @@ func (h *Handler) dispatchAccount(
 			Reason: "CommittedStreamSuccess",
 		}
 	}
+
+	logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d, ttfb %s)%s", r.Method, pathBase, dispName, statusCode, fmtDur(ttfb), auditSuffix))
 
 	respBody, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
@@ -1145,6 +1179,10 @@ func (h *Handler) dispatchAccount(
 		Action: ActionTerminal,
 		Reason: "TerminalSuccess",
 	}
+}
+
+func fmtDur(d time.Duration) string {
+	return d.Round(10 * time.Millisecond).String()
 }
 
 func filepathBase(path string) string {
