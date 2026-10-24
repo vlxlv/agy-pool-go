@@ -242,17 +242,19 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return handleInstall(args[1:], stdout, stderr)
 	case "repair":
 		return handleRepair(args[1:], stdout, stderr)
+	case "update", "upgrade":
+		return UpdateCmd(stdout, stderr, args[1:]...)
 	case "uninstall":
 		return handleUninstall(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,move,mv,swap,sort,reorder,order,config,log,logs,start,stop,restart,status,stats,forecast,runway,predict,top,watch,monitor,version,run} ...\n")
+		fmt.Fprintf(stderr, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,move,mv,swap,sort,reorder,order,config,log,logs,start,stop,restart,status,stats,forecast,runway,predict,top,watch,monitor,update,version,run} ...\n")
 		fmt.Fprintf(stderr, "agy-pool: error: argument command: invalid choice: '%s'\n", cmd)
 		return 2
 	}
 }
 
 func printHelp(out io.Writer) {
-	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,move,mv,swap,sort,reorder,order,config,log,logs,start,stop,restart,status,stats,forecast,runway,predict,top,watch,monitor,version,run} ...\n\n")
+	fmt.Fprintf(out, "usage: agy-pool [-h] [-v] {login,add,import-current,list,ls,quota,strategy,strat,rename,doctor,check,health,remove,rm,switch,export,backup,import,restore,verify,disable,enable,move,mv,swap,sort,reorder,order,config,log,logs,start,stop,restart,status,stats,forecast,runway,predict,top,watch,monitor,update,version,run} ...\n\n")
 	fmt.Fprintf(out, "Antigravity Multi-Account Pool & Load Balancer for Termux & Linux\n\n")
 	fmt.Fprintf(out, "Examples:\n")
 	fmt.Fprintf(out, "  agy-pool login            Add/login a new Google account\n")
@@ -262,6 +264,7 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "  agy-pool stats [--json]   Track and evaluate algorithm routing and rotation effectiveness\n")
 	fmt.Fprintf(out, "  agy-pool forecast         Predict quota endurance and runway based on usage\n")
 	fmt.Fprintf(out, "  agy-pool status           Show gateway process and runtime summary\n")
+	fmt.Fprintf(out, "  agy-pool update [--check] Update agy-pool to the latest GitHub release\n")
 	fmt.Fprintf(out, "  agy-pool strategy         View or change load balancing strategy\n")
 	fmt.Fprintf(out, "  agy-pool rename 1 \"Work\"  Set friendly label for an account\n")
 	fmt.Fprintf(out, "  agy-pool move 2 top       Move account to a specific position\n")
