@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/daemon"
+	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
@@ -640,5 +644,51 @@ func TestQuotaCmd_AutoHidesUnusedThirdPartyWindows(t *testing.T) {
 	}
 	if strings.Contains(out, "3W ") {
 		t.Errorf("3W at 100%% must be hidden:\n%s", out)
+	}
+}
+
+func TestQuotaCmd_SkipsLiveFetchForFreshSnapshots(t *testing.T) {
+	_, cleanup := setupCLITestEnv(t)
+	defer cleanup()
+
+	var mu sync.Mutex
+	hits := map[string]int{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.Header.Get("Authorization")]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+	quota.BackendURLBaseProvider = func() string { return ts.URL }
+	quota.TokenRefresher = func(acc *storage.Account) (string, error) { return "token-" + acc.ID, nil }
+	defer func() { quota.BackendURLBaseProvider, quota.TokenRefresher = nil, nil }()
+
+	now := time.Now().Unix()
+	old := now - 600
+	frac := 0.5
+	pool := &storage.Pool{
+		Version:  1,
+		Strategy: config.StrategyMaxQuota,
+		Accounts: []*storage.Account{
+			{ID: "acc_fresh", Name: "Fresh", LastQuota: &storage.QuotaState{RemainingFraction: &frac, UpdatedAt: &now}},
+			{ID: "acc_stale", Name: "Stale", LastQuota: &storage.QuotaState{RemainingFraction: &frac, UpdatedAt: &old}},
+		},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("SavePool failed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"quota"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", code, stderr.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits["Bearer token-acc_fresh"] != 0 {
+		t.Errorf("fresh snapshot should not be refetched, got %d hits", hits["Bearer token-acc_fresh"])
+	}
+	if hits["Bearer token-acc_stale"] == 0 {
+		t.Errorf("stale snapshot should be refetched; hits=%v", hits)
 	}
 }
