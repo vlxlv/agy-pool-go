@@ -111,10 +111,19 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Build Debian packages
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$TAG_VERSION" ] || [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG_VERSION="0.1.0"
+          fi
+          ./scripts/build-deb.sh amd64 "$TAG_VERSION" dist/agy-pool-linux-amd64 dist
+          ./scripts/build-deb.sh arm64 "$TAG_VERSION" dist/agy-pool-linux-arm64 dist
+
       - name: Generate and verify unified SHA256SUMS
         run: |
           cd dist
-          sha256sum agy-pool-linux-amd64 agy-pool-linux-arm64 agy-pool-darwin-amd64 agy-pool-darwin-arm64 > SHA256SUMS
+          sha256sum agy-pool-linux-amd64 agy-pool-linux-arm64 agy-pool-darwin-amd64 agy-pool-darwin-arm64 agy-pool_*_amd64.deb agy-pool_*_arm64.deb > SHA256SUMS
           cat SHA256SUMS
           sha256sum -c SHA256SUMS
 
@@ -150,6 +159,7 @@ jobs:
             dist/agy-pool-linux-arm64
             dist/agy-pool-darwin-amd64
             dist/agy-pool-darwin-arm64
+            dist/*.deb
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

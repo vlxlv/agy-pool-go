@@ -1,8 +1,8 @@
 # Binaries
 bin/
 dist/
-agy-pool
-agy-pool-*
+/agy-pool
+/agy-pool-*
 
 # Test and runtime databases
 *.db
