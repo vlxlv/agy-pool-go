@@ -1,0 +1,16 @@
+[Unit]
+Description=Antigravity Multi-Account Quota Pool & Reverse Proxy Gateway
+Documentation=https://github.com/vlxlv/agy-pool-go
+After=network.target
+
+[Service]
+Type=simple
+Environment=AGY_POOL_DAEMON_CHILD=1
+# ExecStart points to agy-pool binary (%h expands to user home directory)
+ExecStart=%h/.local/bin/agy-pool
+Restart=always
+RestartSec=3s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

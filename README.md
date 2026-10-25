@@ -61,6 +61,14 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o di
 
 ### Installation & Native `agy` Integration
 
+#### Via Debian/Ubuntu Package (.deb)
+Download the `.deb` package from [Releases](https://github.com/vlxlv/agy-pool-go/releases) and install:
+```bash
+sudo dpkg -i agy-pool_<version>_amd64.deb
+```
+The package automatically installs `/usr/bin/agy-pool` and systemd service files.
+
+#### Via agy-pool installer
 To install `agy-pool` and set up transparent integration with native Antigravity CLI:
 
 ```bash

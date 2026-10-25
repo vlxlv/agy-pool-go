@@ -140,6 +140,15 @@ jobs:
           sha256sum agy-pool-linux-amd64 agy-pool-linux-arm64 agy-pool-darwin-amd64 agy-pool-darwin-arm64 > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Build Debian packages
+        run: |
+          ./scripts/build-deb.sh amd64 0.1.0 dist/agy-pool-linux-amd64 dist
+          ./scripts/build-deb.sh arm64 0.1.0 dist/agy-pool-linux-arm64 dist
+          dpkg-deb -I dist/agy-pool_0.1.0_amd64.deb
+          dpkg-deb -c dist/agy-pool_0.1.0_amd64.deb
+          dpkg-deb -I dist/agy-pool_0.1.0_arm64.deb
+          dpkg-deb -c dist/agy-pool_0.1.0_arm64.deb
+
       - name: Verify native linux-amd64 binary execution
         run: |
           chmod +x dist/agy-pool-linux-amd64
@@ -160,6 +169,13 @@ jobs:
             exit 1
           fi
           echo "daemon-run correctly rejected with exit code 2"
+
+      - name: Upload Debian packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: agy-pool-debian-packages
+          path: dist/*.deb
+          retention-days: 7
 
       - name: Upload unified SHA256SUMS
         uses: actions/upload-artifact@v7
