@@ -166,4 +166,7 @@ type DispatchOutcome struct {
 	Action DispatchAction
 	Reason string
 	Err    error
+
+	PromptTokens int64 // upstream usageMetadata of a successful generation, 0 if not reported
+	CachedTokens int64 // -1 if not reported
 }

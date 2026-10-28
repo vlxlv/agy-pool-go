@@ -160,15 +160,9 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 	}
 
 	targetIdx := -1
-	nowSecs := float64(now.Unix())
 	for i, acc := range candidates {
 		if acc != nil && acc.ID == boundID {
-			// Only keep affinity if account is healthy, not in reserve, not depleted, not over weekly pace,
-			// not in cooldown or restricted, and in-flight concurrency is below MaxAffinityInFlight.
-			if !scheduler.IsRestricted(acc) && !scheduler.IsReserveCandidate(acc, nowSecs) &&
-				!quota.ComputeCapacityState(acc, nowSecs).IsDepleted && !scheduler.OverWeeklyPace(acc, nowSecs) &&
-				(acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs) &&
-				observability.GetInFlightGeneration(acc.ID) < MaxAffinityInFlight {
+			if affinityHealthy(acc, now) && observability.GetInFlightGeneration(acc.ID) < MaxAffinityInFlight {
 				targetIdx = i
 			}
 			break
@@ -184,6 +178,30 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 	reordered = append(reordered, candidates[:targetIdx]...)
 	reordered = append(reordered, candidates[targetIdx+1:]...)
 	return reordered, true
+}
+
+// HeldByLoad reports whether the session's bound account is among candidates and healthy, so affinity skipped
+// it only for in-flight load: the request spills elsewhere, but the binding and its warm cache should stay.
+func (m *AffinityManager) HeldByLoad(candidates []*storage.Account, sessionKey string, now time.Time) bool {
+	boundID, ok := m.Get(sessionKey, now)
+	if !ok {
+		return false
+	}
+	for _, acc := range candidates {
+		if acc != nil && acc.ID == boundID {
+			return affinityHealthy(acc, now)
+		}
+	}
+	return false
+}
+
+// affinityHealthy reports whether a bound account may keep its session regardless of load: not restricted,
+// rate limited, in reserve, depleted or over weekly pace.
+func affinityHealthy(acc *storage.Account, now time.Time) bool {
+	nowSecs := float64(now.Unix())
+	return !scheduler.IsRestricted(acc) && !scheduler.IsReserveCandidate(acc, nowSecs) &&
+		!quota.ComputeCapacityState(acc, nowSecs).IsDepleted && !scheduler.OverWeeklyPace(acc, nowSecs) &&
+		(acc.RateLimitedUntil == nil || *acc.RateLimitedUntil <= nowSecs)
 }
 
 // ExtractSessionKey extracts a conversation identifier from request headers, query params, or body.

@@ -185,6 +185,9 @@ func TestApplyAffinity_BypassedOnHighInFlight(t *testing.T) {
 	if applied2 || reordered2[0].ID != "acc-affinity-idle" {
 		t.Fatalf("expected affinity to be bypassed when in-flight >= MaxAffinityInFlight, got applied=%v first=%s", applied2, reordered2[0].ID)
 	}
+	if !mgr.HeldByLoad(candidates, "session-concurrent", now) {
+		t.Fatalf("expected a load-only bypass to keep the binding")
+	}
 
 	// 4. Once requests finish and in-flight drops back below threshold, affinity resumes
 	done2()
@@ -222,6 +225,9 @@ func TestApplyAffinity_BypassedOnDepleted(t *testing.T) {
 	}
 	if len(reordered) != 2 || reordered[0].ID != "acc-healthy" || reordered[1].ID != "acc-depleted" {
 		t.Fatalf("expected candidates unchanged, got %v", reordered)
+	}
+	if mgr.HeldByLoad(candidates, "session-depleted", now) {
+		t.Fatalf("expected a depleted bound account to give up its binding")
 	}
 }
 
