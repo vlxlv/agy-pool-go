@@ -75,8 +75,12 @@ func stopWithFile(ctx *InstanceContext, pidFile string, timeout time.Duration) e
 		return fmt.Errorf("%w: daemon running without config, cannot stop with config %q", ErrConfigMismatch, ctx.ConfigPath)
 	}
 
-	// 5. Send SIGTERM
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+	// 5. Stop through systemd when it supervises the daemon, otherwise send SIGTERM
+	if scope := systemdScope(pid); scope != "" {
+		if err := systemctl(scope, "stop"); err != nil {
+			return err
+		}
+	} else if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("failed to send SIGTERM to PID %d: %w", pid, err)
 	}
 
@@ -143,6 +147,16 @@ func RestartInstance(ctx *InstanceContext, opts LaunchOptions) (*StartResult, er
 		return nil, fmt.Errorf("cannot restart instance: %s", msg)
 	}
 
+	// A systemd-supervised daemon is restarted by its unit; spawning our own would fight it for the PID lock.
+	if info := GetDaemonInfo(pidFile); info != nil && IsProcessAlive(info.PID) && IsAgyPoolProcess(info.PID) {
+		if scope := systemdScope(info.PID); scope != "" {
+			if err := systemctl(scope, "restart"); err != nil {
+				return nil, err
+			}
+			return waitRestarted(ctx, pidFile, info.PID, scope)
+		}
+	}
+
 	// 1. Stop existing daemon
 	_ = stopWithFile(ctx, pidFile, 5*time.Second)
 
@@ -165,6 +179,18 @@ func RestartInstance(ctx *InstanceContext, opts LaunchOptions) (*StartResult, er
 	}
 	res.WasRestarted = true
 	return res, nil
+}
+
+// waitRestarted waits for a daemon other than oldPID to own pidFile and listen on the instance port.
+func waitRestarted(ctx *InstanceContext, pidFile string, oldPID int, scope string) (*StartResult, error) {
+	for i := 0; i < 50; i++ {
+		if info := GetDaemonInfo(pidFile); info != nil && info.PID != oldPID && IsProcessAlive(info.PID) && IsPortListening(ctx.ListenPort) {
+			return &StartResult{PID: info.PID, WasRestarted: true}, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("%s restarted but the gateway is not listening on port %d; inspect `systemctl %s status %s` and %s",
+		systemdUnitName, ctx.ListenPort, scope, systemdUnitName, ctx.LogFile())
 }
 
 // RestartDaemon stops the existing daemon, waits for port release, and starts the new daemon.

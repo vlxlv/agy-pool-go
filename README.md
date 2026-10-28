@@ -66,7 +66,9 @@ Download the `.deb` package from [Releases](https://github.com/vlxlv/agy-pool-go
 ```bash
 sudo dpkg -i agy-pool_<version>_amd64.deb
 ```
-The package automatically installs `/usr/bin/agy-pool` and systemd service files.
+The package automatically installs `/usr/bin/agy-pool` and systemd service files. Run the gateway per user with `systemctl --user enable --now agy-pool`, or system-wide with `sudo systemctl enable --now agy-pool` (runs as the `agy-pool` system user created by the package, state in `/var/lib/agy-pool`, optional config in `/etc/agy-pool/config.json`). Without the package, a user install can use the same unit: copy `contrib/systemd/user/agy-pool.service` to `~/.config/systemd/user/` and run `systemctl --user enable --now agy-pool` (it runs `~/.local/bin/agy-pool`). `agy-pool stop` and `agy-pool restart` act through `systemctl` when the gateway runs under one of these units. Upgrade with a newer `.deb`; `agy-pool update` refuses to replace a package-owned binary.
+
+If you installed the `0.1.0-beta.37` package, its version sorts above later betas, so upgrade once with `sudo apt install --allow-downgrades ./agy-pool_<version>_<arch>.deb`.
 
 #### Via agy-pool installer
 To install `agy-pool` and set up transparent integration with native Antigravity CLI:
