@@ -219,11 +219,23 @@ func TestProxy_SlowStart_CoolsDownOnlyThatModel(t *testing.T) {
 		return w.Body.String()
 	}
 
-	// 1. Slow but successful answer is still delivered.
+	// 1. Slow but successful answer is still delivered, and one slow answer alone does not pause acc_1.
 	if got := send("slow-model", "first"); !strings.Contains(got, "acc1") {
 		t.Fatalf("expected slow answer from acc1, got %s", got)
 	}
-	// 2. Same model next time skips acc_1.
+	// A fast answer in between resets the strike, so the next slow answer is again only a first strike.
+	slow.Store(false)
+	if got := send("slow-model", "fast"); !strings.Contains(got, "acc1") {
+		t.Fatalf("expected acc1 after a single slow answer, got %s", got)
+	}
+	slow.Store(true)
+	if got := send("slow-model", "strike1"); !strings.Contains(got, "acc1") {
+		t.Fatalf("expected acc1 after strike reset, got %s", got)
+	}
+	if got := send("slow-model", "strike2"); !strings.Contains(got, "acc1") {
+		t.Fatalf("expected second slow answer still from acc1, got %s", got)
+	}
+	// 2. After two slow answers in a row, the same model skips acc_1.
 	if got := send("slow-model", "second"); !strings.Contains(got, "acc2") {
 		t.Fatalf("expected acc2 after slow start, got %s", got)
 	}

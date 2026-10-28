@@ -29,8 +29,9 @@ var modelSlowTTFB = 30 * time.Second
 var (
 	modelCooldownMu      sync.Mutex
 	modelCooldowns       = map[string]modelCooldown{}
-	lastModel            string // model of the latest generation request, published so the CLI can mirror routing
-	persistModelCooldown bool   // set by LoadModelCooldowns; off in tests and CLI processes
+	modelSlowStrikes     = map[string]bool{} // (account, model) whose last answer was slow; in memory only
+	lastModel            string              // model of the latest generation request, published so the CLI can mirror routing
+	persistModelCooldown bool                // set by LoadModelCooldowns; off in tests and CLI processes
 )
 
 const modelPausesKey = "model_pauses"
@@ -101,6 +102,7 @@ func RecordModelCapacityError(accountID, model string) time.Duration {
 	key := modelCooldownKey(accountID, model)
 	backoff := min(max(modelCooldowns[key].backoff*2, modelCooldownMin), modelCooldownMax)
 	modelCooldowns[key] = modelCooldown{until: NowFunc().Add(backoff), backoff: backoff}
+	delete(modelSlowStrikes, key)
 	saveModelCooldownsLocked()
 	return backoff
 }
@@ -115,8 +117,26 @@ func recordModelLatency(acc *storage.Account, model string, ttfb time.Duration) 
 		ClearModelCooldown(acc.ID, model)
 		return
 	}
+	if firstSlowStrike(acc.ID, model) {
+		logMessage("SLOW", fmt.Sprintf("Account %s took %s to start answering %s. Pausing it for this model if the next answer is slow too.", accounts.DisplayAccountName(acc), fmtDur(ttfb), model))
+		return
+	}
 	cooldown := RecordModelCapacityError(acc.ID, model)
 	logMessage("SLOW", fmt.Sprintf("Account %s took %s to start answering %s. Paused for this model for %s.", accounts.DisplayAccountName(acc), fmtDur(ttfb), model, cooldown))
+}
+
+// firstSlowStrike records a slow answer and reports whether it is the first in a row for (account, model).
+// Upstream sends headers only after thinking, so one long reasoning turn looks like a stall; two in a row
+// without a fast answer between them is treated as missing capacity.
+func firstSlowStrike(accountID, model string) bool {
+	modelCooldownMu.Lock()
+	defer modelCooldownMu.Unlock()
+	key := modelCooldownKey(accountID, model)
+	if modelSlowStrikes[key] {
+		return false
+	}
+	modelSlowStrikes[key] = true
+	return true
 }
 
 // ClearModelCooldown forgets the account's backoff for this model after it served the model successfully.
@@ -124,6 +144,7 @@ func ClearModelCooldown(accountID, model string) {
 	modelCooldownMu.Lock()
 	defer modelCooldownMu.Unlock()
 	key := modelCooldownKey(accountID, model)
+	delete(modelSlowStrikes, key)
 	if _, ok := modelCooldowns[key]; !ok {
 		return // the common case on every fast answer: nothing to clear, so no DB write
 	}
@@ -135,6 +156,7 @@ func resetModelCooldowns() {
 	modelCooldownMu.Lock()
 	defer modelCooldownMu.Unlock()
 	clear(modelCooldowns)
+	clear(modelSlowStrikes)
 	lastModel = ""
 	persistModelCooldown = false
 }
