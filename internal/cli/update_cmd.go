@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,9 @@ var releasesAPI = "https://api.github.com/repos/vlxlv/agy-pool-go/releases?per_p
 
 // updateTargetPath resolves the binary to replace; tests point it at a temp file.
 var updateTargetPath = daemon.GetEntrypointPath
+
+// dpkgFileList lists the files owned by the agy-pool Debian package; tests point it at a temp file.
+var dpkgFileList = "/var/lib/dpkg/info/agy-pool.list"
 
 // UpdateCmd replaces the running agy-pool binary with the newest GitHub release and restarts a running gateway.
 func UpdateCmd(stdout, stderr io.Writer, args ...string) int {
@@ -73,6 +77,12 @@ func UpdateCmd(stdout, stderr io.Writer, args ...string) int {
 	if checkOnly {
 		return 0
 	}
+	exe := updateTargetPath()
+	if list, err := os.ReadFile(dpkgFileList); err == nil && slices.Contains(strings.Split(string(list), "\n"), exe) {
+		// Overwriting a dpkg-owned file would leave the package database describing a binary that is gone.
+		return fail("%s is installed by the agy-pool Debian package; install agy-pool_%s_%s.deb from release %s with `sudo apt install ./<file>.deb`",
+			exe, latest, runtime.GOARCH, rel.TagName)
+	}
 
 	binName := "agy-pool-" + runtime.GOOS + "-" + runtime.GOARCH
 	assets := map[string]string{}
@@ -98,7 +108,6 @@ func UpdateCmd(stdout, stderr io.Writer, args ...string) int {
 		return fail("Checksum mismatch for %s; binary not replaced", binName)
 	}
 
-	exe := updateTargetPath()
 	wasRunning := daemon.IsDaemonRunning("", 0)
 	if err := replaceFile(exe, bin); err != nil {
 		return fail("Cannot replace %s: %v", exe, err)

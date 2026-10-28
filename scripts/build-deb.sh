@@ -8,6 +8,8 @@ OUT_DIR="${4:-dist}"
 
 # Strip leading 'v' from version if present
 VERSION="${VERSION#v}"
+# dpkg sorts "0.1.0-beta.37" (revision "beta.37") after "0.1.0"; "~" sorts before it, so the release is an upgrade.
+DEB_VERSION="${VERSION/-/\~}"
 
 if [ ! -f "$BIN_PATH" ]; then
   echo "Error: binary not found at $BIN_PATH" >&2
@@ -26,53 +28,18 @@ mkdir -p "$PKG_DIR/usr/lib/systemd/user"
 # Install binary
 install -m 0755 "$BIN_PATH" "$PKG_DIR/usr/bin/agy-pool"
 
-# Install systemd service files
-cat << 'SERVICE_SYS' > "$PKG_DIR/usr/lib/systemd/system/agy-pool.service"
-[Unit]
-Description=Antigravity Multi-Account Quota Pool & Reverse Proxy Gateway
-Documentation=https://github.com/vlxlv/agy-pool-go
-After=network.target
-
-[Service]
-Type=simple
-User=agy-pool
-Group=agy-pool
-Environment=AGY_POOL_DAEMON_CHILD=1
-Environment=AGY_CONFIG_FILE=/etc/agy-pool/config.json
-Environment=AGY_DATA_DIR=/var/lib/agy-pool
-ExecStart=/usr/bin/agy-pool
-Restart=always
-RestartSec=3s
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_SYS
-chmod 0644 "$PKG_DIR/usr/lib/systemd/system/agy-pool.service"
-
-cat << 'SERVICE_USER' > "$PKG_DIR/usr/lib/systemd/user/agy-pool.service"
-[Unit]
-Description=Antigravity Multi-Account Quota Pool & Reverse Proxy Gateway
-Documentation=https://github.com/vlxlv/agy-pool-go
-After=network.target
-
-[Service]
-Type=simple
-Environment=AGY_POOL_DAEMON_CHILD=1
-ExecStart=/usr/bin/agy-pool
-Restart=always
-RestartSec=3s
-LimitNOFILE=65536
-
-[Install]
-WantedBy=default.target
-SERVICE_USER
-chmod 0644 "$PKG_DIR/usr/lib/systemd/user/agy-pool.service"
+# Install the contrib/systemd units, pointed at the packaged binary
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+for SCOPE in system user; do
+  sed 's|^ExecStart=.*|ExecStart=/usr/bin/agy-pool|' "$ROOT/contrib/systemd/$SCOPE/agy-pool.service" \
+    > "$PKG_DIR/usr/lib/systemd/$SCOPE/agy-pool.service"
+  chmod 0644 "$PKG_DIR/usr/lib/systemd/$SCOPE/agy-pool.service"
+done
 
 # Generate control file
 cat << CONTROL > "$PKG_DIR/DEBIAN/control"
 Package: agy-pool
-Version: ${VERSION}
+Version: ${DEB_VERSION}
 Section: net
 Priority: optional
 Architecture: ${ARCH}
@@ -89,8 +56,14 @@ cat << 'POSTINST' > "$PKG_DIR/DEBIAN/postinst"
 #!/bin/sh
 set -e
 if [ "$1" = "configure" ]; then
+    # The system unit runs as this account; systemd creates its home as the unit's StateDirectory.
+    getent group agy-pool >/dev/null || groupadd --system agy-pool
+    getent passwd agy-pool >/dev/null || useradd --system --gid agy-pool --home-dir /var/lib/agy-pool \
+        --no-create-home --shell /usr/sbin/nologin agy-pool
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload >/dev/null 2>&1 || true
+        # On upgrade, move a running system gateway onto the new binary.
+        systemctl try-restart agy-pool.service >/dev/null 2>&1 || true
     fi
 fi
 POSTINST
@@ -104,6 +77,10 @@ if [ "$1" = "remove" ]; then
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop agy-pool.service >/dev/null 2>&1 || true
         systemctl disable agy-pool.service >/dev/null 2>&1 || true
+        # Per-user gateways from the packaged user unit would otherwise keep running the removed binary.
+        for U in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+            systemctl --user -M "$U@" stop agy-pool.service >/dev/null 2>&1 || true
+        done
     fi
 fi
 PRERM

@@ -62,6 +62,17 @@ func TestUpdateCmd(t *testing.T) {
 		t.Fatalf("mode = %v, want 0755", fi.Mode().Perm())
 	}
 
+	oldList := dpkgFileList
+	defer func() { dpkgFileList = oldList }()
+	dpkgFileList = filepath.Join(t.TempDir(), "agy-pool.list")
+	if err := os.WriteFile(dpkgFileList, []byte("/.\n"+target+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := run(); code != 1 || !strings.Contains(out, "Debian package") || !strings.HasSuffix(out, "|old binary") {
+		t.Fatalf("dpkg-owned binary must not be replaced: code=%d out=%q", code, out)
+	}
+	dpkgFileList = oldList
+
 	sums = "0000  " + binName + "\n"
 	if code, out := run(); code != 1 || !strings.HasSuffix(out, "|old binary") {
 		t.Fatalf("bad checksum must not replace: code=%d out=%q", code, out)
