@@ -596,6 +596,10 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		// selectionMu covers this process; the DB write transaction covers other processes sharing the pool.
 		selectionMu.Lock()
 		sessionKey = ExtractSessionKey(r, body)
+		if sessionKey != "" && model != "" {
+			// Upstream prompt caches are per model, so each model in a conversation keeps its own binding.
+			sessionKey += "\x00" + model
+		}
 		picked := false
 		pick := func(remote map[string]int64) string {
 			picked = true
@@ -619,6 +623,9 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			// After affinity, so a conversation bound to an account with no capacity for its model moves on.
 			candidates, modelExcluded = ExcludeModelCooldowns(candidates, model, NowFunc())
+			if affinityStatus == "new" && GetAffinityManager().HeldByLoad(candidates, sessionKey, NowFunc()) {
+				affinityStatus = "spill"
+			}
 
 			if confCand := SelectAndClaimConfirmationCandidate(pool.Accounts); confCand != nil {
 				pendingClaimedID = confCand.ID
@@ -763,8 +770,17 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if hasFailedOver {
 				observability.RecordFailoverSuccess()
 			}
-			if sessionKey != "" && acc != nil {
+			// A load spill leaves the session bound to its healthy account, whose prompt cache is still warm.
+			if sessionKey != "" && acc != nil && affinityStatus != "spill" {
 				GetAffinityManager().Set(sessionKey, acc.ID, NowFunc())
+			}
+			if outcome.PromptTokens > 0 {
+				cached := "not reported"
+				if outcome.CachedTokens >= 0 {
+					cached = fmt.Sprintf("%d (%d%%)", outcome.CachedTokens, outcome.CachedTokens*100/outcome.PromptTokens)
+				}
+				logMessage("CACHE", fmt.Sprintf("%s session %s -> %s: prompt %d, cached %s", model, sessionTag(sessionKey),
+					accounts.DisplayAccountName(acc), outcome.PromptTokens, cached))
 			}
 		}
 		if outcome.Err != nil {
@@ -778,7 +794,8 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// Only ActionFailoverNext may advance to another account.
 		if outcome.Action == ActionFailoverNext {
-			if sessionKey != "" {
+			// Only the bound account failing ends the binding; a spill account failing leaves it in place.
+			if bound, ok := GetAffinityManager().Get(sessionKey, NowFunc()); ok && bound == acc.ID {
 				GetAffinityManager().Delete(sessionKey)
 			}
 			continue
@@ -1140,7 +1157,8 @@ func (h *Handler) dispatchAccount(
 			logMessage("PROXY WARN", "failed to persist success bookkeeping")
 		}
 		attachDebugHeaders(resp.Header, acc, strategy, affinityStatus)
-		streamErr := SendStream(committer, statusCode, resp.Header, resp.Body)
+		usage := &usageTap{r: resp.Body, cached: -1}
+		streamErr := SendStream(committer, statusCode, resp.Header, usage)
 		// Logged after the stream ends so the line carries the full duration.
 		logMessage("PROXY", fmt.Sprintf("%s %s -> %s (Status: %d, ttfb %s, total %s)%s", r.Method, pathBase, dispName, statusCode, fmtDur(ttfb), fmtDur(NowFunc().Sub(start)), auditSuffix))
 		if streamErr != nil {
@@ -1152,8 +1170,10 @@ func (h *Handler) dispatchAccount(
 			}
 		}
 		return DispatchOutcome{
-			Action: ActionTerminal,
-			Reason: "CommittedStreamSuccess",
+			Action:       ActionTerminal,
+			Reason:       "CommittedStreamSuccess",
+			PromptTokens: usage.prompt,
+			CachedTokens: usage.cached,
 		}
 	}
 
@@ -1181,9 +1201,13 @@ func (h *Handler) dispatchAccount(
 	}
 	attachDebugHeaders(resp.Header, acc, strategy, affinityStatus)
 	SendBuffered(committer, statusCode, resp.Header, respBody)
+	usage := usageTap{cached: -1}
+	usage.scan(respBody)
 	return DispatchOutcome{
-		Action: ActionTerminal,
-		Reason: "TerminalSuccess",
+		Action:       ActionTerminal,
+		Reason:       "TerminalSuccess",
+		PromptTokens: usage.prompt,
+		CachedTokens: usage.cached,
 	}
 }
 
