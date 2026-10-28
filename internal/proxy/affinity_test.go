@@ -78,6 +78,18 @@ func TestExtractSessionKey(t *testing.T) {
 	if got := ExtractSessionKey(req5, body6); got != "nested-sess-999" {
 		t.Fatalf("expected nested-sess-999, got %q", got)
 	}
+
+	// 8. agy: request.sessionId is shared by all conversations, labels.cascade_id identifies one
+	agy := func(cascade string) []byte {
+		return []byte(`{"model":"gemini-3.8-flash-high","requestType":"agent","request":{"sessionId":"-3750763034362895579","labels":{"cascade_id":"` + cascade + `"}}}`)
+	}
+	if a, b := ExtractSessionKey(req5, agy("cascade-a")), ExtractSessionKey(req5, agy("cascade-b")); a != "cascade-a" || b != "cascade-b" {
+		t.Fatalf("expected per-cascade keys, got %q and %q", a, b)
+	}
+	// agy checkpoint calls carry no cascade and keep the sessionId
+	if got := ExtractSessionKey(req5, []byte(`{"request":{"sessionId":"-3750763034362895579"}}`)); got != "-3750763034362895579" {
+		t.Fatalf("expected sessionId without a cascade, got %q", got)
+	}
 }
 
 func TestAffinityManagerLifecycle(t *testing.T) {

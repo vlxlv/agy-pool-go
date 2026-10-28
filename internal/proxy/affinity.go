@@ -241,6 +241,9 @@ func ExtractSessionKey(r *http.Request, body []byte) string {
 			SessionID      string        `json:"sessionId"`
 			SessID         string        `json:"session_id"`
 			Contents       []turnContent `json:"contents"`
+			Labels         struct {
+				CascadeID string `json:"cascade_id"`
+			} `json:"labels"`
 		}
 		var payload struct {
 			sessionFields
@@ -248,6 +251,10 @@ func ExtractSessionKey(r *http.Request, body []byte) string {
 			Metadata sessionFields `json:"metadata"`
 		}
 		if json.Unmarshal(body, &payload) == nil {
+			// agy (Antigravity) sends one request.sessionId for every conversation; the conversation is its cascade.
+			if v := strings.TrimSpace(payload.Request.Labels.CascadeID); v != "" {
+				return v
+			}
 			for _, s := range []sessionFields{payload.sessionFields, payload.Request, payload.Metadata} {
 				for _, id := range []string{s.ConversationID, s.ConvID, s.SessionID, s.SessID} {
 					if v := strings.TrimSpace(id); v != "" {
