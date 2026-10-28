@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// Version is the agy-pool version string, default "0.1.0-beta.37", injectable via -ldflags.
-var Version = "0.1.0-beta.37"
+// Version is the agy-pool version string, default "0.1.0-beta.38", injectable via -ldflags.
+var Version = "0.1.0-beta.38"
 
 const (
 	// Strategy constants
