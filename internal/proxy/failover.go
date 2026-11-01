@@ -15,8 +15,15 @@ import (
 // poolTransaction is replaceable by package tests to deterministically inject persistence failures.
 var poolTransaction = storage.PoolTransaction
 
+// recordSuccess is replaceable by package tests to inject persistence failures.
+var recordSuccess = storage.RecordSuccess
+
 func isPoolTransactionReplaced() bool {
 	return reflect.ValueOf(poolTransaction).Pointer() != reflect.ValueOf(storage.PoolTransaction).Pointer()
+}
+
+func isRecordSuccessReplaced() bool {
+	return reflect.ValueOf(recordSuccess).Pointer() != reflect.ValueOf(storage.RecordSuccess).Pointer()
 }
 
 func runPoolTransaction(fn func(*storage.Pool) error) error {
@@ -29,50 +36,11 @@ func runPoolTransaction(fn func(*storage.Pool) error) error {
 
 // RecordSuccess updates account counters and promotes active account under transaction.
 func RecordSuccess(account *storage.Account, isGeneration bool) error {
-	now := NowFunc().Unix()
-	return runPoolTransaction(func(pool *storage.Pool) error {
-		stored := storage.FindAccount(pool, account)
-		if stored == nil {
-			return nil
-		}
-		stored.RequestCount++
-		if isGeneration {
-			var hits int64 = 1
-			if stored.GenCount != nil {
-				hits = *stored.GenCount + 1
-			}
-			stored.GenCount = &hits
-			stored.LastUsedAt = &now
-
-			// Generation Confirmation: If account was verification_pending, atomically transition to Ready
-			if stored.Status == storage.StatusVerificationPending {
-				stored.Status = ""
-			}
-			pool.RecordGenerationTelemetry(stored.ID, now)
-		}
-
-		// Clear soft cooldown (e.g. temporary location error) if account is otherwise healthy
-		if stored.Status == "" && stored.RateLimitedUntil != nil && *stored.RateLimitedUntil > 0 {
-			stored.RateLimitedUntil = nil
-		}
-
-		activeID := ""
-		if pool.ActiveAccountID != nil {
-			activeID = *pool.ActiveAccountID
-		}
-		var active *storage.Account
-		for _, a := range pool.Accounts {
-			if a.ID == activeID {
-				active = a
-				break
-			}
-		}
-
-		if activeID == "" || (active != nil && active.RateLimitedUntil != nil && *active.RateLimitedUntil > float64(now) && stored.ID != active.ID) {
-			pool.ActiveAccountID = &stored.ID
-		}
-		return nil
-	})
+	err := recordSuccess(account, isGeneration, NowFunc().Unix())
+	if err != nil && isRecordSuccessReplaced() {
+		observability.RecordPersistenceError()
+	}
+	return err
 }
 
 // RecordQuotaError parses Retry-After and applies rate limit cooldown under transaction.

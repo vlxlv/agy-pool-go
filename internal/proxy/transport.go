@@ -10,7 +10,9 @@ import (
 )
 
 var (
-	// BaseTransport is configured with DisableKeepAlives to eliminate hidden connection-reuse retries.
+	// BaseTransport is configured with connection pooling for non-generation/metadata calls.
+	// Go's transport only re-sends a POST on a reused connection when nothing was written,
+	// so pooling is safe for metadata calls; generation keeps its own unpooled transport.
 	BaseTransport = &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -18,7 +20,9 @@ var (
 			KeepAlive: 0,
 		}).DialContext,
 		ForceAttemptHTTP2:     false,
-		DisableKeepAlives:     true, // Project invariant: no hidden connection-reuse retries
+		DisableKeepAlives:     false,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 300 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,

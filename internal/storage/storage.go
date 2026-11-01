@@ -241,6 +241,138 @@ func SavePool(pool *Pool) error {
 	})
 }
 
+// RecordSuccess bumps one account's success counters in place instead of rewriting the whole pool.
+func RecordSuccess(account *Account, isGeneration bool, now int64) error {
+	if account == nil {
+		return nil
+	}
+	if err := EnsureDirs(); err != nil {
+		observability.RecordPersistenceError()
+		return err
+	}
+
+	sdb, err := GetStateDB()
+	if err != nil {
+		observability.RecordPersistenceError()
+		return err
+	}
+
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	return sdb.Update(context.Background(), func(tx *sql.Tx) error {
+		var id string
+		if account.ID != "" {
+			err := tx.QueryRow("SELECT id FROM accounts WHERE id = ?", account.ID).Scan(&id)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		if id == "" && account.Email != "" {
+			err := tx.QueryRow("SELECT id FROM accounts WHERE email = ? LIMIT 1", account.Email).Scan(&id)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		if id == "" {
+			return nil
+		}
+
+		if _, err := tx.Exec("INSERT INTO account_runtime (account_id) VALUES (?) ON CONFLICT(account_id) DO NOTHING", id); err != nil {
+			return err
+		}
+
+		if isGeneration {
+			_, err := tx.Exec(`
+				UPDATE account_runtime
+				SET request_count = request_count + 1,
+				    gen_count = COALESCE(gen_count, 0) + 1,
+				    last_used_at = ?,
+				    status = CASE WHEN status = ? THEN '' ELSE status END
+				WHERE account_id = ?`, now, StatusVerificationPending, id)
+			if err != nil {
+				return err
+			}
+		} else {
+			_, err := tx.Exec(`
+				UPDATE account_runtime
+				SET request_count = request_count + 1
+				WHERE account_id = ?`, id)
+			if err != nil {
+				return err
+			}
+		}
+
+		if _, err := tx.Exec(`
+			UPDATE account_runtime
+			SET rate_limited_until = NULL
+			WHERE account_id = ? AND status = '' AND rate_limited_until > 0`, id); err != nil {
+			return err
+		}
+
+		if isGeneration {
+			var rawVal sql.NullString
+			err := tx.QueryRow("SELECT value FROM runtime_global WHERE key = 'generation_events'").Scan(&rawVal)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			var evs []GenerationEvent
+			if rawVal.Valid && rawVal.String != "" {
+				if err := json.Unmarshal([]byte(rawVal.String), &evs); err != nil {
+					evs = nil
+				}
+			}
+			p := &Pool{GenerationEvents: evs}
+			p.RecordGenerationTelemetry(id, now)
+			evsBytes, err := json.Marshal(p.GenerationEvents)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`
+				INSERT INTO runtime_global (key, value)
+				VALUES ('generation_events', ?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, string(evsBytes)); err != nil {
+				return err
+			}
+		}
+
+		var activeVal sql.NullString
+		err = tx.QueryRow("SELECT value FROM runtime_global WHERE key = 'active_account_id'").Scan(&activeVal)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		activeID := ""
+		if activeVal.Valid {
+			activeID = activeVal.String
+		}
+
+		shouldPromote := false
+		if activeID == "" {
+			shouldPromote = true
+		} else if activeID != id {
+			var rlu sql.NullFloat64
+			err := tx.QueryRow("SELECT rate_limited_until FROM account_runtime WHERE account_id = ?", activeID).Scan(&rlu)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err == nil && rlu.Valid && rlu.Float64 > float64(now) {
+				shouldPromote = true
+			}
+		}
+
+		if shouldPromote {
+			if _, err := tx.Exec(`
+				INSERT INTO runtime_global (key, value)
+				VALUES ('active_account_id', ?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, id); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
 // FindAccount searches for an account by ID or email.
 func FindAccount(pool *Pool, account *Account) *Account {
 	if pool == nil || account == nil {
