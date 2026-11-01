@@ -236,11 +236,11 @@ func ExtractSessionKey(r *http.Request, body []byte) string {
 			Parts []turnPart `json:"parts"`
 		}
 		type sessionFields struct {
-			ConversationID string        `json:"conversationId"`
-			ConvID         string        `json:"conversation_id"`
-			SessionID      string        `json:"sessionId"`
-			SessID         string        `json:"session_id"`
-			Contents       []turnContent `json:"contents"`
+			ConversationID string            `json:"conversationId"`
+			ConvID         string            `json:"conversation_id"`
+			SessionID      string            `json:"sessionId"`
+			SessID         string            `json:"session_id"`
+			Contents       []json.RawMessage `json:"contents"`
 			Labels         struct {
 				CascadeID string `json:"cascade_id"`
 			} `json:"labels"`
@@ -268,7 +268,11 @@ func ExtractSessionKey(r *http.Request, body []byte) string {
 			if len(contents) == 0 {
 				contents = payload.Request.Contents
 			}
-			for _, c := range contents {
+			for _, raw := range contents {
+				var c turnContent
+				if err := json.Unmarshal(raw, &c); err != nil {
+					continue
+				}
 				if c.Role == "user" || (c.Role == "" && len(contents) == 1) {
 					var texts []string
 					for _, p := range c.Parts {

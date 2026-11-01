@@ -362,6 +362,9 @@ func logMessage(prefix, msg string) {
 	}
 }
 
+// maxRequestBodyBytes limits incoming request bodies to 64 MiB to prevent memory exhaustion.
+const maxRequestBodyBytes = 64 << 20
+
 // ReadRequestBody validates Content-Length / Transfer-Encoding constraints and returns body bytes.
 func ReadRequestBody(r *http.Request) ([]byte, error) {
 	contentLengths := r.Header.Values("Content-Length")
@@ -389,6 +392,9 @@ func ReadRequestBody(r *http.Request) ([]byte, error) {
 		if clVal < 0 {
 			return nil, errors.New("negative Content-Length")
 		}
+		if clVal > maxRequestBodyBytes {
+			return nil, errors.New("request body exceeds maximum allowed size")
+		}
 		buf := make([]byte, clVal)
 		n, err := io.ReadFull(r.Body, buf)
 		if err != nil && err != io.EOF {
@@ -410,9 +416,12 @@ func ReadRequestBody(r *http.Request) ([]byte, error) {
 		}
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(body)) > maxRequestBodyBytes {
+		return nil, errors.New("request body exceeds maximum allowed size")
 	}
 	return body, nil
 }
@@ -591,15 +600,15 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	var modelExcluded int
 	if isGeneration {
 		model = requestModel(body)
-		// Ordering reads in-flight counts, so ordering and reserving the first pick must be atomic,
-		// otherwise a burst of requests all see In-Flight=0 and pick the same account.
-		// selectionMu covers this process; the DB write transaction covers other processes sharing the pool.
-		selectionMu.Lock()
 		sessionKey = ExtractSessionKey(r, body)
 		if sessionKey != "" && model != "" {
 			// Upstream prompt caches are per model, so each model in a conversation keeps its own binding.
 			sessionKey += "\x00" + model
 		}
+		// Ordering reads in-flight counts, so ordering and reserving the first pick must be atomic,
+		// otherwise a burst of requests all see In-Flight=0 and pick the same account.
+		// selectionMu covers this process; the DB write transaction covers other processes sharing the pool.
+		selectionMu.Lock()
 		picked := false
 		pick := func(remote map[string]int64) string {
 			picked = true

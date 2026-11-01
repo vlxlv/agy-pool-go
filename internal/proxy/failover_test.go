@@ -63,8 +63,11 @@ func TestLifecyclePersistenceErrorsAreObservable(t *testing.T) {
 	setupIsolatedTestDir(t)
 	original := poolTransaction
 	t.Cleanup(func() { poolTransaction = original })
+	originalRecordSuccess := recordSuccess
+	t.Cleanup(func() { recordSuccess = originalRecordSuccess })
 	injected := errors.New("injected persistence failure")
 	poolTransaction = func(func(*storage.Pool) error) error { return injected }
+	recordSuccess = func(*storage.Account, bool, int64) error { return injected }
 	acc := &storage.Account{ID: "acc_1"}
 
 	if err := RecordValidationError(acc, nil); !errors.Is(err, injected) {
