@@ -210,17 +210,6 @@ func ExcludeModelCooldowns(candidates []*storage.Account, model string, now time
 	return ready, len(candidates) - len(ready)
 }
 
-// requestModel returns the top-level "model" of a generation request body, or "" if absent.
-func requestModel(body []byte) string {
-	var req struct {
-		Model string `json:"model"`
-	}
-	if json.Unmarshal(body, &req) != nil {
-		return ""
-	}
-	return req.Model
-}
-
 // upstreamErrorReason returns the first ErrorInfo reason of a Google API error body, falling back to its status.
 func upstreamErrorReason(body []byte) string {
 	var e struct {

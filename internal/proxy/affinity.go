@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -206,14 +207,55 @@ func affinityHealthy(acc *storage.Account, now time.Time) bool {
 
 // ExtractSessionKey extracts a conversation identifier from request headers, query params, or body.
 func ExtractSessionKey(r *http.Request, body []byte) string {
+	_, key := inspectRequest(r, body)
+	return key
+}
+
+// inspectRequest returns the body's top-level model and the conversation identifier from request headers,
+// query params, or body, decoding the body once.
+func inspectRequest(r *http.Request, body []byte) (model, sessionKey string) {
+	type turnPart struct {
+		Text string `json:"text"`
+	}
+	type turnContent struct {
+		Role  string     `json:"role"`
+		Parts []turnPart `json:"parts"`
+	}
+	// No contents field: encoding/json skips unknown fields without allocating, so the turns are only
+	// decoded below when the first-turn fallback needs them.
+	type sessionFields struct {
+		ConversationID string `json:"conversationId"`
+		ConvID         string `json:"conversation_id"`
+		SessionID      string `json:"sessionId"`
+		SessID         string `json:"session_id"`
+		Labels         struct {
+			CascadeID string `json:"cascade_id"`
+		} `json:"labels"`
+	}
+	var payload struct {
+		sessionFields
+		Model    string        `json:"model"`
+		Request  sessionFields `json:"request"`
+		Metadata sessionFields `json:"metadata"`
+	}
+	parsed := false
+	if len(body) > 0 {
+		err := json.Unmarshal(body, &payload)
+		parsed = err == nil
+		// A mistyped session field must not hide the model, which used to be decoded on its own.
+		var typeErr *json.UnmarshalTypeError
+		if parsed || errors.As(err, &typeErr) {
+			model = payload.Model
+		}
+	}
 	if r == nil {
-		return ""
+		return model, ""
 	}
 
 	// 1. Check HTTP headers
 	for _, h := range []string{"X-Conversation-Id", "X-Session-Id", "X-Request-Session-Id", "Conversation-Id", "Session-Id"} {
 		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
-			return v
+			return model, v
 		}
 	}
 
@@ -221,73 +263,58 @@ func ExtractSessionKey(r *http.Request, body []byte) string {
 	if r.URL != nil {
 		for _, q := range []string{"conversation_id", "session_id", "cid"} {
 			if v := strings.TrimSpace(r.URL.Query().Get(q)); v != "" {
-				return v
+				return model, v
 			}
 		}
 	}
 
 	// 3. Check JSON body explicit conversation fields and contents (top-level and /v1internal nested request/metadata)
-	if len(body) > 0 {
-		type turnPart struct {
-			Text string `json:"text"`
-		}
-		type turnContent struct {
-			Role  string     `json:"role"`
-			Parts []turnPart `json:"parts"`
-		}
-		type sessionFields struct {
-			ConversationID string            `json:"conversationId"`
-			ConvID         string            `json:"conversation_id"`
-			SessionID      string            `json:"sessionId"`
-			SessID         string            `json:"session_id"`
-			Contents       []json.RawMessage `json:"contents"`
-			Labels         struct {
-				CascadeID string `json:"cascade_id"`
-			} `json:"labels"`
-		}
-		var payload struct {
-			sessionFields
-			Request  sessionFields `json:"request"`
-			Metadata sessionFields `json:"metadata"`
-		}
-		if json.Unmarshal(body, &payload) == nil {
-			// agy (Antigravity) sends one request.sessionId for every conversation; the conversation is its cascade.
-			if v := strings.TrimSpace(payload.Request.Labels.CascadeID); v != "" {
-				return v
-			}
-			for _, s := range []sessionFields{payload.sessionFields, payload.Request, payload.Metadata} {
-				for _, id := range []string{s.ConversationID, s.ConvID, s.SessionID, s.SessID} {
-					if v := strings.TrimSpace(id); v != "" {
-						return v
-					}
-				}
-			}
-
-			// 4. Fallback: digest of the first user turn in contents (top-level or /v1internal request.contents)
-			contents := payload.Contents
-			if len(contents) == 0 {
-				contents = payload.Request.Contents
-			}
-			for _, raw := range contents {
-				var c turnContent
-				if err := json.Unmarshal(raw, &c); err != nil {
-					continue
-				}
-				if c.Role == "user" || (c.Role == "" && len(contents) == 1) {
-					var texts []string
-					for _, p := range c.Parts {
-						if t := strings.TrimSpace(p.Text); t != "" {
-							texts = append(texts, t)
-						}
-					}
-					if len(texts) > 0 {
-						sum := sha256.Sum256([]byte(strings.Join(texts, "\n")))
-						return "turn1:" + hex.EncodeToString(sum[:8])
-					}
-				}
+	if !parsed {
+		return model, ""
+	}
+	// agy (Antigravity) sends one request.sessionId for every conversation; the conversation is its cascade.
+	if v := strings.TrimSpace(payload.Request.Labels.CascadeID); v != "" {
+		return model, v
+	}
+	for _, s := range []sessionFields{payload.sessionFields, payload.Request, payload.Metadata} {
+		for _, id := range []string{s.ConversationID, s.ConvID, s.SessionID, s.SessID} {
+			if v := strings.TrimSpace(id); v != "" {
+				return model, v
 			}
 		}
 	}
 
-	return ""
+	// 4. Fallback: digest of the first user turn in contents (top-level or /v1internal request.contents)
+	var turns struct {
+		Contents []json.RawMessage `json:"contents"`
+		Request  struct {
+			Contents []json.RawMessage `json:"contents"`
+		} `json:"request"`
+	}
+	if json.Unmarshal(body, &turns) != nil {
+		return model, ""
+	}
+	contents := turns.Contents
+	if len(contents) == 0 {
+		contents = turns.Request.Contents
+	}
+	for _, raw := range contents {
+		var c turnContent
+		if err := json.Unmarshal(raw, &c); err != nil {
+			continue
+		}
+		if c.Role == "user" || (c.Role == "" && len(contents) == 1) {
+			var texts []string
+			for _, p := range c.Parts {
+				if t := strings.TrimSpace(p.Text); t != "" {
+					texts = append(texts, t)
+				}
+			}
+			if len(texts) > 0 {
+				sum := sha256.Sum256([]byte(strings.Join(texts, "\n")))
+				return model, "turn1:" + hex.EncodeToString(sum[:8])
+			}
+		}
+	}
+	return model, ""
 }

@@ -599,8 +599,7 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	var model string
 	var modelExcluded int
 	if isGeneration {
-		model = requestModel(body)
-		sessionKey = ExtractSessionKey(r, body)
+		model, sessionKey = inspectRequest(r, body)
 		if sessionKey != "" && model != "" {
 			// Upstream prompt caches are per model, so each model in a conversation keeps its own binding.
 			sessionKey += "\x00" + model

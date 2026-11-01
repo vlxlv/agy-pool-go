@@ -309,3 +309,30 @@ func TestAffinityManagerPrunesExpiredAndCapsEntries(t *testing.T) {
 		t.Fatal("newest binding missing")
 	}
 }
+
+func TestInspectRequestModelAndSessionKey(t *testing.T) {
+	req, _ := http.NewRequest("POST", "/v1internal:streamGenerateContent", nil)
+	// agy order: contents first, labels and model last.
+	agyBody := []byte(`{"project":"p","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"labels":{"cascade_id":"c-1"},"sessionId":"-1"},"model":"m-1"}`)
+	if model, key := inspectRequest(req, agyBody); model != "m-1" || key != "c-1" {
+		t.Fatalf("agy body: got (%q, %q), want (m-1, c-1)", model, key)
+	}
+
+	hdr, _ := http.NewRequest("POST", "/v1internal:streamGenerateContent", nil)
+	hdr.Header.Set("X-Session-Id", "h-1")
+	if model, key := inspectRequest(hdr, agyBody); model != "m-1" || key != "h-1" {
+		t.Fatalf("header: got (%q, %q), want (m-1, h-1)", model, key)
+	}
+
+	// A mistyped session field drops the body session key but keeps the model.
+	if model, key := inspectRequest(req, []byte(`{"sessionId":42,"model":"m-2"}`)); model != "m-2" || key != "" {
+		t.Fatalf("mistyped field: got (%q, %q), want (m-2, \"\")", model, key)
+	}
+
+	if model, key := inspectRequest(req, []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)); model != "" || len(key) != len("turn1:")+16 {
+		t.Fatalf("turn1 fallback: got (%q, %q)", model, key)
+	}
+	if model, key := inspectRequest(req, []byte(`{not json`)); model != "" || key != "" {
+		t.Fatalf("malformed: got (%q, %q), want empty", model, key)
+	}
+}
