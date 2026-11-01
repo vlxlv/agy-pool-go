@@ -3,12 +3,12 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
 	"github.com/vlxlv/agy-pool-go/internal/scheduler"
@@ -228,62 +228,43 @@ func ExtractSessionKey(r *http.Request, body []byte) string {
 
 	// 3. Check JSON body explicit conversation fields and contents (top-level and /v1internal nested request/metadata)
 	if len(body) > 0 {
-		type turnPart struct {
-			Text string `json:"text"`
+		// agy (Antigravity) sends one request.sessionId for every conversation; the conversation is its cascade.
+		if v := strings.TrimSpace(ojson.GetBytes(body, "request.labels.cascade_id").String()); v != "" {
+			return v
 		}
-		type turnContent struct {
-			Role  string     `json:"role"`
-			Parts []turnPart `json:"parts"`
-		}
-		type sessionFields struct {
-			ConversationID string            `json:"conversationId"`
-			ConvID         string            `json:"conversation_id"`
-			SessionID      string            `json:"sessionId"`
-			SessID         string            `json:"session_id"`
-			Contents       []json.RawMessage `json:"contents"`
-			Labels         struct {
-				CascadeID string `json:"cascade_id"`
-			} `json:"labels"`
-		}
-		var payload struct {
-			sessionFields
-			Request  sessionFields `json:"request"`
-			Metadata sessionFields `json:"metadata"`
-		}
-		if json.Unmarshal(body, &payload) == nil {
-			// agy (Antigravity) sends one request.sessionId for every conversation; the conversation is its cascade.
-			if v := strings.TrimSpace(payload.Request.Labels.CascadeID); v != "" {
-				return v
-			}
-			for _, s := range []sessionFields{payload.sessionFields, payload.Request, payload.Metadata} {
-				for _, id := range []string{s.ConversationID, s.ConvID, s.SessionID, s.SessID} {
-					if v := strings.TrimSpace(id); v != "" {
-						return v
-					}
-				}
-			}
 
-			// 4. Fallback: digest of the first user turn in contents (top-level or /v1internal request.contents)
-			contents := payload.Contents
-			if len(contents) == 0 {
-				contents = payload.Request.Contents
-			}
-			for _, raw := range contents {
-				var c turnContent
-				if err := json.Unmarshal(raw, &c); err != nil {
-					continue
+		// Explicit session/conversation IDs
+		fields := []string{
+			"conversationId", "conversation_id", "sessionId", "session_id",
+			"request.conversationId", "request.conversation_id", "request.sessionId", "request.session_id",
+			"metadata.conversationId", "metadata.conversation_id", "metadata.sessionId", "metadata.session_id",
+		}
+		for _, f := range fields {
+			if res := ojson.GetBytes(body, f); res.Exists() {
+				if v := strings.TrimSpace(res.String()); v != "" {
+					return v
 				}
-				if c.Role == "user" || (c.Role == "" && len(contents) == 1) {
-					var texts []string
-					for _, p := range c.Parts {
-						if t := strings.TrimSpace(p.Text); t != "" {
-							texts = append(texts, t)
-						}
+			}
+		}
+
+		// 4. Fallback: digest of the first user turn in contents (top-level or /v1internal request.contents)
+		contents := ojson.GetBytes(body, "contents")
+		if !contents.Exists() || len(contents.Array()) == 0 {
+			contents = ojson.GetBytes(body, "request.contents")
+		}
+		arr := contents.Array()
+		for _, c := range arr {
+			role := c.Get("role").String()
+			if role == "user" || (role == "" && len(arr) == 1) {
+				var texts []string
+				for _, p := range c.Get("parts").Array() {
+					if t := strings.TrimSpace(p.Get("text").String()); t != "" {
+						texts = append(texts, t)
 					}
-					if len(texts) > 0 {
-						sum := sha256.Sum256([]byte(strings.Join(texts, "\n")))
-						return "turn1:" + hex.EncodeToString(sum[:8])
-					}
+				}
+				if len(texts) > 0 {
+					sum := sha256.Sum256([]byte(strings.Join(texts, "\n")))
+					return "turn1:" + hex.EncodeToString(sum[:8])
 				}
 			}
 		}

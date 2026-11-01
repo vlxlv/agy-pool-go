@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/vlxlv/agy-pool-go/internal/accounts"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -212,32 +213,21 @@ func ExcludeModelCooldowns(candidates []*storage.Account, model string, now time
 
 // requestModel returns the top-level "model" of a generation request body, or "" if absent.
 func requestModel(body []byte) string {
-	var req struct {
-		Model string `json:"model"`
-	}
-	if json.Unmarshal(body, &req) != nil {
+	if len(body) == 0 {
 		return ""
 	}
-	return req.Model
+	return ojson.GetBytes(body, "model").String()
 }
 
 // upstreamErrorReason returns the first ErrorInfo reason of a Google API error body, falling back to its status.
 func upstreamErrorReason(body []byte) string {
-	var e struct {
-		Error struct {
-			Status  string `json:"status"`
-			Details []struct {
-				Reason string `json:"reason"`
-			} `json:"details"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(body, &e) != nil {
+	if len(body) == 0 {
 		return ""
 	}
-	for _, d := range e.Error.Details {
-		if d.Reason != "" {
-			return d.Reason
+	for _, d := range ojson.GetBytes(body, "error.details").Array() {
+		if reason := d.Get("reason").String(); reason != "" {
+			return reason
 		}
 	}
-	return e.Error.Status
+	return ojson.GetBytes(body, "error.status").String()
 }
