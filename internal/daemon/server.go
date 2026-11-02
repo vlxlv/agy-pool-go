@@ -23,6 +23,8 @@ import (
 // QuotaRefresher can be set by callers to perform background quota refreshes.
 var QuotaRefresher func(account *storage.Account) = proxy.QuotaRefresher
 
+var wireLogRotator sync.Once
+
 // ServerOptions configures the foreground daemon HTTP server.
 type ServerOptions struct {
 	Port                 int
@@ -90,8 +92,9 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 
 	// Restore per-model pauses so a restart does not resend a paused model to its account.
 	proxy.LoadModelCooldowns()
-	// Run rate-limited log rotation on requests handled by the daemon.
-	proxy.LogRotator = func() { MaybeRotateLog() }
+	// Run rate-limited log rotation on requests handled by the daemon. Once, because tests run several
+	// daemons in one process and the hook is a package global.
+	wireLogRotator.Do(func() { proxy.LogRotator = func() { MaybeRotateLog() } })
 
 	// 2. Open TCP listener
 	addr := fmt.Sprintf("%s:%d", ctxInst.ListenHost, port)
