@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -85,6 +87,41 @@ func GetSnapshot() Snapshot {
 		NoReplayPrevented:    globalMetrics.NoReplayPrevented.Load(),
 		LeaseFallbacks:       globalMetrics.LeaseFallbacks.Load(),
 	}
+}
+
+// FormatPrometheusMetrics formats the current metrics snapshot in Prometheus text exposition format (version 0.0.4).
+func FormatPrometheusMetrics() string {
+	s := GetSnapshot()
+	var b strings.Builder
+	writeMetric := func(name, help, typ string, val uint64) {
+		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
+	}
+
+	writeMetric("agy_generation_requests_total", "Total generation requests handled", "counter", s.GenerationRequests)
+	writeMetric("agy_generation_success_total", "Total generation requests successfully finished", "counter", s.GenerationSuccess)
+	writeMetric("agy_routing_decisions_total", "Total routing candidate decisions made", "counter", s.RoutingDecisions)
+	writeMetric("agy_failover_attempts_total", "Total failover attempts to secondary candidates", "counter", s.FailoverAttempts)
+	writeMetric("agy_failover_success_total", "Total successful failover dispatches", "counter", s.FailoverSuccess)
+	writeMetric("agy_restricted_account_skips_total", "Total candidates skipped due to account restrictions", "counter", s.RestrictedSkips)
+	writeMetric("agy_quota_refresh_attempts_total", "Total background quota refresh attempts", "counter", s.QuotaRefreshAttempts)
+	writeMetric("agy_quota_refresh_success_total", "Total background quota refreshes succeeded", "counter", s.QuotaRefreshSuccess)
+	writeMetric("agy_quota_refresh_failure_total", "Total background quota refreshes failed", "counter", s.QuotaRefreshFailure)
+	writeMetric("agy_auth_refresh_attempts_total", "Total OAuth token refresh attempts", "counter", s.AuthRefreshAttempts)
+	writeMetric("agy_auth_refresh_success_total", "Total OAuth token refreshes succeeded", "counter", s.AuthRefreshSuccess)
+	writeMetric("agy_auth_refresh_failure_total", "Total OAuth token refreshes failed", "counter", s.AuthRefreshFailure)
+	writeMetric("agy_persistence_errors_total", "Total state persistence errors", "counter", s.PersistenceErrors)
+	writeMetric("agy_no_replay_prevented_total", "Total requests prevented from replaying once committed", "counter", s.NoReplayPrevented)
+	writeMetric("agy_lease_fallbacks_total", "Total fallback reservations when DB lease failed", "counter", s.LeaseFallbacks)
+
+	inFlightMu.RLock()
+	totalInFlight := int64(0)
+	for _, count := range inFlightCounts {
+		totalInFlight += count
+	}
+	inFlightMu.RUnlock()
+	fmt.Fprintf(&b, "# HELP agy_inflight_generations Current concurrent generation requests\n# TYPE agy_inflight_generations gauge\nagy_inflight_generations %d\n", totalInFlight)
+
+	return b.String()
 }
 
 // RecordGenerationRequest increments generation_requests_total.

@@ -39,6 +39,7 @@ func resetProviders() {
 	GenerationClient = defaultGenerationClient
 	RoundTripHook = nil
 	resetModelCooldowns()
+	ResetSmoothRate()
 }
 
 func TestHopByHopHeaders(t *testing.T) {
@@ -333,5 +334,36 @@ func TestProxy_GenerationTriggersAsyncQuotaRefreshForStaleCandidate(t *testing.T
 		t.Fatalf("unexpected QuotaRefresher call for fresh candidate: %s", id)
 	case <-time.After(50 * time.Millisecond):
 		// OK
+	}
+}
+
+func TestHandler_MetricsAndHealthz(t *testing.T) {
+	handler := NewHandler()
+
+	// 1. Test /healthz
+	reqHealth := httptest.NewRequest("GET", "/healthz", nil)
+	wHealth := httptest.NewRecorder()
+	handler.ServeHTTP(wHealth, reqHealth)
+
+	if wHealth.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /healthz, got %d", wHealth.Code)
+	}
+	if !strings.Contains(wHealth.Body.String(), `"status":"ok"`) {
+		t.Fatalf("expected json ok for /healthz, got %s", wHealth.Body.String())
+	}
+
+	// 2. Test /metrics
+	reqMetrics := httptest.NewRequest("GET", "/metrics", nil)
+	wMetrics := httptest.NewRecorder()
+	handler.ServeHTTP(wMetrics, reqMetrics)
+
+	if wMetrics.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /metrics, got %d", wMetrics.Code)
+	}
+	if !strings.Contains(wMetrics.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("expected text/plain for /metrics, got %s", wMetrics.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(wMetrics.Body.String(), "agy_generation_requests_total") {
+		t.Fatalf("expected metrics body to contain agy_generation_requests_total, got:\n%s", wMetrics.Body.String())
 	}
 }

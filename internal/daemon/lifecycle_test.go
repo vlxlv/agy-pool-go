@@ -402,3 +402,85 @@ func TestDaemon_StartsQuotaRefresher(t *testing.T) {
 		t.Fatalf("timed out waiting for background QuotaRefresher to be called by daemon")
 	}
 }
+
+// TestDaemon_ProactiveTokenRefresh verifies that the background sweep invokes TokenPreRefresher for accounts with tokens expiring soon.
+func TestDaemon_ProactiveTokenRefresh(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+	t.Cleanup(config.ResetDataDir)
+
+	soonExp := float64(time.Now().Unix()) + 180 // 3 minutes left (< 10 minutes)
+	acc := &storage.Account{
+		ID:           "acc-token-refresh",
+		Email:        "expiring@example.com",
+		AccessToken:  "old-token",
+		RefreshToken: "refresh-secret",
+		TokenExpiry:  &soonExp,
+	}
+	restrictedAcc := &storage.Account{
+		ID:           "acc-token-restricted",
+		Email:        "restricted@example.com",
+		AccessToken:  "old-token",
+		RefreshToken: "refresh-secret",
+		TokenExpiry:  &soonExp,
+		Status:       storage.StatusAuthError,
+	}
+	if err := storage.SavePool(&storage.Pool{Accounts: []*storage.Account{acc, restrictedAcc}}); err != nil {
+		t.Fatalf("failed to save pool: %v", err)
+	}
+
+	refreshed := make(chan string, 1)
+	origTokenPreRefresher := TokenPreRefresher
+	TokenPreRefresher = func(a *storage.Account) error {
+		if a.ID == "acc-token-restricted" {
+			t.Errorf("restricted account was not skipped by TokenPreRefresher")
+		}
+		select {
+		case refreshed <- a.ID:
+		default:
+		}
+		return nil
+	}
+	defer func() {
+		TokenPreRefresher = origTokenPreRefresher
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		<-serverDone
+	})
+
+	pidFile := filepath.Join(tmpDir, "server.pid")
+	readyChan := make(chan struct{})
+
+	go func() {
+		defer close(serverDone)
+		_ = RunForeground(ctx, ServerOptions{
+			Port:                 0,
+			EphemeralPort:        true,
+			PIDFile:              pidFile,
+			ReadyChan:            readyChan,
+			QuotaRefreshInterval: 20 * time.Millisecond,
+			DisableSignals:       true,
+		})
+	}()
+
+	select {
+	case <-readyChan:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for server ready")
+	}
+
+	select {
+	case id := <-refreshed:
+		if id != "acc-token-refresh" {
+			t.Errorf("expected refresh for acc-token-refresh, got %s", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for background TokenPreRefresher to be called by daemon")
+	}
+}

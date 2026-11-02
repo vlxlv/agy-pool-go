@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -27,9 +28,53 @@ const MaxAffinityInFlight = 2
 // affinityPruneAt and affinityMaxEntries bound the session map: Set sweeps expired bindings once it
 // reaches affinityPruneAt, and evicts the soonest-expiring binding if active ones still fill affinityMaxEntries.
 const (
-	affinityPruneAt    = 512
-	affinityMaxEntries = 1024
+	affinityPruneAt      = 512
+	affinityMaxEntries   = 1024
+	sessionAffinitiesKey = "session_affinities"
 )
+
+type persistedAffinity struct {
+	AccountID string    `json:"account_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+var (
+	persistAffinityMu sync.Mutex
+	persistAffinity   bool
+)
+
+// SetPersistAffinity enables or disables database persistence of session affinities (used in tests).
+func SetPersistAffinity(enabled bool) {
+	persistAffinityMu.Lock()
+	persistAffinity = enabled
+	persistAffinityMu.Unlock()
+}
+
+// LoadAffinities restores active session affinities saved by a previous daemon run
+// and enables persistence for subsequent changes.
+func LoadAffinities() {
+	SetPersistAffinity(true)
+	raw, err := storage.LoadRuntimeValue(sessionAffinitiesKey)
+	if err != nil || raw == "" {
+		return
+	}
+	var saved map[string]persistedAffinity
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		return
+	}
+	now := NowFunc()
+	mgr := GetAffinityManager()
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	for k, p := range saved {
+		if p.ExpiresAt.After(now) {
+			mgr.entries[k] = affinityRecord{
+				accountID: p.AccountID,
+				expiresAt: p.ExpiresAt,
+			}
+		}
+	}
+}
 
 type affinityRecord struct {
 	accountID string
@@ -148,6 +193,40 @@ func (m *AffinityManager) Clear() {
 	m.mu.Lock()
 	m.entries = make(map[string]affinityRecord)
 	m.mu.Unlock()
+}
+
+// SaveAffinities writes outside m.mu because ReserveInFlight holds the DB write lock while taking m.mu.
+func SaveAffinities() {
+	persistAffinityMu.Lock()
+	enabled := persistAffinity
+	persistAffinityMu.Unlock()
+	if !enabled {
+		return
+	}
+	mgr := GetAffinityManager()
+	now := NowFunc()
+	mgr.mu.RLock()
+	out := make(map[string]persistedAffinity)
+	for k, rec := range mgr.entries {
+		if rec.expiresAt.After(now) {
+			out[k] = persistedAffinity{
+				AccountID: rec.accountID,
+				ExpiresAt: rec.expiresAt,
+			}
+		}
+	}
+	mgr.mu.RUnlock()
+
+	var value string
+	if len(out) > 0 {
+		b, err := json.Marshal(out)
+		if err == nil {
+			value = string(b)
+		}
+	}
+	if err := storage.SaveRuntimeValue(sessionAffinitiesKey, value); err != nil {
+		logMessage("PROXY WARN", fmt.Sprintf("failed to save session affinities: %v", err))
+	}
 }
 
 // ApplyAffinity reorders candidates so that a healthy affinity-bound account is placed first.

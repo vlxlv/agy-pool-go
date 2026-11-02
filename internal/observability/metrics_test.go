@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"strings"
 	"sync"
 	"testing"
 )
@@ -197,4 +198,25 @@ func TestInFlightTracking_ConcurrentLifecycle(t *testing.T) {
 		t.Errorf("expected at least %d change callback calls, got %d", count*2, changeCalls)
 	}
 	changeMu.Unlock()
+}
+
+func TestFormatPrometheusMetrics(t *testing.T) {
+	Reset()
+	RecordGenerationRequest()
+	RecordGenerationSuccess()
+	RecordFailoverAttempt()
+
+	out := FormatPrometheusMetrics()
+	if !strings.Contains(out, "agy_generation_requests_total 1") {
+		t.Fatalf("expected agy_generation_requests_total 1 in prometheus output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "agy_generation_success_total 1") {
+		t.Fatalf("expected agy_generation_success_total 1 in prometheus output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "agy_failover_attempts_total 1") {
+		t.Fatalf("expected agy_failover_attempts_total 1 in prometheus output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "agy_inflight_generations 0") {
+		t.Fatalf("expected agy_inflight_generations 0 in prometheus output, got:\n%s", out)
+	}
 }

@@ -3,9 +3,12 @@ package proxy
 import (
 	"fmt"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
@@ -334,5 +337,117 @@ func TestInspectRequestModelAndSessionKey(t *testing.T) {
 	}
 	if model, key := inspectRequest(req, []byte(`{not json`)); model != "" || key != "" {
 		t.Fatalf("malformed: got (%q, %q), want empty", model, key)
+	}
+}
+
+func TestAffinityManager_PersistenceRoundtrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.ConfigureStateDir(tmpDir); err != nil {
+		t.Fatalf("failed to configure state dir: %v", err)
+	}
+	t.Cleanup(func() {
+		SetPersistAffinity(false)
+		GetAffinityManager().Clear()
+		config.ResetDataDir()
+	})
+
+	SetPersistAffinity(true)
+	mgr := GetAffinityManager()
+	mgr.Clear()
+
+	now := time.Now()
+	// 1. Set active and unexpired bindings
+	mgr.Set("conv-1\x00gemini-2.5-pro", "acc-pro", now)
+	mgr.Set("conv-2\x00gemini-2.5-flash", "acc-flash", now)
+	SaveAffinities()
+
+	// Verify persistence in runtime_global
+	val, err := storage.LoadRuntimeValue(sessionAffinitiesKey)
+	if err != nil {
+		t.Fatalf("LoadRuntimeValue failed: %v", err)
+	}
+	if !strings.Contains(val, "acc-pro") || !strings.Contains(val, "acc-flash") {
+		t.Fatalf("expected saved affinities to contain acc-pro and acc-flash, got %s", val)
+	}
+
+	// 2. Simulate daemon restart: clear in-memory map and reload
+	GetAffinityManager().Clear()
+
+	if _, ok := mgr.Get("conv-1\x00gemini-2.5-pro", now); ok {
+		t.Fatal("expected binding to be absent before reload")
+	}
+	if _, ok := mgr.Get("conv-2\x00gemini-2.5-flash", now); ok {
+		t.Fatal("expected binding to be absent before reload")
+	}
+
+	LoadAffinities()
+
+	boundID1, ok1 := mgr.Get("conv-1\x00gemini-2.5-pro", now)
+	if !ok1 || boundID1 != "acc-pro" {
+		t.Fatalf("expected restored binding acc-pro, got (%s, %v)", boundID1, ok1)
+	}
+	boundID2, ok2 := mgr.Get("conv-2\x00gemini-2.5-flash", now)
+	if !ok2 || boundID2 != "acc-flash" {
+		t.Fatalf("expected restored binding acc-flash, got (%s, %v)", boundID2, ok2)
+	}
+}
+
+func TestAffinityPersistenceDoesNotDeadlockWithReserve(t *testing.T) {
+	setupIsolatedTestDir(t)
+	SetPersistAffinity(true)
+	defer SetPersistAffinity(false)
+
+	pool := &storage.Pool{
+		Accounts: []*storage.Account{
+			{ID: "acc_1", Email: "acc1@example.com"},
+			{ID: "acc_2", Email: "acc2@example.com"},
+		},
+	}
+	if err := storage.SavePool(pool); err != nil {
+		t.Fatalf("failed to save pool: %v", err)
+	}
+
+	m := GetAffinityManager()
+	m.Clear()
+	defer m.Clear()
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Goroutine 1: loops 500x m.Set and calls SaveAffinities() every 10 iterations
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				m.Set(fmt.Sprintf("s%d", i%50), "acc_1", time.Now())
+				if i%10 == 0 {
+					SaveAffinities()
+				}
+			}
+		}()
+
+		// Goroutine 2: loops 500x storage.ReserveInFlight
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				_, release, err := storage.ReserveInFlight(func(map[string]int64) string {
+					m.ApplyAffinity(pool.Accounts, "s1", time.Now())
+					return "acc_1"
+				})
+				if err == nil && release != nil {
+					release()
+				}
+			}
+		}()
+
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("deadlock: TestAffinityPersistenceDoesNotDeadlockWithReserve did not finish within 20s")
 	}
 }

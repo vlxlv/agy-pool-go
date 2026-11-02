@@ -13,15 +13,25 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vlxlv/agy-pool-go/internal/auth"
 	"github.com/vlxlv/agy-pool-go/internal/config"
 	"github.com/vlxlv/agy-pool-go/internal/observability"
 	"github.com/vlxlv/agy-pool-go/internal/proxy"
 	"github.com/vlxlv/agy-pool-go/internal/quota"
+	"github.com/vlxlv/agy-pool-go/internal/scheduler"
 	"github.com/vlxlv/agy-pool-go/internal/storage"
 )
 
 // QuotaRefresher can be set by callers to perform background quota refreshes.
 var QuotaRefresher func(account *storage.Account) = proxy.QuotaRefresher
+
+const tokenPreRefreshWindow = 10 * time.Minute
+
+// TokenPreRefresher can be set by callers to perform background token refreshes.
+var TokenPreRefresher func(account *storage.Account) error = func(account *storage.Account) error {
+	_, err := auth.RefreshTokenWithin(account, tokenPreRefreshWindow)
+	return err
+}
 
 var wireLogRotator sync.Once
 
@@ -92,6 +102,8 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 
 	// Restore per-model pauses so a restart does not resend a paused model to its account.
 	proxy.LoadModelCooldowns()
+	// Restore active session affinities so a daemon restart preserves prompt cache bindings.
+	proxy.LoadAffinities()
 	// Run rate-limited log rotation on requests handled by the daemon. Once, because tests run several
 	// daemons in one process and the hook is a package global.
 	wireLogRotator.Do(func() { proxy.LogRotator = func() { MaybeRotateLog() } })
@@ -181,11 +193,18 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 							QuotaRefresher(acc)
 						}
 					}
+					// Proactively refresh tokens expiring within 10 minutes to eliminate cold-start P99 latency spikes.
+					if acc.RefreshToken != "" && !scheduler.IsRestricted(acc) && auth.TokenExpiringSoon(acc, tokenPreRefreshWindow) {
+						if TokenPreRefresher != nil {
+							_ = TokenPreRefresher(acc)
+						}
+					}
 				}
 			}
 			if sdb, err := storage.GetStateDB(); err == nil {
 				_ = sdb.CheckpointPassive()
 			}
+			proxy.SaveAffinities()
 		}
 		// Sweep once at startup so cold-start traffic is not routed on unknown quota for a whole interval.
 		sweep()
@@ -240,6 +259,7 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		_ = server.Shutdown(shutdownCtx)
+		proxy.SaveAffinities()
 		<-refresherDone
 		<-statsWriter.Done()
 		return nil

@@ -71,9 +71,11 @@ func GetClientSecret() string {
 	return DefaultClientSecret
 }
 
+const DefaultTokenURL = "https://oauth2.googleapis.com/token"
+
 // Configurable hooks for testing.
 var (
-	TokenURL   = "https://oauth2.googleapis.com/token"
+	TokenURL   = DefaultTokenURL
 	NowFunc    = time.Now
 	HTTPClient = &http.Client{Timeout: 10 * time.Second}
 )
@@ -224,21 +226,38 @@ func safeProviderReason(body []byte) string {
 	}
 }
 
-func RefreshToken(account *storage.Account, forceOpt ...bool) (string, error) {
-	if account == nil {
-		return "", errors.New("nil account")
+// TokenExpiringSoon reports whether the account's token is missing, expired, or will expire within d.
+func TokenExpiringSoon(account *storage.Account, d time.Duration) bool {
+	if account == nil || account.AccessToken == "" || account.TokenExpiry == nil {
+		return true
 	}
+	nowUnix := float64(NowFunc().Unix())
+	return (*account.TokenExpiry - nowUnix) < d.Seconds()
+}
 
+// RefreshTokenWithin refreshes the token unless it stays valid for at least d; the check repeats under the refresh lock so concurrent refreshers do not duplicate work.
+func RefreshTokenWithin(account *storage.Account, d time.Duration) (string, error) {
+	return refreshToken(account, false, d.Seconds())
+}
+
+func RefreshToken(account *storage.Account, forceOpt ...bool) (string, error) {
 	force := false
 	if len(forceOpt) > 0 {
 		force = forceOpt[0]
+	}
+	return refreshToken(account, force, 120)
+}
+
+func refreshToken(account *storage.Account, force bool, skew float64) (string, error) {
+	if account == nil {
+		return "", errors.New("nil account")
 	}
 
 	now := NowFunc()
 	nowUnix := float64(now.Unix())
 
-	// If valid for at least another 2 minutes and not forced, return existing access_token
-	if !force && account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-nowUnix > 120) {
+	// If valid for at least skew seconds and not forced, return existing access_token
+	if !force && account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-nowUnix > skew) {
 		return account.AccessToken, nil
 	}
 
@@ -288,7 +307,7 @@ func RefreshToken(account *storage.Account, forceOpt ...bool) (string, error) {
 
 		currentNow := NowFunc()
 		currentNowUnix := float64(currentNow.Unix())
-		if !force && account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-currentNowUnix > 120) {
+		if !force && account.AccessToken != "" && account.TokenExpiry != nil && (*account.TokenExpiry-currentNowUnix > skew) {
 			refreshedToken = account.AccessToken
 			return nil
 		}
@@ -306,6 +325,10 @@ func RefreshToken(account *storage.Account, forceOpt ...bool) (string, error) {
 		}
 
 		observability.RecordAuthRefreshAttempt()
+		if config.IsTestMode() && TokenURL == DefaultTokenURL {
+			observability.RecordAuthRefreshFailure()
+			return errors.New("[FAIL-CLOSED TEST GUARD] refusing external token refresh in test mode without mock backend")
+		}
 		resp, err := HTTPClient.PostForm(TokenURL, form)
 		if err != nil {
 			observability.RecordAuthRefreshFailure()

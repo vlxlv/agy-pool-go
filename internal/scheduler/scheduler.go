@@ -473,14 +473,10 @@ func GetSchedulerSnapshot() (*storage.Pool, error) {
 	return storage.LoadPool()
 }
 
-// RotateTopTier takes ordered candidates and rotates accounts within the top health tier by cursor.
-// It is applied to new sessions to spread them round-robin across equally healthy accounts. The group
-// uses smart's cruising key (health tier lowered by in-flight load) and stops at the first account smart
-// would not treat as a healthy peer: cooling down, depleted, reserve, or over weekly pace. Nothing is
-// rotated while the first account is harvesting an expiring 5H window, so that quota still gets used.
-func RotateTopTier(candidates []*storage.Account, cursor uint64, now float64) []*storage.Account {
-	if len(candidates) <= 1 {
-		return candidates
+// TopTierCount computes how many leading candidates share the top health tier.
+func TopTierCount(candidates []*storage.Account, now float64) int {
+	if len(candidates) == 0 {
+		return 0
 	}
 	score := func(acc *storage.Account) (int, bool) {
 		if acc == nil || IsRestricted(acc) || (acc.RateLimitedUntil != nil && *acc.RateLimitedUntil > now) || OverWeeklyPace(acc, now) {
@@ -494,10 +490,10 @@ func RotateTopTier(candidates []*storage.Account, cursor uint64, now float64) []
 	}
 	top, ok := score(candidates[0])
 	if !ok {
-		return candidates
+		return 0
 	}
 	if _, harvest := SmartHarvestCandidate(quota.ComputeCapacityState(candidates[0], now), time.Unix(int64(now), 0)); harvest {
-		return candidates
+		return 1
 	}
 
 	topCount := 1
@@ -507,6 +503,19 @@ func RotateTopTier(candidates []*storage.Account, cursor uint64, now float64) []
 		}
 		topCount++
 	}
+	return topCount
+}
+
+// RotateTopTier takes ordered candidates and rotates accounts within the top health tier by cursor.
+// It is applied to new sessions to spread them round-robin across equally healthy accounts. The group
+// uses smart's cruising key (health tier lowered by in-flight load) and stops at the first account smart
+// would not treat as a healthy peer: cooling down, depleted, reserve, or over weekly pace. Nothing is
+// rotated while the first account is harvesting an expiring 5H window, so that quota still gets used.
+func RotateTopTier(candidates []*storage.Account, cursor uint64, now float64) []*storage.Account {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	topCount := TopTierCount(candidates, now)
 	if topCount <= 1 {
 		return candidates
 	}

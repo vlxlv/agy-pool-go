@@ -554,6 +554,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		switch r.URL.Path {
+		case "/metrics", "/metrics/":
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(observability.FormatPrometheusMetrics()))
+			return
+		case "/healthz", "/healthz/":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+	}
+
 	path := r.URL.RequestURI()
 	if path == "" {
 		path = "/"
@@ -632,6 +647,13 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			// After affinity, so a conversation bound to an account with no capacity for its model moves on.
 			candidates, modelExcluded = ExcludeModelCooldowns(candidates, model, NowFunc())
+			if strategy == config.StrategySmart {
+				if affinityStatus != "hit" {
+					candidates = SmoothModelRate(candidates, model, NowFunc())
+				} else if len(candidates) > 2 {
+					candidates = append([]*storage.Account{candidates[0]}, SmoothModelRate(candidates[1:], model, NowFunc())...)
+				}
+			}
 			if affinityStatus == "new" && GetAffinityManager().HeldByLoad(candidates, sessionKey, NowFunc()) {
 				affinityStatus = "spill"
 			}
@@ -768,6 +790,9 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		var reservation func()
 		if acc.ID == reservedID {
 			reservation, reservedID = reservedDone, ""
+		}
+		if isGeneration && acc != nil && model != "" {
+			RecordModelDispatch(acc.ID, model, NowFunc())
 		}
 		outcome := h.dispatchAccount(committer, r, path, body, model, isGeneration, isSSE, acc, clientUA, attempt, strategy, currentAffinity, selectionAuditCtx, reservation)
 		if acc.ID == pendingClaimedID {

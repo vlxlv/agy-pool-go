@@ -170,6 +170,31 @@ func TestRefreshToken_Cached(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenWithin(t *testing.T) {
+	setupIsolatedTestDir(t)
+
+	now := time.Now()
+	NowFunc = func() time.Time { return now }
+	defer func() { NowFunc = time.Now }()
+
+	expiry := float64(now.Unix() + 300) // 5 minutes remaining (> 120s, but < 10m)
+	acc := &storage.Account{
+		ID:          "acc_1",
+		AccessToken: "cached-token-123",
+		TokenExpiry: &expiry,
+	}
+
+	tok, err := RefreshToken(acc)
+	if err != nil || tok != "cached-token-123" {
+		t.Fatalf("expected cached token, got %q, %v", tok, err)
+	}
+
+	_, err = RefreshTokenWithin(acc, 10*time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "Missing refresh_token") {
+		t.Fatalf("expected missing refresh token error when skew 10m exceeded, got %v", err)
+	}
+}
+
 func TestRefreshToken_MissingRefreshToken(t *testing.T) {
 	setupIsolatedTestDir(t)
 
@@ -526,5 +551,35 @@ func TestRefreshToken_RotatedTokenPreserved(t *testing.T) {
 	}
 	if loaded.Accounts[0].RefreshToken != "brand-new-rotated-rf-999" {
 		t.Fatalf("rotated refresh token was not preserved: got %s", loaded.Accounts[0].RefreshToken)
+	}
+}
+
+func TestTokenExpiringSoon(t *testing.T) {
+	now := float64(time.Now().Unix())
+
+	if !TokenExpiringSoon(nil, 10*time.Minute) {
+		t.Fatal("expected nil account to be expiring soon")
+	}
+
+	noToken := &storage.Account{ID: "no_tok"}
+	if !TokenExpiringSoon(noToken, 10*time.Minute) {
+		t.Fatal("expected account without access token to be expiring soon")
+	}
+
+	noExp := &storage.Account{ID: "no_exp", AccessToken: "at"}
+	if !TokenExpiringSoon(noExp, 10*time.Minute) {
+		t.Fatal("expected account without token expiry to be expiring soon")
+	}
+
+	soon := now + 300 // 5 minutes left
+	accSoon := &storage.Account{ID: "soon", AccessToken: "at", TokenExpiry: &soon}
+	if !TokenExpiringSoon(accSoon, 10*time.Minute) {
+		t.Fatal("expected account with 5m left to be expiring within 10m")
+	}
+
+	plenty := now + 3600 // 60 minutes left
+	accPlenty := &storage.Account{ID: "plenty", AccessToken: "at", TokenExpiry: &plenty}
+	if TokenExpiringSoon(accPlenty, 10*time.Minute) {
+		t.Fatal("expected account with 60m left NOT to be expiring within 10m")
 	}
 }
