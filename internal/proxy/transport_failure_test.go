@@ -72,8 +72,6 @@ func TestTransportFailure_EOFBeforeHeaders_NoReplay(t *testing.T) {
 			}
 			atomic.AddInt32(&physicalAttempts, 1)
 			// Read a small piece of request and close immediately before sending any headers
-			buf := make([]byte, 128)
-			_, _ = conn.Read(buf)
 			_ = conn.Close()
 		}
 	}()
@@ -161,6 +159,8 @@ func TestTransportFailure_BrokenPipe_NoReplay(t *testing.T) {
 				return
 			}
 			atomic.AddInt32(&physicalAttempts, 1)
+			buf := make([]byte, 128)
+			_, _ = conn.Read(buf)
 			if tcpConn, ok := conn.(*net.TCPConn); ok {
 				_ = tcpConn.SetLinger(0)
 			}
@@ -222,11 +222,12 @@ func TestTransportFailure_TLSFailure_NoReplay(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	resp := rec.Result()
 
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 Bad Gateway", resp.StatusCode)
+	// Pre-connect TLS failure fails over across both accounts; when all fail, 503 is returned.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 Service Unavailable", resp.StatusCode)
 	}
-	if count := atomic.LoadInt32(&physicalAttempts); count != 1 {
-		t.Fatalf("expected exactly 1 physical attempt on TLS failure, got %d", count)
+	if count := atomic.LoadInt32(&physicalAttempts); count != 2 {
+		t.Fatalf("expected 2 physical attempts on TLS failure failover, got %d", count)
 	}
 }
 

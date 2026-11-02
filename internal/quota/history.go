@@ -16,9 +16,11 @@ import (
 // lines of one account whose reset times did not change.
 const QuotaHistoryFile = "quota-history.jsonl"
 
+var maxQuotaHistoryBytes int64 = 5 << 20
+
 // appendQuotaHistory records a quota-summary snapshot when it differs from the previous one.
-// Best effort: a failed write must never fail the refresh.
-// shortcut: the file grows unbounded (~250 KB/day per busy account); add rotation if kept for months.
+// Best effort: a failed write must never fail the refresh. The log is capped at maxQuotaHistoryBytes
+// and rotated to .1 when full.
 func appendQuotaHistory(accountID string, prev, cur *storage.QuotaState) {
 	if cur == nil || cur.Gemini5H == nil || cur.GeminiWeekly == nil || cur.Gemini5H.Fraction == nil || cur.GeminiWeekly.Fraction == nil {
 		return
@@ -37,7 +39,16 @@ func appendQuotaHistory(accountID string, prev, cur *storage.QuotaState) {
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(config.GetDataDir(), QuotaHistoryFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	path := filepath.Join(config.GetDataDir(), QuotaHistoryFile)
+	if fi, err := os.Stat(path); err == nil && fi.Size() >= maxQuotaHistoryBytes {
+		_ = storage.WithFileLock(path+".lock", true, func() error {
+			if curFi, err := os.Stat(path); err == nil && curFi.Size() >= maxQuotaHistoryBytes {
+				return os.Rename(path, path+".1")
+			}
+			return nil
+		})
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}

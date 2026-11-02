@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -771,4 +772,135 @@ func TestRecordQuotaError_UsesBodyResetWhenNoRetryAfter(t *testing.T) {
 	if quota.ParseQuotaResetFromBody([]byte("not json"), time.Now()) != nil {
 		t.Fatalf("non-JSON body must yield nil")
 	}
+}
+
+type testRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestFailover_TransportPreConnectAndAfterConnect(t *testing.T) {
+	t.Run("pre-connect", func(t *testing.T) {
+		setupIsolatedTestDir(t)
+		resetProviders()
+		defer resetProviders()
+
+		var acc2Hits int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&acc2Hits, 1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"result":"ok"}`))
+		}))
+		defer upstream.Close()
+
+		u, _ := url.Parse(upstream.URL)
+		BackendHostProvider = func() string { return u.Host }
+		BackendURLProvider = func() string { return upstream.URL }
+		TokenRefresher = func(account *storage.Account) (string, error) {
+			return "token-" + account.ID, nil
+		}
+
+		pool := storage.NewEmptyPool()
+		pool.Accounts = []*storage.Account{
+			{ID: "acc_1", Email: "1@example.com"},
+			{ID: "acc_2", Email: "2@example.com"},
+		}
+		if err := storage.SavePool(pool); err != nil {
+			t.Fatalf("SavePool failed: %v", err)
+		}
+
+		origGenClient := GenerationClient
+		origHTTPClient := HTTPClient
+		t.Cleanup(func() {
+			GenerationClient = origGenClient
+			HTTPClient = origHTTPClient
+		})
+
+		testClient := &http.Client{
+			Transport: testRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if strings.Contains(req.Header.Get("Authorization"), "acc_1") {
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+				}
+				return http.DefaultTransport.RoundTrip(req)
+			}),
+		}
+		GenerationClient = testClient
+		HTTPClient = testClient
+
+		handler := NewHandler()
+		req := httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader("{}"))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+		}
+		if got := atomic.LoadInt32(&acc2Hits); got != 1 {
+			t.Fatalf("acc_2 hits = %d, want 1", got)
+		}
+	})
+
+	t.Run("after connect", func(t *testing.T) {
+		setupIsolatedTestDir(t)
+		resetProviders()
+		defer resetProviders()
+
+		var acc2Hits int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&acc2Hits, 1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"result":"ok"}`))
+		}))
+		defer upstream.Close()
+
+		u, _ := url.Parse(upstream.URL)
+		BackendHostProvider = func() string { return u.Host }
+		BackendURLProvider = func() string { return upstream.URL }
+		TokenRefresher = func(account *storage.Account) (string, error) {
+			return "token-" + account.ID, nil
+		}
+
+		pool := storage.NewEmptyPool()
+		pool.Accounts = []*storage.Account{
+			{ID: "acc_1", Email: "1@example.com"},
+			{ID: "acc_2", Email: "2@example.com"},
+		}
+		if err := storage.SavePool(pool); err != nil {
+			t.Fatalf("SavePool failed: %v", err)
+		}
+
+		origGenClient := GenerationClient
+		origHTTPClient := HTTPClient
+		t.Cleanup(func() {
+			GenerationClient = origGenClient
+			HTTPClient = origHTTPClient
+		})
+
+		testClient := &http.Client{
+			Transport: testRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if strings.Contains(req.Header.Get("Authorization"), "acc_1") {
+					if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && trace.GotConn != nil {
+						trace.GotConn(httptrace.GotConnInfo{})
+					}
+					return nil, errors.New("connection failed after connect")
+				}
+				return http.DefaultTransport.RoundTrip(req)
+			}),
+		}
+		GenerationClient = testClient
+		HTTPClient = testClient
+
+		handler := NewHandler()
+		req := httptest.NewRequest("POST", "/v1/generateContent", strings.NewReader("{}"))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", w.Code, w.Body.String())
+		}
+		if got := atomic.LoadInt32(&acc2Hits); got != 0 {
+			t.Fatalf("acc_2 hits = %d, want 0 (no replay)", got)
+		}
+	})
 }

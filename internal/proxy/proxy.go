@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"sort"
 	"strconv"
@@ -973,6 +974,14 @@ func (h *Handler) dispatchAccount(
 	}
 	upstreamReq.Header = reqHeaders
 
+	var gotConn atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			gotConn.Store(true)
+		},
+	}
+	upstreamReq = upstreamReq.WithContext(httptrace.WithClientTrace(upstreamReq.Context(), trace))
+
 	// CRITICAL AUDIT: Ensure req.GetBody is nil so net/http cannot automatically rewind/retry POST
 	upstreamReq.GetBody = nil
 	if isGeneration {
@@ -995,6 +1004,17 @@ func (h *Handler) dispatchAccount(
 
 		pathBase := filepathBase(path)
 		dispName := accounts.DisplayAccountName(acc)
+		if !gotConn.Load() {
+			// GotConn confirms a connection was opened; without it no bytes reached upstream, making failover safe.
+			logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: failed before connecting (%v); failing over", r.Method, pathBase, dispName, err))
+			notifyAudit(502, "PreConnectTransportFailure")
+			return DispatchOutcome{
+				Action: ActionFailoverNext,
+				Reason: "PreConnectTransportFailure",
+				Err:    err,
+			}
+		}
+
 		logMessage("PROXY EXCEPTION", fmt.Sprintf("%s %s -> %s: %v", r.Method, pathBase, dispName, err))
 		notifyAudit(502, "AmbiguousTransportFailure")
 		observability.RecordNoReplayPrevented()

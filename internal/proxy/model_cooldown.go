@@ -145,10 +145,22 @@ func ClearModelCooldown(accountID, model string) {
 	defer modelCooldownMu.Unlock()
 	key := modelCooldownKey(accountID, model)
 	delete(modelSlowStrikes, key)
-	if _, ok := modelCooldowns[key]; !ok {
+	entry, ok := modelCooldowns[key]
+	if !ok {
 		return // the common case on every fast answer: nothing to clear, so no DB write
 	}
+	wasActive := NowFunc().Before(entry.until)
 	delete(modelCooldowns, key)
+	if wasActive {
+		// A probe succeeding while still paused indicates capacity is back, so unpause all accounts for this model.
+		modelSuffix := modelCooldownKey("", model)
+		for k := range modelCooldowns {
+			if strings.HasSuffix(k, modelSuffix) {
+				delete(modelCooldowns, k)
+				delete(modelSlowStrikes, k)
+			}
+		}
+	}
 	saveModelCooldownsLocked()
 }
 
@@ -190,7 +202,8 @@ func LastGenerationModel() string {
 }
 
 // ExcludeModelCooldowns drops accounts cooling down for model, keeping relative order, and returns how many
-// were dropped. Unlike account-wide cooldowns they are not kept as a last resort: they are not tried at all.
+// were dropped. Paused accounts are not tried, except that when all are paused the one whose pause ends soonest
+// is tried so a model is never shut off for hours by a pool-wide 503 burst.
 func ExcludeModelCooldowns(candidates []*storage.Account, model string, now time.Time) ([]*storage.Account, int) {
 	if model == "" {
 		return candidates, 0
@@ -205,6 +218,23 @@ func ExcludeModelCooldowns(candidates []*storage.Account, model string, now time
 	for _, acc := range candidates {
 		if acc == nil || !now.Before(modelCooldowns[modelCooldownKey(acc.ID, model)].until) {
 			ready = append(ready, acc)
+		}
+	}
+	if len(ready) == 0 {
+		var best *storage.Account
+		var bestUntil time.Time
+		for _, acc := range candidates {
+			if acc == nil {
+				continue
+			}
+			u := modelCooldowns[modelCooldownKey(acc.ID, model)].until
+			if best == nil || u.Before(bestUntil) {
+				best = acc
+				bestUntil = u
+			}
+		}
+		if best != nil {
+			return []*storage.Account{best}, len(candidates) - 1
 		}
 	}
 	return ready, len(candidates) - len(ready)

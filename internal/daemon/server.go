@@ -90,6 +90,8 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 
 	// Restore per-model pauses so a restart does not resend a paused model to its account.
 	proxy.LoadModelCooldowns()
+	// Run rate-limited log rotation on requests handled by the daemon.
+	proxy.LogRotator = func() { MaybeRotateLog() }
 
 	// 2. Open TCP listener
 	addr := fmt.Sprintf("%s:%d", ctxInst.ListenHost, port)
@@ -202,8 +204,10 @@ func RunForeground(ctx context.Context, opts ServerOptions) error {
 	defer observability.SetOnInFlightChange(nil)
 
 	// 6. Create HTTP server
+	// ReadTimeout stays unset because SSE streams are long-lived.
 	server := &http.Server{
-		Handler: handler,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// 7. Signal readiness if requested

@@ -105,9 +105,9 @@ func TestTransportFailure_ConnectionRefused_NoReplay(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	resp := w.Result()
 
-	// Connection refused returns 502 Bad Gateway
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 Bad Gateway", resp.StatusCode)
+	// Connection refused fails over across all accounts; when all fail, 503 is returned.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 Service Unavailable", resp.StatusCode)
 	}
 }
 

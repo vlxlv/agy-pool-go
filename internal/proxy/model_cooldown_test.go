@@ -148,14 +148,14 @@ func testModelCapacityFailover(t *testing.T, run, status int, errBody string) {
 		t.Fatalf("expected acc1 for unaffected model, got %s", got)
 	}
 
-	// 4. Every account paused for the model: refuse without contacting upstream.
+	// 4. Every account paused for the model: probe the one whose pause ends soonest (acc_1).
 	RecordModelCapacityError("acc_2", "busy-model")
 	before1, before2 := atomic.LoadInt32(&acc1Hits), atomic.LoadInt32(&acc2Hits)
 	if w := do("busy-model", "fourth"); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "paused for busy-model") {
 		t.Fatalf("expected 503 naming the paused model, got %d: %s", w.Code, w.Body.String())
 	}
-	if atomic.LoadInt32(&acc1Hits) != before1 || atomic.LoadInt32(&acc2Hits) != before2 {
-		t.Fatal("paused accounts were contacted")
+	if atomic.LoadInt32(&acc1Hits) != before1+1 || atomic.LoadInt32(&acc2Hits) != before2 {
+		t.Fatalf("expected soonest-paused account to be probed: acc1Hits=%d (want %d), acc2Hits=%d (want %d)", atomic.LoadInt32(&acc1Hits), before1+1, atomic.LoadInt32(&acc2Hits), before2)
 	}
 
 	// No account-wide cooldown or quota restriction was recorded.
@@ -315,5 +315,53 @@ func TestModelCooldown_SurvivesRestart(t *testing.T) {
 	restart()
 	if p := ActiveModelPauses(now); p != nil {
 		t.Fatalf("cleared pause came back after restart: %v", p)
+	}
+}
+
+func TestModelCooldown_AllPausedFallbackAndClear(t *testing.T) {
+	resetProviders()
+	defer resetProviders()
+	now := time.Unix(1_800_000_000, 0)
+	NowFunc = func() time.Time { return now }
+
+	a, b, c := &storage.Account{ID: "a"}, &storage.Account{ID: "b"}, &storage.Account{ID: "c"}
+	candidates := []*storage.Account{a, b, c}
+
+	// Pause a, b, c for model "m" with different untils: b ends soonest (now+1h), a next (now+70m), c last (now+80m).
+	NowFunc = func() time.Time { return now }
+	RecordModelCapacityError("b", "m")
+	NowFunc = func() time.Time { return now.Add(10 * time.Minute) }
+	RecordModelCapacityError("a", "m")
+	NowFunc = func() time.Time { return now.Add(20 * time.Minute) }
+	RecordModelCapacityError("c", "m")
+
+	// At time now, all accounts are paused. ExcludeModelCooldowns should return only b with count 2.
+	NowFunc = func() time.Time { return now }
+	got, count := ExcludeModelCooldowns(candidates, "m", now)
+	if len(got) != 1 || got[0].ID != "b" || count != 2 {
+		t.Fatalf("expected [b] with count 2, got %v with count %d", got, count)
+	}
+
+	// ClearModelCooldown on b while its pause is active unpauses all accounts for model "m".
+	ClearModelCooldown("b", "m")
+	got, count = ExcludeModelCooldowns(candidates, "m", now)
+	if len(got) != 3 || count != 0 || got[0].ID != "a" || got[1].ID != "b" || got[2].ID != "c" {
+		t.Fatalf("expected all three accounts with count 0, got %v with count %d", got, count)
+	}
+
+	// Pause a and b again.
+	RecordModelCapacityError("a", "m") // until = now + 1h
+	RecordModelCapacityError("b", "m")
+	RecordModelCapacityError("b", "m") // backoff 2h -> until = now + 2h
+
+	// ClearModelCooldown on an account whose pause already expired does NOT clear others.
+	expiredTime := now.Add(90 * time.Minute)
+	NowFunc = func() time.Time { return expiredTime }
+	ClearModelCooldown("a", "m")
+
+	got, count = ExcludeModelCooldowns(candidates, "m", expiredTime)
+	// a is cleared (and expired), c is unpaused, b is still paused (until now+2h > now+90m)
+	if len(got) != 2 || count != 1 || got[0].ID != "a" || got[1].ID != "c" {
+		t.Fatalf("expected [a, c] with count 1, got %v with count %d", got, count)
 	}
 }
