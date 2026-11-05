@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -630,13 +631,16 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			observability.SetRemoteInFlight(remote)
 			candidates = scheduler.OrderCandidates(pool.Accounts, strategy, pool, now)
 
+			heldByLoad := false
+			affNow := NowFunc()
 			if sessionKey != "" {
 				var matched bool
-				candidates, matched = GetAffinityManager().ApplyAffinity(candidates, sessionKey, NowFunc())
+				candidates, matched = GetAffinityManager().ApplyAffinity(candidates, sessionKey, affNow)
 				if matched {
 					affinityStatus = "hit"
 				} else {
 					affinityStatus = "new"
+					heldByLoad = GetAffinityManager().HeldByLoad(candidates, sessionKey, affNow) // before rotation: same top candidate ApplyAffinity judged
 					// For new sessions under smart strategy, rotate candidates within top health tier
 					// using the round-robin cursor to achieve balanced multi-account session distribution.
 					if strategy == config.StrategySmart {
@@ -654,7 +658,9 @@ func (h *Handler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					candidates = append([]*storage.Account{candidates[0]}, SmoothModelRate(candidates[1:], model, NowFunc())...)
 				}
 			}
-			if affinityStatus == "new" && GetAffinityManager().HeldByLoad(candidates, sessionKey, NowFunc()) {
+			// Held only if the bound account also survived the model cooldown filter; otherwise the conversation moves on.
+			if boundID, ok := GetAffinityManager().Get(sessionKey, affNow); heldByLoad && ok &&
+				slices.ContainsFunc(candidates, func(a *storage.Account) bool { return a != nil && a.ID == boundID }) {
 				affinityStatus = "spill"
 			}
 

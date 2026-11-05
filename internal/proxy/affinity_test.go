@@ -206,6 +206,9 @@ func TestApplyAffinity_BypassedOnHighInFlight(t *testing.T) {
 
 	// 4. Once requests finish and in-flight drops back below threshold, affinity resumes
 	done2()
+	if !mgr.HeldByLoad(candidates, "session-concurrent", now) {
+		t.Fatalf("expected the binding to stay held when a request finishes between ApplyAffinity and HeldByLoad")
+	}
 	done1()
 	reorderedResumed, appliedResumed := mgr.ApplyAffinity(candidates, "session-concurrent", now)
 	if !appliedResumed || reorderedResumed[0].ID != "acc-affinity-busy" {

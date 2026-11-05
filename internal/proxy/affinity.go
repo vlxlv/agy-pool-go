@@ -299,16 +299,12 @@ func shouldYieldAffinityForQuota(boundAcc, topAcc *storage.Account, now time.Tim
 		}
 	}
 
-	// If bound account's floor is low (< 40%) while top candidate has prime headroom (>= 70%)
-	if boundCap.RawFloor < 0.40 && topCap.RawFloor >= 0.70 {
-		return true
-	}
-
 	return false
 }
 
 // HeldByLoad reports whether the session's bound account is among candidates and healthy, so affinity skipped
 // it only for in-flight load: the request spills elsewhere, but the binding and its warm cache should stay.
+// Pass the same candidates and now that ApplyAffinity saw, so both judge the same top candidate.
 func (m *AffinityManager) HeldByLoad(candidates []*storage.Account, sessionKey string, now time.Time) bool {
 	boundID, ok := m.Get(sessionKey, now)
 	if !ok || len(candidates) == 0 {
@@ -319,11 +315,9 @@ func (m *AffinityManager) HeldByLoad(candidates []*storage.Account, sessionKey s
 			if !affinityHealthy(acc, now) {
 				return false
 			}
-			// If affinity yielded due to quota depletion against the top candidate, it is not held by load.
-			if shouldYieldAffinityForQuota(acc, candidates[0], now) {
-				return false
-			}
-			return observability.GetInFlightGeneration(acc.ID) >= MaxAffinityInFlight
+			// Healthy and no quota yield leaves load as ApplyAffinity's only skip reason; re-reading
+			// in-flight here could see a request just finish and drop a binding that was held by load.
+			return !shouldYieldAffinityForQuota(acc, candidates[0], now)
 		}
 	}
 	return false

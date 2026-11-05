@@ -43,8 +43,9 @@ $$\frac{\Delta g5}{\Delta gw} = \frac{C_{weekly}}{C_{5h}} = 3.5 = \frac{7}{2}$$
 ### 根因分析：
 1. **5H 收割模式（Harvest Mode）过度透支周预算**：
    原逻辑中，只要账号 5H 窗口在 90 分钟内重置，且周额度 $\ge 25\%$，就会无条件触发收割，优先将流量引流给该账号。但因为 $1 \times 5H = 28.6\% \times Weekly$，在周预算已经落后于时间进度（OverWeeklyPace）的情况下继续“收割 5H”，加速了周预算的毁灭。
+   *注*：`Backup` 当前周额度 14% 已低于旧门槛 25%，旧逻辑本就不会再收割它；它的周额度是更早被耗掉的，本条防护针对的是周额度仍在 25%–30% 区间或消耗超速的账号。
 2. **会话粘性（Affinity）导致单账号被“薅穿”**：
-   在长上下文、多轮智能体任务（如 `/teamwork /goal /plan`）中，高频生成请求不断刷新 5 分钟的 Affinity TTL。原 `affinityHealthy` 仅在账号跌落至 Reserve 阈值（5H $\le 15\%$, Weekly $\le 10\%$）或 Depleted 时才放弃粘性。这导致单个账号被单个高强度会话连续消耗几千次，池内其他满血账号（如 `Life` 92%）只能干坐着。
+   在长上下文、多轮智能体任务（如 `/teamwork /goal /plan`）中，高频生成请求不断刷新 5 分钟的 Affinity TTL。原 `affinityHealthy` 在账号跌落至 Reserve 阈值（5H $\le 15\%$, Weekly $\le 10\%$）、Depleted、限流或周消耗超速（`OverWeeklyPace`，`Pace7 < -0.30`）时放弃粘性。剩下的缺口是：5H 已经很低、或周额度偏低但尚未超速（例如临近周重置）的账号仍会保持粘性。这可能导致单个账号被单个高强度会话连续消耗几千次，池内其他满血账号（如 `Life` 92%）只能干坐着。
 
 ---
 
@@ -64,11 +65,15 @@ $$\frac{\Delta g5}{\Delta gw} = \frac{C_{weekly}}{C_{5h}} = 3.5 = \frac{7}{2}$$
   * `AffinityMin5HFloor = 0.35`（35% 5H 门槛）
   * `AffinityMinWeeklyFloor = 0.25`（25% 周门槛）
 * **差值决策函数 `shouldYieldAffinityForQuota`**：
-  * 当会话绑定的账号跌入低水位（5H < 35% 或 Weekly < 25%），且池中排在首位的调度候选人处于健康状态（5H $\ge 60\%$ 或 Weekly $\ge 50\%$）时，**主动解除亲和粘性（Affinity Yields）**。
+  * 两条规则，按窗口分别比较，满足任一即**主动解除亲和粘性（Affinity Yields）**：
+    * 绑定账号 5H < 35%，且池中排在首位的候选人 5H $\ge 60\%$；
+    * 绑定账号 Weekly < 25%，且首位候选人 Weekly $\ge 50\%$。
   * **平滑转移**：让请求正常路由至最健康的账号接力；下一个请求即可在健康账号上建立新的会话粘性，旧账号得以休眠恢复。
   * **全池低额度保护**：若全池账号均处于低水位，保留粘性，防止 prompt cache 发生毫无意义的反复颠簸。
 * **修正 `HeldByLoad`**：
   * 明确区分“因并发负载暂避（HeldByLoad）”与“因配额不足主动让权（Quota Yield）”。配额主动让权时不将状态标记为 `spill`，允许在响应成功后即刻重新绑定新账号。
+  * `HeldByLoad` 与 `ApplyAffinity` 使用同一组候选（轮转/冷却过滤之前）和同一时刻判断，保证两者比较的是同一个首位候选人；它不再重新读取 in-flight 计数（`ApplyAffinity` 跳过绑定账号时只剩负载这一个原因），避免请求恰好结束时误丢粘性和热缓存。
+  * 绑定账号若被模型冷却过滤掉，则不算 `spill`，会话照常迁移。
 
 ---
 
