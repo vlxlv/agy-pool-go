@@ -451,3 +451,61 @@ func TestAffinityPersistenceDoesNotDeadlockWithReserve(t *testing.T) {
 		t.Fatal("deadlock: TestAffinityPersistenceDoesNotDeadlockWithReserve did not finish within 20s")
 	}
 }
+
+func TestApplyAffinity_YieldsOnQuotaDepletion(t *testing.T) {
+	mgr := NewAffinityManager(5 * time.Minute)
+	now := time.Now()
+	reset5 := float64(now.Add(4 * time.Hour).Unix())
+	reset7 := float64(now.Add(5 * 24 * time.Hour).Unix())
+
+	makeAcc := func(id string, q5, q7 float64) *storage.Account {
+		return &storage.Account{
+			ID: id,
+			LastQuota: &storage.QuotaState{
+				Gemini5H:     &storage.QuotaWindow{Fraction: &q5, ResetTime: reset5},
+				GeminiWeekly: &storage.QuotaWindow{Fraction: &q7, ResetTime: reset7},
+			},
+		}
+	}
+
+	// Case 1: Bound account 5H quota drops below AffinityMin5HFloor (0.35) while top candidate is healthy (0.90)
+	boundLow5H := makeAcc("acc-low-5h", 0.25, 0.80)
+	healthyTop := makeAcc("acc-healthy-top", 0.90, 0.90)
+	candidates1 := []*storage.Account{healthyTop, boundLow5H}
+
+	mgr.Set("session-low-5h", "acc-low-5h", now)
+	reordered1, matched1 := mgr.ApplyAffinity(candidates1, "session-low-5h", now)
+	if matched1 {
+		t.Fatalf("expected affinity to yield when bound account 5H quota is below 0.35 and top is healthy")
+	}
+	if reordered1[0].ID != "acc-healthy-top" {
+		t.Fatalf("expected top candidate to remain first, got %s", reordered1[0].ID)
+	}
+	if mgr.HeldByLoad(candidates1, "session-low-5h", now) {
+		t.Fatalf("expected HeldByLoad to be false on quota yield so session can migrate")
+	}
+
+	// Case 2: Bound account Weekly quota drops below AffinityMinWeeklyFloor (0.25) while top candidate is healthy (0.85)
+	boundLowWeekly := makeAcc("acc-low-weekly", 0.90, 0.15)
+	candidates2 := []*storage.Account{healthyTop, boundLowWeekly}
+
+	mgr.Set("session-low-weekly", "acc-low-weekly", now)
+	reordered2, matched2 := mgr.ApplyAffinity(candidates2, "session-low-weekly", now)
+	if matched2 {
+		t.Fatalf("expected affinity to yield when bound account Weekly quota is below 0.25 and top is healthy")
+	}
+	if reordered2[0].ID != "acc-healthy-top" {
+		t.Fatalf("expected top candidate to remain first, got %s", reordered2[0].ID)
+	}
+
+	// Case 3: Both accounts are low: no healthier alternative exists in pool -> affinity is preserved
+	bothLowTop := makeAcc("acc-low-top", 0.30, 0.80)
+	bothLowBound := makeAcc("acc-low-bound", 0.25, 0.80)
+	candidates3 := []*storage.Account{bothLowTop, bothLowBound}
+
+	mgr.Set("session-both-low", "acc-low-bound", now)
+	reordered3, matched3 := mgr.ApplyAffinity(candidates3, "session-both-low", now)
+	if !matched3 || reordered3[0].ID != "acc-low-bound" {
+		t.Fatalf("expected affinity to be preserved when whole pool is low (no thrashing), got matched=%v first=%s", matched3, reordered3[0].ID)
+	}
+}

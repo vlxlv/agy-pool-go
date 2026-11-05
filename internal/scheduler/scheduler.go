@@ -92,6 +92,11 @@ const WeeklyPaceSlack = 0.30
 // Ordering and affinity use it; reserve labels and audit still use IsReserveCandidate.
 func OverWeeklyPace(acc *storage.Account, now float64) bool {
 	c := quota.ComputeCapacityState(acc, now)
+	return OverWeeklyPaceCapacity(c)
+}
+
+// OverWeeklyPaceCapacity reports whether a CapacityState indicates over-pace weekly spending.
+func OverWeeklyPaceCapacity(c quota.CapacityState) bool {
 	return c.Q7Known && c.Pace7 != nil && c.Reset7Time != nil && *c.Pace7 < -WeeklyPaceSlack-1e-9 // epsilon keeps q7 >= 0.70 exempt despite float rounding
 }
 
@@ -126,8 +131,9 @@ func EffectiveWorstPace(capState quota.CapacityState) float64 {
 
 // Smart scheduling constants
 const (
-	SmartHarvest5HWindow    = 90 * time.Minute
-	SmartHarvestMinHeadroom = 0.25
+	SmartHarvest5HWindow          = 90 * time.Minute
+	SmartHarvestMinHeadroom       = 0.25
+	SmartHarvestMinWeeklyHeadroom = 0.30
 )
 
 // smartHeadroomTier maps an account's bottleneck headroom to discrete tiers (20% bands).
@@ -161,8 +167,8 @@ func smartHarvestFloor(rem, window time.Duration) float64 {
 
 // SmartHarvestCandidate checks if an account qualifies for harvest mode: an upcoming 5H reset
 // within 90m whose expiring window still has at least smartHarvestFloor headroom, while
-// weekly quota maintains at least 25% reserve. Weekly quota is never harvested as it is a
-// hard stock ceiling for the entire week. Returns (earliestResetTime, true).
+// weekly quota maintains at least 30% headroom and is not over weekly pace. Weekly quota is never
+// harvested as it is a hard stock ceiling for the entire week. Returns (earliestResetTime, true).
 func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (time.Time, bool) {
 	legacy := !capState.Q5Known && !capState.Q7Known
 	if legacy && capState.RawFloor < SmartHarvestMinHeadroom {
@@ -176,8 +182,9 @@ func SmartHarvestCandidate(capState quota.CapacityState, nowTime time.Time) (tim
 	if capState.Reset5Time != nil && !capState.Reset5Time.IsZero() {
 		rem5 := capState.Reset5Time.Sub(nowTime)
 		if rem5 > 0 && rem5 <= SmartHarvest5HWindow &&
+			!OverWeeklyPaceCapacity(capState) &&
 			atLeast(capState.Q5Known, capState.Q5, smartHarvestFloor(rem5, SmartHarvest5HWindow)) &&
-			atLeast(capState.Q7Known, capState.Q7, SmartHarvestMinHeadroom) {
+			atLeast(capState.Q7Known, capState.Q7, SmartHarvestMinWeeklyHeadroom) {
 			return *capState.Reset5Time, true
 		}
 	}

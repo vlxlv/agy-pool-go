@@ -1143,6 +1143,7 @@ func TestSmartHarvestCandidate_DecayingFloor(t *testing.T) {
 		{"5H leftover right before reset is harvested", 0.15, 0.90, in(10 * time.Minute), true},
 		{"5H leftover too early in window is kept", 0.15, 0.90, in(80 * time.Minute), false},
 		{"5H harvest never drains a low weekly window", 0.90, 0.15, in(10 * time.Minute), false},
+		{"5H harvest blocked when weekly headroom below 30%", 0.90, 0.25, in(10 * time.Minute), false},
 		{"5H reset outside harvest window", 0.90, 0.90, in(3 * time.Hour), false},
 	}
 	for _, tc := range cases {
@@ -1154,6 +1155,25 @@ func TestSmartHarvestCandidate_DecayingFloor(t *testing.T) {
 		if _, got := SmartHarvestCandidate(capState, nowTime); got != tc.want {
 			t.Errorf("%s: got harvest=%v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestSmartHarvestCandidate_BlockedOverWeeklyPace(t *testing.T) {
+	nowTime := time.Unix(1789560000, 0) // 2026-09-16T12:00:00Z
+	reset5Soon := nowTime.Add(10 * time.Minute)
+	reset7Far := nowTime.Add(6 * 24 * time.Hour) // 6 days left (r7 ≈ 0.857)
+
+	q5 := 0.90
+	q7 := 0.45 // pace7 = 0.45 - (6/7) ≈ -0.407 < -WeeklyPaceSlack (-0.30)
+	p7 := q7 - (float64(6*24*3600) / float64(7*24*3600))
+	capState := quota.CapacityState{
+		Q5: &q5, Q7: &q7, Q5Known: true, Q7Known: true,
+		Pace7: &p7, Reset5Time: &reset5Soon, Reset7Time: &reset7Far,
+		RawFloor: 0.45,
+	}
+
+	if _, harvest := SmartHarvestCandidate(capState, nowTime); harvest {
+		t.Fatalf("expected account over weekly pace to be blocked from harvest mode, got harvest=true")
 	}
 }
 

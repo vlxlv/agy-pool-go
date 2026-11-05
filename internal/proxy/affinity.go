@@ -25,6 +25,14 @@ const DefaultAffinityTTL = 5 * time.Minute
 // an account can serve before affinity pinning is bypassed to prevent concurrency hot-spots and 429s.
 const MaxAffinityInFlight = 2
 
+// AffinityMin5HFloor is the 5H headroom threshold below which affinity yields if a healthier candidate exists.
+// Prevents a single long conversation from draining an account into reserve or 429 exhaustion.
+const AffinityMin5HFloor = 0.35
+
+// AffinityMinWeeklyFloor is the weekly headroom threshold below which affinity yields if a healthier candidate exists.
+// Protects accounts with depleted weekly stock from being monopolized by session affinity.
+const AffinityMinWeeklyFloor = 0.25
+
 // affinityPruneAt and affinityMaxEntries bound the session map: Set sweeps expired bindings once it
 // reaches affinityPruneAt, and evicts the soonest-expiring binding if active ones still fill affinityMaxEntries.
 const (
@@ -253,6 +261,13 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 		return candidates, targetIdx == 0
 	}
 
+	// Quota-Drop Protection: If the bound account has dropped into low-quota territory
+	// (< 35% 5H or < 25% Weekly) and the top candidate (candidates[0]) is significantly healthier,
+	// yield affinity so the conversation transfers to the healthier account.
+	if shouldYieldAffinityForQuota(candidates[targetIdx], candidates[0], now) {
+		return candidates, false
+	}
+
 	reordered := make([]*storage.Account, 0, len(candidates))
 	reordered = append(reordered, candidates[targetIdx])
 	reordered = append(reordered, candidates[:targetIdx]...)
@@ -260,16 +275,55 @@ func (m *AffinityManager) ApplyAffinity(candidates []*storage.Account, sessionKe
 	return reordered, true
 }
 
+// shouldYieldAffinityForQuota reports whether an affinity-bound account should yield to the top candidate
+// because of quota depletion or a significant health gap between them.
+func shouldYieldAffinityForQuota(boundAcc, topAcc *storage.Account, now time.Time) bool {
+	if boundAcc == nil || topAcc == nil {
+		return false
+	}
+	nowSecs := float64(now.Unix())
+	boundCap := quota.ComputeCapacityState(boundAcc, nowSecs)
+	topCap := quota.ComputeCapacityState(topAcc, nowSecs)
+
+	// If bound account has low 5H headroom (< 35%) while top candidate is healthy (>= 60%)
+	if boundCap.Q5Known && boundCap.Q5 != nil && *boundCap.Q5 < AffinityMin5HFloor {
+		if topCap.Q5Known && topCap.Q5 != nil && *topCap.Q5 >= 0.60 {
+			return true
+		}
+	}
+
+	// If bound account has low weekly headroom (< 25%) while top candidate is healthy (>= 50%)
+	if boundCap.Q7Known && boundCap.Q7 != nil && *boundCap.Q7 < AffinityMinWeeklyFloor {
+		if topCap.Q7Known && topCap.Q7 != nil && *topCap.Q7 >= 0.50 {
+			return true
+		}
+	}
+
+	// If bound account's floor is low (< 40%) while top candidate has prime headroom (>= 70%)
+	if boundCap.RawFloor < 0.40 && topCap.RawFloor >= 0.70 {
+		return true
+	}
+
+	return false
+}
+
 // HeldByLoad reports whether the session's bound account is among candidates and healthy, so affinity skipped
 // it only for in-flight load: the request spills elsewhere, but the binding and its warm cache should stay.
 func (m *AffinityManager) HeldByLoad(candidates []*storage.Account, sessionKey string, now time.Time) bool {
 	boundID, ok := m.Get(sessionKey, now)
-	if !ok {
+	if !ok || len(candidates) == 0 {
 		return false
 	}
 	for _, acc := range candidates {
 		if acc != nil && acc.ID == boundID {
-			return affinityHealthy(acc, now)
+			if !affinityHealthy(acc, now) {
+				return false
+			}
+			// If affinity yielded due to quota depletion against the top candidate, it is not held by load.
+			if shouldYieldAffinityForQuota(acc, candidates[0], now) {
+				return false
+			}
+			return observability.GetInFlightGeneration(acc.ID) >= MaxAffinityInFlight
 		}
 	}
 	return false
