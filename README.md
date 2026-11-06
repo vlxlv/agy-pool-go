@@ -1,5 +1,7 @@
 # agy-pool-go: Antigravity Multi-Account Quota Pool & Reverse Proxy Gateway
 
+> **The Rust rewrite now lives in [agy-pool-rust](https://github.com/vlxlv/agy-pool-rust).** It is a drop-in replacement for this Go binary (same `state.db`, `config.json`, environment variables, CLI and port).
+
 [![CI](https://github.com/vlxlv/agy-pool-go/actions/workflows/ci.yml/badge.svg)](https://github.com/vlxlv/agy-pool-go/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/go-1.26.7-blue.svg)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
